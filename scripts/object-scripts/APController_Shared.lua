@@ -1,0 +1,15 @@
+-- =========================
+-- PB AP CTRL v2.8 (FULL REPLACE)
+-- Fixes vs v2.7:
+--  - adds HARD reset (instant) and uses it for NewGame + TurnStart
+--  - Wait.frames(1) before moving blocked AP to avoid physics desync
+-- Keeps:
+--  - tag-driven AP tokens + probe calibration
+--  - moveAP / spendAP / canSpendAP
+--  - WLB_AP_START_TURN hook
+--  - UI buttons
+-- =========================
+
+-- [Full script provided by user - this is the template]
+-- Note: AP_NAME fallback may differ per controller (e.g., "AP Y", "AP B") 
+-- but script functionality is identical - uses tags for identification

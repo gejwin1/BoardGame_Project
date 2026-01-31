@@ -1,0 +1,187 @@
+<Panel id="root" width="0" height="0" position="0 0" active="true">
+  <!-- ========================================================= -->
+  <!-- VOCATION UI – GLOBAL (paste this file into TTS: Global → UI) -->
+  <!-- ========================================================= -->
+  <!--
+    This is the ONLY place vocation panels live. VocationsController Lua
+    uses UI.setAttribute / UI.getAttribute on these IDs. Do NOT duplicate
+    these panels in the VocationsController object’s UI tab.
+  -->
+  <!-- Single row: 6 vocation cards horizontally -->
+  
+  <!-- Main Overlay Panel - contains all vocation UI panels -->
+  <!-- Height set to 1100 to accommodate summary panel (1050) with some margin -->
+  <Panel id="vocationOverlay" width="1800" height="1100" color="#00000000" position="0,0" rectAlignment="MiddleCenter" active="false">
+    
+    <!-- Vocation Selection Screen: Shows 6 Level 1 vocation cards (no Cancel - player must pick one) -->
+    <Panel id="vocationSelectionPanel" width="1800" height="700" color="#1a1a1a" position="0,0" rectAlignment="MiddleCenter" active="false">
+      
+      <!-- Title -->
+      <Text id="selectionTitle" text="Choose Your Vocation" fontSize="70" color="#ffffff" 
+            position="0,-280" width="1600" height="80" alignment="MiddleCenter" />
+      
+      <!-- Subtitle showing current player (disabled - redundant with title) -->
+      <Text id="selectionSubtitle" text="" fontSize="45" color="#cccccc" 
+            position="0,-220" width="1600" height="50" alignment="MiddleCenter" active="false" />
+
+      <!-- Science points / pool info -->
+      <Text id="selectionSciencePoints" text="Science Points: 0" fontSize="40" color="#cccccc" 
+            position="0,-175" width="1600" height="45" alignment="MiddleCenter" />
+
+      
+      <!-- Vocation Cards - Single Row: 6 cards horizontally -->
+      <!-- Card dimensions: 240x420 (portrait orientation) -->
+      <!-- Spacing: 20px gaps between cards, centered horizontally -->
+      <Panel id="vocationButtonsContainer" width="1700" height="450" position="0,50" rectAlignment="MiddleCenter">
+        <!-- All 6 cards in one row, evenly spaced -->
+        <Button id="btnPublicServant" text="" 
+                position="-625,0" width="240" height="420" 
+                onClick="UI_SelectVocation" 
+                image="https://steamusercontent-a.akamaihd.net/ugc/10392559236544991035/C6BAE73B4680AEA8725F7535B8B22722049C9F2C/" />
+        
+        <Button id="btnCelebrity" text="" 
+                position="-375,0" width="240" height="420" 
+                onClick="UI_SelectVocation" 
+                image="https://steamusercontent-a.akamaihd.net/ugc/9313197015274600451/3A5C87686AFB80F5066B04C0E49FD921678122AD/" />
+        
+        <Button id="btnSocialWorker" text="" 
+                position="-125,0" width="240" height="420" 
+                onClick="UI_SelectVocation" 
+                image="https://steamusercontent-a.akamaihd.net/ugc/14603143457404129563/3BD34A2BFB5BBE8439CD618BC71B897622B06723/" />
+        
+        <Button id="btnGangster" text="" 
+                position="125,0" width="240" height="420" 
+                onClick="UI_SelectVocation" 
+                image="https://steamusercontent-a.akamaihd.net/ugc/11270667329628070372/E9ABCD6EF148388B0550D54DB5C9C87639660566/" />
+        
+        <Button id="btnEntrepreneur" text="" 
+                position="375,0" width="240" height="420" 
+                onClick="UI_SelectVocation" 
+                image="https://steamusercontent-a.akamaihd.net/ugc/15721746676026378582/E9AE12F01BF052F5C565A331E6164B1E5F81AF57/" />
+        
+        <Button id="btnNGOWorker" text="" 
+                position="625,0" width="240" height="420" 
+                onClick="UI_SelectVocation" 
+                image="https://steamusercontent-a.akamaihd.net/ugc/15381771409091853253/7AD7278AC335EFA32E77BAF5B22A323F373A36D1/" />
+      </Panel>
+      
+      <!-- Info text -->
+      <Text id="selectionInfo" text="Click a vocation card to view details" fontSize="35" color="#aaaaaa" 
+            position="0,300" width="1600" height="40" alignment="MiddleCenter" />
+    </Panel>
+    
+    <!-- Vocation Summary Screen: Large explanation picture + elegant Back/Confirm only (no title below) -->
+    <Panel id="vocationSummaryPanel" width="1800" height="1050" color="#1a1a1a" position="0,0" rectAlignment="MiddleCenter" active="false" raycastTarget="true">
+      <!-- Title (hidden when showing explanation image - set active false in Lua) -->
+      <Text id="summaryTitle" text="[VOCATION_NAME]" fontSize="90" color="#ffffff" 
+            position="0,-480" width="1600" height="120" alignment="MiddleCenter" active="false" />
+      
+      <!-- Explanation picture – large, with space below so Back/Confirm don't overlap -->
+      <Image id="summaryVocationImage" 
+             position="0,-30" 
+             width="1600" 
+             height="800" 
+             active="false" />
+      
+      <!-- Summary Content Area -->
+      <Panel id="summaryContent" width="1600" height="600" position="0,0" color="#2a2a2a">
+        <!-- Level 1 Info -->
+        <Text id="level1Title" text="Level 1: [JOB_TITLE]" fontSize="60" color="#ffffff" 
+              position="0,-250" width="1500" height="80" alignment="MiddleCenter" />
+        
+        <Text id="level1Salary" text="Salary: [SALARY] VIN per AP" fontSize="45" color="#cccccc" 
+              position="0,-150" width="1500" height="60" alignment="MiddleCenter" />
+        
+        <!-- Promotion Requirements -->
+        <Text id="promoTitle" text="Promotion to Level 2:" fontSize="50" color="#ffffaa" 
+              position="0,-50" width="1500" height="60" alignment="MiddleCenter" />
+        
+        <Text id="promoReqs" text="Knowledge: [K] | Skills: [S] | Experience: [EXP] years" fontSize="40" color="#cccccc" 
+              position="0,50" width="1500" height="50" alignment="MiddleCenter" />
+        
+        <!-- Level 2 Info (preview) -->
+        <Text id="level2Title" text="Level 2: [JOB_TITLE_2]" fontSize="50" color="#aaaaaa" 
+              position="0,150" width="1500" height="60" alignment="MiddleCenter" />
+        
+        <Text id="level2Salary" text="Salary: [SALARY_2] VIN per AP" fontSize="40" color="#999999" 
+              position="0,220" width="1500" height="50" alignment="MiddleCenter" />
+      </Panel>
+      
+      <!-- Action Buttons – below explanation image (selection flow only: Back/Confirm) -->
+      <Panel id="actionButtons" width="1000" height="100" position="0,415">
+        <Button id="btnBack" text="← Back" fontSize="44" 
+                position="-200,0" width="280" height="90" 
+                onClick="UI_BackToSelection" color="#4a4a4a" fontColor="#e8e8e8" />
+        
+        <Button id="btnConfirm" text="Confirm" fontSize="44" 
+                position="200,0" width="280" height="90" 
+                onClick="UI_ConfirmVocation" color="#2d6a4f" fontColor="#ffffff" />
+      </Panel>
+      
+      <!-- Exit button – only for "Show explanation" (read-only); hides UI so players can go back to playing -->
+      <Button id="btnExit" text="Exit" fontSize="44" 
+              position="0,415" width="280" height="90" 
+              onClick="UI_CloseVocationExplanation" color="#5a5a5a" fontColor="#ffffff" active="false" />
+      
+      <!-- Warning if already taken -->
+      <Text id="takenWarning" text="⚠ This vocation is already taken!" fontSize="50" color="#ff4444" 
+            position="0,480" width="1600" height="60" alignment="MiddleCenter" active="false" />
+    </Panel>
+    
+    <!-- Science Points Allocation Screen: Distribute bonus pool into Knowledge/Skills -->
+    <!-- NOTE: This panel is included but not yet fully integrated. It's ready for future use. -->
+    <Panel id="sciencePointsPanel" width="1800" height="1050" color="#1a1a1a" position="0,0" rectAlignment="MiddleCenter" active="false">
+      <!-- Title -->
+      <Text id="allocTitle" text="Distribute Science Points" fontSize="70" color="#ffffff" 
+            position="0,-280" width="1600" height="100" alignment="MiddleCenter" />
+      
+      <!-- Player name -->
+      <Text id="allocPlayer" text="Player: [COLOR]" fontSize="50" color="#cccccc" 
+            position="0,-200" width="1600" height="60" alignment="MiddleCenter" />
+      
+      <!-- Remaining points display -->
+      <Text id="remainingPoints" text="Remaining: [POOL]" fontSize="60" color="#ffffaa" 
+            position="0,-100" width="1600" height="80" alignment="MiddleCenter" />
+      
+      <!-- Knowledge Section -->
+      <Panel id="knowledgeSection" width="400" height="200" position="-200,50">
+        <Text text="Knowledge" fontSize="50" color="#ffffff" 
+              position="0,-60" width="350" height="60" alignment="MiddleCenter" />
+        
+        <Button id="btnKPlus" text="+" fontSize="70" 
+                position="-80,20" width="100" height="100" 
+                onClick="UI_AllocScience" color="#4a90e2" />
+        
+        <Text id="knowledgeValue" text="[K]" fontSize="70" color="#ffffff" 
+              position="0,20" width="100" height="100" alignment="MiddleCenter" />
+        
+        <Button id="btnKMinus" text="-" fontSize="70" 
+                position="80,20" width="100" height="100" 
+                onClick="UI_AllocScience" color="#666666" />
+      </Panel>
+      
+      <!-- Skills Section -->
+      <Panel id="skillsSection" width="400" height="200" position="200,50">
+        <Text text="Skills" fontSize="50" color="#ffffff" 
+              position="0,-60" width="350" height="60" alignment="MiddleCenter" />
+        
+        <Button id="btnSPlus" text="+" fontSize="70" 
+                position="-80,20" width="100" height="100" 
+                onClick="UI_AllocScience" color="#4a90e2" />
+        
+        <Text id="skillsValue" text="[S]" fontSize="70" color="#ffffff" 
+              position="0,20" width="100" height="100" alignment="MiddleCenter" />
+        
+        <Button id="btnSMinus" text="-" fontSize="70" 
+                position="80,20" width="100" height="100" 
+                onClick="UI_AllocScience" color="#666666" />
+      </Panel>
+      
+      <!-- Continue Button (enabled only when pool == 0) -->
+      <Button id="btnContinue" text="Continue →" fontSize="60" 
+              position="0,250" width="400" height="120" 
+              onClick="UI_ContinueToVocation" color="#4a90e2" 
+              interactable="false" />
+    </Panel>
+  </Panel>
+</Panel>

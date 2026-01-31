@@ -1,0 +1,16 @@
+<Panel id="root" width="0" height="0" position="0 0" active="false">
+  <!-- ========================================================= -->
+  <!-- VOCATIONS CONTROLLER – Object UI (VocationsController → UI tab) -->
+  <!-- ========================================================= -->
+  <!--
+    INTENDED USE: Leave this empty/disabled.
+    All vocation panels live in GLOBAL UI (VocationsUI_Global.xml in Global → UI).
+
+    Global UI contains: vocationOverlay, vocationSelectionPanel,
+    vocationSummaryPanel, sciencePointsPanel. The Lua script expects those
+    in Global, not here.
+
+    If you add anything here, use different IDs (e.g. objDebugPanel) so they
+    don’t conflict with Global UI.
+  -->
+</Panel>
