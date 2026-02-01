@@ -112,9 +112,22 @@ local function setEarnings(c, v)
 end
 
 -- Compatibility: one API `addCost` supports negative deltas (treated as earnings)
-local function addCostsOrEarnings(c, delta)
+-- New: optional explicit bucket adjustments (allows undo of earnings without creating costs)
+local function addCostsOrEarnings(c, delta, bucket)
   if not isPlayableColor(c) then return end
   delta = clampInt(delta)
+
+  -- Explicit bucket mode: delta may be negative to undo within the same bucket.
+  if bucket == "earnings" then
+    earningsDue[c] = clampNonNeg((earningsDue[c] or 0) + delta)
+    return
+  end
+  if bucket == "costs" then
+    costsDue[c] = clampNonNeg((costsDue[c] or 0) + delta)
+    return
+  end
+
+  -- Legacy mode: sign determines bucket (no undo for earnings; kept for backward compatibility)
   if delta >= 0 then
     costsDue[c] = clampNonNeg((costsDue[c] or 0) + delta)
   else
@@ -353,8 +366,14 @@ function addCost(params)
   local c = resolveColor(params, true)
   if not c then return 0 end
   local delta = 0
-  if type(params) == "table" then delta = params.amount or params.delta or 0 else delta = params end
-  addCostsOrEarnings(c, delta)
+  local bucket = nil
+  if type(params) == "table" then
+    delta = params.amount or params.delta or 0
+    bucket = params.bucket
+  else
+    delta = params
+  end
+  addCostsOrEarnings(c, delta, bucket)
   updateLabelAndBg()
   return getCosts(c)
 end

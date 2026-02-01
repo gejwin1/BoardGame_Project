@@ -263,7 +263,7 @@ local function getSalaryPerAP(color)
   return 0
 end
 
-local function costsAdd(color, delta)
+local function costsAdd(color, delta, bucket)
   local calc = findCostsCalculator()
   if not calc then
     log("CostsCalculator not found (need tag WLB_COSTS_CALC).")
@@ -271,7 +271,9 @@ local function costsAdd(color, delta)
     return false
   end
   local ok, err = pcall(function()
-    return calc.call("addCost", {color=color, amount=delta})
+    local payload = {color=color, amount=delta}
+    if bucket ~= nil then payload.bucket = bucket end
+    return calc.call("addCost", payload)
   end)
   if not ok then
     log("CostsCalculator.addCost failed: "..tostring(err))
@@ -370,8 +372,10 @@ local function doWorkMove(amount)
   end
 
   -- Salary goes to CostsCalculator as negative cost (earnings)
-  local delta = (amount > 0) and (-salary) or (salary)
-  costsAdd(color, delta)
+  -- IMPORTANT: Undo should undo earnings (not create costs).
+  -- So we adjust the earnings bucket directly: +salary on add, -salary on undo.
+  local deltaE = (amount > 0) and (salary) or (-salary)
+  costsAdd(color, deltaE, "earnings")
 
   local after = before + amount
   if after < 0 then after = 0 end
