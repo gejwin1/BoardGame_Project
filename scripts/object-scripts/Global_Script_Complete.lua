@@ -23,6 +23,10 @@ UI_DIAG_ENABLED = true      -- Set to false to disable UI diagnostics logging
 local TAG_COLOR_PREFIX = "WLB_COLOR_"   -- e.g. WLB_COLOR_Red
 local TAG_AP_CTRL      = "WLB_AP_CTRL"  -- add this tag to all 4 AP controllers
 local TAG_VOCATIONS_CTRL = "WLB_VOCATIONS_CTRL"  -- VocationsController tag
+local TAG_VOCATION_TILE = "WLB_VOCATION_TILE"    -- vocation tile on player board
+
+-- Vocation IDs (must match VocationsController ALL_VOCATIONS for tile click → explanation)
+local VOCATION_IDS = { "PUBLIC_SERVANT", "NGO_WORKER", "ENTREPRENEUR", "GANGSTER", "CELEBRITY", "SOCIAL_WORKER" }
 
 local COLORS = { "Red", "Blue", "Yellow", "Green" }
 
@@ -467,6 +471,14 @@ function UI_CancelSelection(player, value, id)
     UILog("ERR no VocCtrl by GUID="..tostring(VOC_CTRL_GUID))
     warn("UI_CancelSelection: VocationsController not found, but UI closed via kill switch")
   end
+end
+
+-- =========================
+-- [SECTION 6B] VOCATION TILE – EXPLANATION VIA LMB BUTTON ONLY
+-- =========================
+-- Explanation is shown only by the LMB button on the vocation tile (VocationsController). No RMB/Select handling here.
+function onPlayerAction(player, action, targets)
+  return true
 end
 
 -- =========================

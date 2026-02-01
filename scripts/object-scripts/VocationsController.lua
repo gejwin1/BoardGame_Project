@@ -167,11 +167,13 @@ local function countTilesNearStorage()
   local origin = getVocationStorageWorldPosForIndex(1)
   local count = 0
   for _, obj in ipairs(getAllObjects()) do
-    if obj and obj.getPosition and obj.hasTag and (obj.hasTag(TAG_VOCATION_TILE) or obj.hasTag("WLB_VOCATION_TILE")) then
+    -- Guard: some TTS objects (e.g. bags, dice) may not have callable hasTag
+    if obj and type(obj.hasTag) == "function" and obj.getPosition and (obj.hasTag(TAG_VOCATION_TILE) or obj.hasTag("WLB_VOCATION_TILE")) then
       -- Ignore currently assigned-to-player tiles
       local hasColor = false
       for _, c in ipairs(COLORS) do
-        if obj.hasTag(colorTag(c)) then hasColor = true break end
+        local ok, has = pcall(function() return obj.hasTag(colorTag(c)) end)
+        if ok and has then hasColor = true break end
       end
       if not hasColor then
         local ok, p = pcall(function() return obj.getPosition() end)
@@ -646,17 +648,15 @@ local function findTileForVocationAndLevel(vocation, level)
   
   local allObjects = getAllObjects()
   for _, obj in ipairs(allObjects) do
-    if obj and obj.hasTag and
+    if obj and type(obj.hasTag) == "function" and
        obj.hasTag(TAG_VOCATION_TILE) and
        obj.hasTag(vocationTag) and
        obj.hasTag(levelTag) then
       -- Check if it's not on any board (no color tag)
       local hasColorTag = false
       for _, c in ipairs(COLORS) do
-        if obj.hasTag(colorTag(c)) then
-          hasColorTag = true
-          break
-        end
+        local ok, has = pcall(function() return obj.hasTag(colorTag(c)) end)
+        if ok and has then hasColorTag = true break end
       end
       
       if not hasColorTag then
@@ -675,7 +675,7 @@ local function findTileOnPlayerBoard(color)
   local allObjects = getAllObjects()
   
   for _, obj in ipairs(allObjects) do
-    if obj and obj.hasTag and
+    if obj and type(obj.hasTag) == "function" and
        obj.hasTag(TAG_VOCATION_TILE) and
        obj.hasTag(ctag) then
       return obj
@@ -692,6 +692,26 @@ local function getVocationFromTile(tile)
     if tile.hasTag("WLB_VOC_" .. voc) then return voc end
   end
   return nil
+end
+
+-- Invisible LMB button on vocation tile so left-click shows explanation even when tile is locked on board (board no longer steals the click)
+local function addClickToShowExplanationButton(tile)
+  if not tile or not tile.createButton then return end
+  pcall(function()
+    tile.clearButtons()
+    tile.createButton({
+      click_function = "VOC_VocationTileClicked",
+      function_owner = self,
+      label          = "",
+      position       = {0, 0.5, 0},
+      width          = 800,
+      height         = 800,
+      font_size      = 1,
+      color          = {0, 0, 0, 0},
+      font_color     = {0, 0, 0, 0},
+      tooltip        = "Click to view vocation details",
+    })
+  end)
 end
 
 local function placeTileOnBoard(tile, color)
@@ -713,24 +733,12 @@ local function placeTileOnBoard(tile, color)
   local worldPos = board.positionToWorld(localPos)
   tile.setPositionSmooth(worldPos, false, true)
   tile.addTag(colorTag(color))
-  
+  pcall(function() if tile.clearContextMenu then tile.clearContextMenu() end end)
+  addClickToShowExplanationButton(tile)
+  pcall(function() if tile.setLock then tile.setLock(false) end end)
+
   log("Placed tile on " .. color .. " board")
   return true
-end
-
--- Add "Show explanation" context menu to a vocation tile (shows Global UI summary, not physical card)
-local function addExplanationContextMenuToTile(tile, vocation)
-  if not tile or not tile.addContextMenuItem or not vocation then return end
-  local ctrlGuid = self and self.getGUID and self.getGUID() or nil
-  if not ctrlGuid then return end
-  local voc = vocation
-  tile.addContextMenuItem("Show explanation", function(player_color, pos, obj)
-    local ctrl = getObjectFromGUID(ctrlGuid)
-    if ctrl and ctrl.call then
-      ctrl.call("VOC_ShowExplanationForPlayer", { vocation = voc, color = player_color, previewOnly = true })
-    end
-  end)
-  log("Added 'Show explanation' context menu to vocation tile: " .. tostring(vocation))
 end
 
 local function removeTileFromBoard(color)
@@ -739,10 +747,14 @@ local function removeTileFromBoard(color)
   
   local tile = findTileOnPlayerBoard(color)
   if not tile then return nil end
-  
+
+  pcall(function() if tile.clearButtons then tile.clearButtons() end end)
   tile.removeTag(colorTag(color))
-  local idx = countTilesNearStorage() + 1
-  tile.setPositionSmooth(getVocationStorageWorldPosForIndex(idx), false, true)
+  local idx = 1
+  local ok, count = pcall(countTilesNearStorage)
+  if ok and type(count) == "number" then idx = count + 1 end
+  local wp = getVocationStorageWorldPosForIndex(idx)
+  pcall(function() if tile.setPositionSmooth then tile.setPositionSmooth(wp, false, true) end end)
   
   log("Removed tile from " .. color .. " board")
   return tile
@@ -764,7 +776,6 @@ local function swapTileOnPromotion(color, vocation, oldLevel, newLevel)
   
   local success = placeTileOnBoard(newTile, color)
   if success then
-    addExplanationContextMenuToTile(newTile, vocation)
     log("Swapped tile: " .. color .. " " .. vocation .. " Level " .. oldLevel .. " → " .. newLevel)
   end
   
@@ -947,7 +958,6 @@ function VOC_SetVocation(params)
   local tile = findTileForVocationAndLevel(vocation, 1)
   if tile then
     placeTileOnBoard(tile, color)
-    addExplanationContextMenuToTile(tile, vocation)
   else
     log("Warning: Level 1 tile not found for " .. vocation)
   end
@@ -1174,7 +1184,8 @@ function VOC_Promote(params)
   return true
 end
 
--- Called at end of player's turn: if they meet promotion requirements, promote automatically (no tile context menu).
+-- Called before a player's turn (by TurnController at turn start): if they meet promotion requirements, promote automatically
+-- and swap the next-level vocation tile (Level 2 or Level 3) with their current tile (no tile context menu needed).
 function VOC_CheckAndAutoPromote(params)
   local color = normalizeColor(params and params.color)
   if not color then return false end
@@ -1930,6 +1941,20 @@ function VOC_CardButtonShowExplanation(obj, color, alt_click)
   if ctrl and ctrl.call then
     ctrl.call("VOC_ShowExplanationForPlayer", { vocation = vocation, color = color })
   end
+end
+
+-- Global: called when the invisible LMB button on a vocation tile (on player board) is left-clicked.
+-- Shows the same explanation UI as "Show explanation" (read-only). Works even when the tile is locked.
+function VOC_VocationTileClicked(obj, player_color, alt_click)
+  if not obj or not obj.hasTag or type(obj.hasTag) ~= "function" then return end
+  local vocation = nil
+  for _, voc in ipairs(ALL_VOCATIONS) do
+    if obj.hasTag("WLB_VOC_" .. voc) then vocation = voc; break end
+  end
+  if not vocation then return end
+  player_color = normalizeColor(player_color)
+  if not player_color then return end
+  VOC_ShowExplanationForPlayer({ vocation = vocation, color = player_color, previewOnly = true })
 end
 
 -- =========================================================
@@ -3189,20 +3214,19 @@ function onLoad()
         createDebugButtons()
         log("VocationsController: debug buttons created (delayed)")
       end
-      -- Add "Show explanation" to vocation tiles (all levels) already on player boards (e.g. from saved game)
+      -- Ensure vocation tiles on player boards have LMB button and lock (e.g. from saved game)
       if self and self.getGUID then
         local list = getAllObjects()
         for _, obj in ipairs(list) do
-          if obj and obj.hasTag and obj.addContextMenuItem then
-            local voc = getVocationFromTile(obj)
-            if voc then
-              local hasColor = false
-              for _, c in ipairs(COLORS) do
-                if obj.hasTag(colorTag(c)) then hasColor = true; break end
-              end
-              if hasColor then
-                addExplanationContextMenuToTile(obj, voc)
-              end
+          if obj and type(obj.hasTag) == "function" and obj.hasTag(TAG_VOCATION_TILE) then
+            local hasColor = false
+            for _, c in ipairs(COLORS) do
+              if obj.hasTag(colorTag(c)) then hasColor = true; break end
+            end
+            if hasColor then
+              pcall(function() if obj.clearContextMenu then obj.clearContextMenu() end end)
+              addClickToShowExplanationButton(obj)
+              pcall(function() if obj.setLock then obj.setLock(false) end end)
             end
           end
         end

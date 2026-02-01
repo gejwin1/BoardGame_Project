@@ -125,7 +125,10 @@ local W = {
 
   adult = { stage="IDLE", per={} },
 
-  endConfirm = nil -- {color=<activeColor>, apLeft=<n>}
+  endConfirm = nil, -- {color=<activeColor>, apLeft=<n>}
+
+  -- Youth→Adult: set true when round advances to 6 so setActiveByTurnIndex triggers vocation selection (no Wait.time)
+  triggerVocationSelectionAtRound6 = false,
 }
 
 -- IMPORTANT: single-scope start lock (no shadowing)
@@ -549,6 +552,15 @@ local function onTurnEnd_ExpireOneTurnStatuses(color)
   tokenCall("TE_RemoveStatus_ARGS", { color = color, statusTag = TAG_STATUS_WOUNDED })
 end
 
+-- Before player's turn: check vocation level-up requirements; if met, swap next-level tile (2 or 3) with current vocation tile.
+local function onTurnStart_CheckVocationPromotion(color)
+  if not color or color == "" then return end
+  local ok, promoted = vocationsCall("VOC_CheckAndAutoPromote", { color = color })
+  if ok and promoted then
+    log("Vocation auto-promotion applied for " .. tostring(color))
+  end
+end
+
 -- =========================================================
 -- [S5] EVENT CONTROLLER COMPAT API
 -- =========================================================
@@ -883,7 +895,19 @@ local lastActiveColor = nil
 
 local function setActiveByTurnIndex()
   if not W.finalOrder or #W.finalOrder == 0 then return end
+
+  -- Youth→Adult: trigger vocation selection when we just entered round 6 (call via self so it runs in chunk where adultInitFromOrderRolls/startVocationSelection are defined)
+  if W.triggerVocationSelectionAtRound6 then
+    W.triggerVocationSelectionAtRound6 = false
+    if self and self.call then
+      pcall(function() self.call("TriggerYouthToAdultVocationSelection", {}) end)
+    end
+  end
+
   local c = W.finalOrder[W.turnIndex] or W.finalOrder[1]
+
+  -- Before this player's turn: check vocation level-up (1→2 or 2→3); if requirements met, swap next-level tile with current vocation tile.
+  onTurnStart_CheckVocationPromotion(c)
 
   tokenYearSetColor(c)
   setTurnsColor(c)
@@ -891,13 +915,13 @@ local function setActiveByTurnIndex()
 
   local prev = lastActiveColor
   lastActiveColor = c
-  
+
   -- Reset per-color rental cost guard for new turn
   if prev and prev ~= "" then
     rentalCostAddedThisTurn[prev] = false
   end
   rentalCostAddedThisTurn[c] = false
-  
+
   globalCall("WLB_ON_TURN_CHANGED", { newColor = c, prevColor = prev })
 
   onTurnStart_ApplyAddiction(c)
@@ -918,6 +942,10 @@ local function advanceTurn()
     if W.currentRound < MAX_ROUND then
       W.currentRound = W.currentRound + 1
       tokenYearSetRound(W.currentRound)
+      -- Youth → Adult: when reaching round 6, trigger vocation selection from setActiveByTurnIndex (same script context; Wait.time can run in Global and lose access to startVocationSelection)
+      if W.startMode == "YOUTH" and W.currentRound == 6 then
+        W.triggerVocationSelectionAtRound6 = true
+      end
     else
       broadcastToAll("🏁 Game Over: reached round "..MAX_ROUND, {1,0.8,0.2})
     end
@@ -948,6 +976,7 @@ local function resetWizard()
 
   W.adult = {stage="IDLE", per={}}
   W.endConfirm = nil
+  W.triggerVocationSelectionAtRound6 = false
 
   -- FIX: reset the real startBusy (single-scope)
   startBusy = false
@@ -1123,8 +1152,9 @@ local function getSciencePoints(color)
   local knowledge = tonumber(stats.k) or 0
   local skills = tonumber(stats.s) or 0
   
-  -- For Adult start: include bonus pool in calculation
-  if W.startMode == "ADULT" and W.adult and W.adult.per and W.adult.per[color] then
+  -- For Adult start or Youth→Adult (round 6): include bonus pool in calculation
+  local useAdultPool = (W.startMode == "ADULT" or (W.currentRound >= 6 and W.adult and W.adult.stage == "ALLOC"))
+  if useAdultPool and W.adult and W.adult.per and W.adult.per[color] then
     local bonusPool = W.adult.per[color].pool or 0
     -- Add the full bonus pool (player hasn't allocated it yet, but it counts for selection order)
     return knowledge + skills + bonusPool
@@ -1177,8 +1207,8 @@ local function processNextVocationSelection()
     vocationSelectionState.active = false
     broadcastToAll("✅ All players have chosen their vocations!", {0.7, 1, 0.7})
     
-    -- After all vocations are selected, start Science Points allocation for Adult mode
-    if W.startMode == "ADULT" and W.adult and W.adult.stage == "ALLOC" then
+    -- After all vocations are selected, start Science Points allocation (Adult start or Youth→Adult round 6)
+    if (W.startMode == "ADULT" or W.currentRound >= 6) and W.adult and W.adult.stage == "ALLOC" then
       Wait.time(function()
         broadcastToAll("📊 Now allocate your Science Points (K/S bonuses).", {0.7, 1, 0.7})
         -- Science Points allocation UI is already active (W.adult.stage = "ALLOC")
@@ -1258,6 +1288,13 @@ local function startVocationSelection()
   
   -- Start with first player
   processNextVocationSelection()
+end
+
+-- Global (object) function so setActiveByTurnIndex can invoke it via self.call when script is split into chunks (adultInitFromOrderRolls/startVocationSelection are in this chunk)
+function TriggerYouthToAdultVocationSelection()
+  if not W or W.currentRound ~= 6 or W.startMode ~= "YOUTH" then return end
+  adultInitFromOrderRolls()
+  startVocationSelection()
 end
 
 local function adultApply(color)
