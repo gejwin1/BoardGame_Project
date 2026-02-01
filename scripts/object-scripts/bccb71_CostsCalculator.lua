@@ -6,26 +6,28 @@
 -- - Auto-refresh UI when active player changes
 -- =========================
 
-local SAVE_VERSION = 1
+local SAVE_VERSION = 2
 
--- Tags to find money tiles
+-- Tags to find money tiles (legacy). If no money tiles exist, we fall back to Player Boards.
 local TAG_MONEY = "WLB_MONEY"
+local TAG_BOARD = "WLB_BOARD"
 local COLOR_TAG_PREFIX = "WLB_COLOR_"
 
 -- Active-color source (Round token)
 local ROUND_TOKEN_GUID = "465776"
 
 -- Button/UI tuning
-local BTN_POS_Y  = 0.5
+local BTN_POS_Y  = 0.62
 local BTN_ROT_Y  = 0
 
-local W_LABEL = 2700
-local H_LABEL = 420
-local FS_LABEL = 200
+-- Smaller so we can fit 3 buttons stacked
+local W_LABEL = 1800
+local H_LABEL = 320
+local FS_LABEL = 140
 
-local W_PAY = 1600
-local H_PAY = 420
-local FS_PAY = 320
+local W_PAY = 1800
+local H_PAY = 320
+local FS_PAY = 200
 
 -- Base colors
 local BG_LABEL_DEFAULT = {0.95, 0.95, 0.95, 1}
@@ -34,7 +36,11 @@ local BG_PAY   = {0.20, 0.85, 0.25, 1}
 local FG_PAY   = {0.00, 0.00, 0.00, 1}
 
 -- state
-local costs = { Yellow=0, Blue=0, Red=0, Green=0 }
+-- Separate buckets (no netting in UI):
+--  - costsDue[color]   >= 0
+--  - earningsDue[color]>= 0
+local costsDue    = { Yellow=0, Blue=0, Red=0, Green=0 }
+local earningsDue = { Yellow=0, Blue=0, Red=0, Green=0 }
 local lastActiveColor = nil
 
 -- ---------- helpers ----------
@@ -77,38 +83,85 @@ local function resolveColor(params, fallbackToActive)
   return nil
 end
 
-local function getBucket(c)
+local function clampNonNeg(x)
+  x = clampInt(x)
+  if x < 0 then return 0 end
+  return x
+end
+
+local function getCosts(c)
   if not isPlayableColor(c) then return 0 end
-  costs[c] = clampInt(costs[c] or 0)
-  return costs[c]
+  costsDue[c] = clampNonNeg(costsDue[c] or 0)
+  return costsDue[c]
 end
 
-local function setBucket(c, v)
+local function getEarningsBucket(c)
+  if not isPlayableColor(c) then return 0 end
+  earningsDue[c] = clampNonNeg(earningsDue[c] or 0)
+  return earningsDue[c]
+end
+
+local function setCosts(c, v)
   if not isPlayableColor(c) then return end
-  costs[c] = clampInt(v)
+  costsDue[c] = clampNonNeg(v)
 end
 
-local function addBucket(c, delta)
+local function setEarnings(c, v)
   if not isPlayableColor(c) then return end
-  costs[c] = clampInt((costs[c] or 0) + clampInt(delta))
+  earningsDue[c] = clampNonNeg(v)
 end
 
-local function labelText()
+-- Compatibility: one API `addCost` supports negative deltas (treated as earnings)
+local function addCostsOrEarnings(c, delta)
+  if not isPlayableColor(c) then return end
+  delta = clampInt(delta)
+  if delta >= 0 then
+    costsDue[c] = clampNonNeg((costsDue[c] or 0) + delta)
+  else
+    earningsDue[c] = clampNonNeg((earningsDue[c] or 0) + math.abs(delta))
+  end
+end
+
+local function labelTextCosts()
   local c = getActiveColor() or "—"
-  local v = (isPlayableColor(c) and getBucket(c)) or 0
+  local v = (isPlayableColor(c) and getCosts(c)) or 0
   return "REMAINING COSTS: " .. tostring(v)
+end
+
+local function labelTextEarnings()
+  local c = getActiveColor() or "—"
+  local v = (isPlayableColor(c) and getEarningsBucket(c)) or 0
+  return "EARNINGS TO COLLECT: " .. tostring(v)
 end
 
 local function moneyColorTag(c) return COLOR_TAG_PREFIX .. tostring(c) end
 
-local function findMoneyTileForColor(c)
+local function findMoneyControllerForColor(c)
   if not isPlayableColor(c) then return nil end
+  local ctag = moneyColorTag(c)
+
+  -- IMPORTANT:
+  -- If both exist (legacy money tile + new money-on-board), we must prefer the board
+  -- to avoid charging/crediting the old tile by accident.
+
+  -- 1) New: player board holds money (PlayerBoardController_Shared)
+  local boards = getObjectsWithTag(TAG_BOARD) or {}
+  for _,b in ipairs(boards) do
+    if b and b.hasTag and b.hasTag(ctag) and b.call then
+      -- Ensure it responds to getMoney (best-effort)
+      local ok = pcall(function() return b.call("getMoney") end)
+      if ok then return b end
+    end
+  end
+
+  -- 2) Legacy: separate money tile
   local list = getObjectsWithTag(TAG_MONEY) or {}
   for _,o in ipairs(list) do
     if o and o.hasTag and o.hasTag(moneyColorTag(c)) then
       return o
     end
   end
+
   return nil
 end
 
@@ -125,12 +178,12 @@ end
 local function ensureButtons()
   self.clearButtons()
 
-  -- Label (index 0)
+  -- Costs label (index 0)
   self.createButton({
     click_function = "noop",
     function_owner = self,
-    label          = labelText(),
-    position       = {0, BTN_POS_Y, 0.35},
+    label          = labelTextCosts(),
+    position       = {0, BTN_POS_Y, 0.58},
     rotation       = {0, BTN_ROT_Y, 0},
     width          = W_LABEL,
     height         = H_LABEL,
@@ -138,22 +191,38 @@ local function ensureButtons()
     color          = tintBgForColor(getActiveColor()),
     font_color     = FG_LABEL,
     alignment      = 3,
-    tooltip        = "Shows remaining fixed costs for active player"
+    tooltip        = "Remaining costs for active player"
   })
 
-  -- PAY (index 1)
+  -- Earnings label (index 1)
+  self.createButton({
+    click_function = "noop",
+    function_owner = self,
+    label          = labelTextEarnings(),
+    position       = {0, BTN_POS_Y, 0.10},
+    rotation       = {0, BTN_ROT_Y, 0},
+    width          = W_LABEL,
+    height         = H_LABEL,
+    font_size      = FS_LABEL,
+    color          = tintBgForColor(getActiveColor()),
+    font_color     = FG_LABEL,
+    alignment      = 3,
+    tooltip        = "Earnings available to collect for active player"
+  })
+
+  -- PAY (index 2)
   self.createButton({
     click_function = "uiPay",
     function_owner = self,
-    label          = "PAY",
-    position       = {0, BTN_POS_Y, -0.35},
+    label          = "Settle Finances",
+    position       = {0, BTN_POS_Y, -0.7},
     rotation       = {0, BTN_ROT_Y, 0},
     width          = W_PAY,
     height         = H_PAY,
     font_size      = FS_PAY,
     color          = BG_PAY,
     font_color     = FG_PAY,
-    tooltip        = "Pay remaining costs for active player"
+    tooltip        = "Pays costs (if any) or collects earnings (if any) for active player"
   })
 end
 
@@ -165,7 +234,8 @@ local function updateLabelAndBg()
   end
 
   local c = getActiveColor()
-  self.editButton({ index = 0, label = labelText(), color = tintBgForColor(c) })
+  self.editButton({ index = 0, label = labelTextCosts(), color = tintBgForColor(c) })
+  self.editButton({ index = 1, label = labelTextEarnings(), color = tintBgForColor(c) })
 end
 
 function noop() end
@@ -187,7 +257,8 @@ end
 function onSave()
   return JSON.encode({
     v = SAVE_VERSION,
-    costs = costs
+    costsDue = costsDue,
+    earningsDue = earningsDue
   })
 end
 
@@ -195,13 +266,31 @@ function onLoad(saved_data)
   local loaded = false
   if saved_data ~= nil and saved_data ~= "" then
     local ok, data = pcall(function() return JSON.decode(saved_data) end)
-    if ok and type(data) == "table" and type(data.costs) == "table" then
-      costs = data.costs
-      loaded = true
+    if ok and type(data) == "table" then
+      -- v2+ (separate)
+      if type(data.costsDue) == "table" and type(data.earningsDue) == "table" then
+        costsDue = data.costsDue
+        earningsDue = data.earningsDue
+        loaded = true
+      -- v1 (combined): negative meant earnings
+      elseif type(data.costs) == "table" then
+        costsDue = { Yellow=0, Blue=0, Red=0, Green=0 }
+        earningsDue = { Yellow=0, Blue=0, Red=0, Green=0 }
+        for _, c in ipairs({"Yellow","Blue","Red","Green"}) do
+          local v = tonumber(data.costs[c] or 0) or 0
+          if v >= 0 then
+            costsDue[c] = clampNonNeg(v)
+          else
+            earningsDue[c] = clampNonNeg(math.abs(v))
+          end
+        end
+        loaded = true
+      end
     end
   end
   if not loaded then
-    costs = { Yellow=0, Blue=0, Red=0, Green=0 }
+    costsDue = { Yellow=0, Blue=0, Red=0, Green=0 }
+    earningsDue = { Yellow=0, Blue=0, Red=0, Green=0 }
   end
 
   Wait.time(function()
@@ -223,7 +312,7 @@ end
 function getCost(params)
   local c = resolveColor(params, true)
   if not c then return 0 end
-  return getBucket(c)
+  return getCosts(c)
 end
 
 function setCost(params)
@@ -231,22 +320,31 @@ function setCost(params)
   if not c then return 0 end
   local amount = 0
   if type(params) == "table" then amount = params.amount or params.value or 0 else amount = params end
-  setBucket(c, amount)
+  amount = clampInt(amount)
+  if amount >= 0 then
+    setCosts(c, amount)
+  else
+    -- compatibility: negative "cost" means set earnings
+    setEarnings(c, math.abs(amount))
+  end
   updateLabelAndBg()
-  return getBucket(c)
+  return getCosts(c)
 end
 
 function clearCost(params)
   local c = resolveColor(params, true)
   if not c then return 0 end
-  setBucket(c, 0)
+  -- Keep semantics: clear both buckets for this color
+  setCosts(c, 0)
+  setEarnings(c, 0)
   updateLabelAndBg()
   return 0
 end
 
 function resetNewGame()
-  -- Reset all player costs to 0 for new game
-  costs = { Yellow=0, Blue=0, Red=0, Green=0 }
+  -- Reset all player buckets to 0 for new game
+  costsDue = { Yellow=0, Blue=0, Red=0, Green=0 }
+  earningsDue = { Yellow=0, Blue=0, Red=0, Green=0 }
   updateLabelAndBg()
   log("Costs Calculator: All costs reset for new game")
 end
@@ -256,9 +354,16 @@ function addCost(params)
   if not c then return 0 end
   local delta = 0
   if type(params) == "table" then delta = params.amount or params.delta or 0 else delta = params end
-  addBucket(c, delta)
+  addCostsOrEarnings(c, delta)
   updateLabelAndBg()
-  return getBucket(c)
+  return getCosts(c)
+end
+
+-- Optional API: explicit earnings getters (for future use)
+function getEarnings(params)
+  local c = resolveColor(params, true)
+  if not c then return 0 end
+  return getEarningsBucket(c)
 end
 
 local function getSatToken(color)
@@ -309,20 +414,50 @@ end
 
 local function doPay(color)
   if not isPlayableColor(color) then return false, "bad_color" end
-  local due = getBucket(color)
-  if due <= 0 then
-    setBucket(color, 0)
+  local dueCosts = getCosts(color)
+  local dueEarnings = getEarningsBucket(color)
+  if dueCosts == 0 and dueEarnings == 0 then
     updateLabelAndBg()
     return true, "nothing_due"
   end
 
-  local moneyTile = findMoneyTileForColor(color)
-  if not moneyTile then
-    return false, "no_money_tile (need tags: WLB_MONEY + "..moneyColorTag(color)..")"
+  local moneyObj = findMoneyControllerForColor(color)
+  if not moneyObj then
+    return false, "no_money_controller (need either money tile tags: WLB_MONEY + "..moneyColorTag(color).." OR player board with "..TAG_BOARD.." + "..moneyColorTag(color)..")"
+  end
+  
+  -- 1) Collect earnings (if any) to money first
+  if dueEarnings > 0 then
+    local ok = pcall(function()
+      moneyObj.call("addMoney", { delta = dueEarnings })
+    end)
+    if not ok then
+      return false, "money_add_failed"
+    end
+    setEarnings(color, 0)
+  end
+
+  -- 2) Pay costs (if any) from current money (after earnings)
+  local due = dueCosts
+  if due <= 0 then
+    setCosts(color, 0)
+    updateLabelAndBg()
+    -- Notify Work listeners (lock work for this turn)
+    for _, o in ipairs(getObjectsWithTag("WLB_WORK_CTRL") or {}) do
+      if o and o.call then
+        pcall(function() o.call("WORK_OnPaid", {color=color}) end)
+      end
+    end
+    for _, o in ipairs(getObjectsWithTag("WLB_BOARD") or {}) do
+      if o and o.call then
+        pcall(function() o.call("WORK_OnPaid", {color=color}) end)
+      end
+    end
+    return true, (dueEarnings > 0) and "earned" or "nothing_due", {earned=dueEarnings}
   end
 
   -- Get current money
-  local currentMoney = getCurrentMoney(moneyTile)
+  local currentMoney = getCurrentMoney(moneyObj)
   local canPay = math.min(due, currentMoney)
   local unpaid = due - canPay
 
@@ -332,7 +467,7 @@ local function doPay(color)
   -- Pay what they can afford
   if canPay > 0 then
     local ok = pcall(function()
-      moneyTile.call("addMoney", { delta = -canPay })
+      moneyObj.call("addMoney", { delta = -canPay })
     end)
     if not ok then
       return false, "money_add_failed"
@@ -353,14 +488,26 @@ local function doPay(color)
     end
   end
 
-  -- Clear the cost bucket (even if not fully paid)
-  setBucket(color, 0)
+  -- Clear the costs bucket (even if not fully paid)
+  setCosts(color, 0)
   updateLabelAndBg()
   
-  if unpaid > 0 then
-    return true, "partially_paid", {paid=canPay, unpaid=unpaid, satPenalty=penaltyChunks*2}
+  -- Notify Work listeners (WorkControllers OR PlayerBoards with PB controller script)
+  for _, o in ipairs(getObjectsWithTag("WLB_WORK_CTRL") or {}) do
+    if o and o.call then
+      pcall(function() o.call("WORK_OnPaid", {color=color}) end)
+    end
   end
-  return true, "paid"
+  for _, o in ipairs(getObjectsWithTag("WLB_BOARD") or {}) do
+    if o and o.call then
+      pcall(function() o.call("WORK_OnPaid", {color=color}) end)
+    end
+  end
+  
+  if unpaid > 0 then
+    return true, "partially_paid", {paid=canPay, unpaid=unpaid, satPenalty=penaltyChunks*2, earned=dueEarnings}
+  end
+  return true, "paid", {earned=dueEarnings}
 end
 
 function pay(params)
@@ -388,14 +535,15 @@ function onTurnEnd(params)
   local c = resolveColor(params, false)
   if not c then return {ok=false, reason="no_color"} end
 
-  local due = getBucket(c)
-  if due > 0 then
+  local dueCosts = getCosts(c)
+  local dueEarnings = getEarnings(c)
+  if dueCosts > 0 or dueEarnings > 0 then
     local ok, why = doPay(c)
     if not ok then
-      return {ok=false, reason=why, due=due}
+      return {ok=false, reason=why, costs=dueCosts, earnings=dueEarnings}
     end
-    return {ok=true, paid=true, due=due}
+    return {ok=true, paid=true, costs=dueCosts, earnings=dueEarnings}
   end
 
-  return {ok=true, paid=false, due=0}
+  return {ok=true, paid=false, costs=0, earnings=0}
 end

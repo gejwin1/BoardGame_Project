@@ -57,6 +57,7 @@ local TAG_MONEY        = "WLB_MONEY"
 local TAG_AP_CTRL      = "WLB_AP_CTRL"
 local TAG_PLAYER_STATUS_CTRL = "WLB_PLAYER_STATUS_CTRL"
 local TAG_SAT          = "SAT_TOKEN"
+local TAG_BOARD        = "WLB_BOARD"
 
 local COLOR_TAG_PREFIX = "WLB_COLOR_"
 
@@ -274,6 +275,26 @@ local function pscCall(fnName, params)
   local psc = getPlayerStatusController()
   if not psc then return false, nil end
   return pcallCall(psc, fnName, params)
+end
+
+-- Money controller resolver (supports legacy money tiles OR player boards with embedded money)
+local function getMoneyController(color)
+  -- IMPORTANT:
+  -- If both exist (old money tile + new money-on-board), we must prefer the board
+  -- to avoid showing different values (board is the new source of truth).
+
+  -- 1) Player board with embedded money API
+  local b = findOneByTags(TAG_BOARD, colorTag(color))
+  if b and b.call then
+    local ok = pcall(function() return b.call("getMoney") end)
+    if ok then return b end
+  end
+
+  -- 2) Legacy money tile
+  local o = findOneByTags(TAG_MONEY, colorTag(color))
+  if o then return o end
+
+  return nil
 end
 
 local function getVocationsController()
@@ -1048,11 +1069,11 @@ local function adultInitFromOrderRolls()
     local r = W.rolls[c] or 1
     local pool, moneyTotal = adultBonuses(r)
 
-    local moneyObj = findOneByTags(TAG_MONEY, colorTag(c))
+    local moneyObj = getMoneyController(c)
     if moneyObj then
       pcall(function() moneyObj.call("setMoney", {amount = moneyTotal}) end)
     else
-      warn("No MONEY for "..c.." (tags "..TAG_MONEY.." + "..colorTag(c)..")")
+      warn("No MONEY controller for "..c.." (need WLB_MONEY tile or WLB_BOARD with money API)")
     end
 
     W.adult.per[c] = { pool=pool, k=0, s=0, active=true, roll=r, money=moneyTotal }
@@ -1399,6 +1420,8 @@ local function startGame()
     resetControllersByTag(TAG_STATS)
     resetControllersByTag(TAG_AP_CTRL)
     resetControllersByTag(TAG_MONEY)
+    -- If money is embedded in boards, reset those too (safe if boards implement resetNewGame)
+    resetControllersByTag(TAG_BOARD)
     resetControllersByTag("WLB_COSTS_CALC")  -- Reset costs calculator for new game
 
     vocationsCall("VOC_ResetForNewGame", {})  -- Clear vocations from previous game

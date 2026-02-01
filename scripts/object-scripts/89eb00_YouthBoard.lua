@@ -15,6 +15,7 @@ local DEBUG = true
 local TAG_AP_CTRL       = "WLB_AP_CTRL"
 local TAG_STATS_CTRL    = "WLB_STATS_CTRL"
 local TAG_MONEY         = "WLB_MONEY"
+local TAG_BOARD         = "WLB_BOARD"
 local COLOR_TAG_PREFIX  = "WLB_COLOR_"
 
 local VALID_COLORS = { Yellow=true, Blue=true, Red=true, Green=true }
@@ -67,7 +68,24 @@ end
 
 local function getAP(color)    return findByTags({ TAG_AP_CTRL,    colorTag(color) }) end
 local function getStats(color) return findByTags({ TAG_STATS_CTRL, colorTag(color) }) end
-local function getMoney(color) return findByTags({ TAG_MONEY,      colorTag(color) }) end
+local function getMoney(color)
+  -- IMPORTANT:
+  -- If both exist (legacy money tile + new money-on-board), we must prefer the board
+  -- to avoid using the old tile by accident.
+
+  -- 1) Player board with embedded money API (PlayerBoardController_Shared)
+  local b = findByTags({ TAG_BOARD, colorTag(color) })
+  if b and b.call then
+    local ok = pcall(function() return b.call("getMoney") end)
+    if ok then return b end
+  end
+
+  -- 2) Legacy money tile
+  local m = findByTags({ TAG_MONEY, colorTag(color) })
+  if m then return m end
+
+  return nil
+end
 
 -- =========================================================
 -- [SECTION 4] MONEY (robust read + cannot go below 0)
@@ -95,7 +113,7 @@ end
 local function canAfford(color, deltaNegative)
   local moneyObj = getMoney(color)
   if not moneyObj then
-    warn("Money controller not found (tag "..TAG_MONEY.." + "..colorTag(color)..")")
+    warn("Money controller not found (need WLB_MONEY tile OR WLB_BOARD with money API) for "..tostring(color))
     return false
   end
   local cur = moneyGet(moneyObj)
@@ -109,7 +127,7 @@ end
 local function moneyAdd(color, delta)
   local m = getMoney(color)
   if not m or not m.call then
-    warn("Money controller not found (tag "..TAG_MONEY.." + "..colorTag(color)..")")
+    warn("Money controller not found (need WLB_MONEY tile OR WLB_BOARD with money API) for "..tostring(color))
     return false
   end
 

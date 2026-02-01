@@ -852,7 +852,22 @@ local function resolvePSC()
 end
 
 local function resolveMoney(color)
-  return findOne(TAG_MONEY, colorTag(color))
+  -- IMPORTANT:
+  -- If both exist (legacy money tile + new money-on-board), we must prefer the board
+  -- to avoid using the old tile by accident.
+
+  -- 1) Player board with embedded money API (PlayerBoardController_Shared)
+  local b = findOne(TAG_PLAYER_BOARD, colorTag(color))
+  if b and b.call then
+    local ok = pcall(function() return b.call("getMoney") end)
+    if ok then return b end
+  end
+
+  -- 2) Legacy money tile
+  local m = findOne(TAG_MONEY, colorTag(color))
+  if m then return m end
+
+  return nil
 end
 
 local function resolveAP(color)

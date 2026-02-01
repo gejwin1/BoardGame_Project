@@ -156,12 +156,13 @@ local SAFE_PARK_BOARD = {
 -- Board status slots (Yellow reference; cloned)
 local STATUS_SLOTS_BOARD = {
   Yellow = { L0 = {
-    [1] = {x=-1.782, y=1.112, z=-7.458},
-    [2] = {x=-3.230, y=1.112, z=-7.493},
-    [3] = {x=-1.705, y=1.112, z=-5.953},
-    [4] = {x=-3.229, y=1.112, z=-5.919},
-    [5] = {x=-4.506, y=1.112, z=-5.929},
-    [6] = {x=-5.842, y=1.112, z=-5.802},
+    -- Updated coordinates (per your latest scanner measurements)
+    [1] = {x=-1.70,  y=1.112, z=-7.47},
+    [2] = {x=-3.230, y=1.112, z=-7.47},
+    [3] = {x=-4.51,  y=1.112, z=-7.47},
+    [4] = {x=-1.70,  y=1.112, z=-5.8},
+    [5] = {x=-3.23,  y=1.112, z=-5.8},
+    [6] = {x=-4.51,  y=1.112, z=-5.8},
   }},
 }
 

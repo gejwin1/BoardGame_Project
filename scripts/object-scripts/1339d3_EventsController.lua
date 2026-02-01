@@ -1927,6 +1927,96 @@ end
 
 -- === SECTION 12: PUBLIC API ==================================================
 
+-- Compatibility entry point:
+-- Some older UI / scripts call EventController.playCardFromUI({card_guid, player_color, slot_idx}).
+-- This wrapper executes the same flow as clicking YES on a track card.
+function playCardFromUI(args)
+  args = args or {}
+  local cardGuid = args.card_guid or args.cardGuid or args.guid
+  local usedColor = args.player_color or args.color or args.playerColor
+  local slotIdx = tonumber(args.slot_idx or args.slot or args.slotIndex)
+
+  if not cardGuid or cardGuid == "" then
+    warn("playCardFromUI: missing card_guid")
+    return "ERROR"
+  end
+
+  if not usedColor or usedColor == "" then
+    local ok, tc = pcall(function()
+      return (Turns and Turns.turn_color and Turns.turn_color ~= "") and Turns.turn_color or nil
+    end)
+    usedColor = (ok and tc) or usedColor or "White"
+  end
+
+  if not slotIdx then
+    slotIdx = getSlotIndexForCardGuid(cardGuid)
+  end
+  if not slotIdx then
+    warn("playCardFromUI: cannot resolve slot_idx for card="..tostring(cardGuid))
+    return "ERROR"
+  end
+
+  if slotIdx ~= 1 and slot1HasObligatory() then
+    return "BLOCKED"
+  end
+
+  local engine = getEngine()
+  if not engine or not engine.call then
+    warn("playCardFromUI: Event Engine not found")
+    return "ERROR"
+  end
+
+  local extra = (EXTRA_BY_SLOT[slotIdx] or 0)
+  if extra > 0 and (not canSpendExtraAP(usedColor, extra)) then
+    return "BLOCKED"
+  end
+
+  local ok, ret = pcall(function()
+    return engine.call("playCardFromUI", {
+      card_guid = cardGuid,
+      player_color = usedColor,
+      slot_idx = slotIdx,
+      slot_extra_ap = extra,
+    })
+  end)
+  if not ok then
+    warn("playCardFromUI: engine call failed for card="..tostring(cardGuid))
+    return "ERROR"
+  end
+  if ret == "BLOCKED" or ret == "ERROR" or ret == false or ret == nil then
+    return (ret == nil) and "ERROR" or ret
+  end
+
+  -- charge extra AP after success (Engine handled base AP)
+  local adjustedExtra = extra
+  if extra > 0 then
+    local okAdj, adjusted = pcall(function()
+      return engine.call("getAdjustedSlotExtraAP", { card_guid = cardGuid })
+    end)
+    if okAdj and adjusted ~= nil then
+      adjustedExtra = tonumber(adjusted) or 0
+    end
+  end
+
+  if adjustedExtra > 0 then
+    local paid = spendExtraAP(usedColor, adjustedExtra)
+    if not paid then
+      warn("playCardFromUI: EXTRA AP spend failed after engine success. color="..tostring(usedColor).." extra="..tostring(adjustedExtra))
+    end
+  end
+
+  if slotIdx == 1 then
+    Wait.time(function()
+      refreshTrackedSlots()
+      refreshObligatoryLock()
+      saveState()
+    end, 0.25)
+  end
+  refreshEventSlotUI_later(0.35)
+
+  return ret
+end
+
 function EVT_AUTO_REFILL_AFTER_RESET(params)
   params = params or {}
   local d = tonumber(params.delay) or (PIPE_STEP_DELAY_SEC + 0.2)

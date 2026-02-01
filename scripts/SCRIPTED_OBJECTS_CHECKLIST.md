@@ -447,10 +447,10 @@ This checklist tracks documentation progress for each scripted object in the gam
 **GUID:** `1b53e4`  
 **Type:** Tile  
 **Tags:** (no tags)  
-**Status:** ✅ Documented (DEPRECATED - No longer used, will be deleted)  
-**Script:** ✅ Received and saved to `scripts/object-scripts/1b53e4_WLBControl.lua`  
-**Documentation:** `scripts/object-scripts/1b53e4_WLBControl_DOC.md`  
-**Summary:** Legacy control panel for game setup/reset. Provided layout capture/restore, satisfaction token collection, new game setup (Youth/Adult), and lost element finding. Most functionality moved to other controllers (e.g., Turn Controller). No longer actively used. Version 1.3.2. **Note: Contains bug in newGameAdult() - calls resetByTag with wrong tag.**  
+**Status:** 🗑️ Deleted (2026-02-01)  
+**Script:** ❌ Deleted from repo (`scripts/object-scripts/1b53e4_WLBControl.lua`)  
+**Documentation:** ❌ Deleted from repo (`scripts/object-scripts/1b53e4_WLBControl_DOC.md`)  
+**Summary:** Legacy control panel for game setup/reset. Not referenced by other scripts; only acted when clicked. Removed to simplify the table and reduce maintenance.  
 
 ---
 

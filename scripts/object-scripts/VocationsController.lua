@@ -81,16 +81,112 @@ local VOCATION_EXPLANATION_IMAGE = {
 -- =========================================================
 -- CHARACTER SLOT POSITION (from scanner)
 -- =========================================================
--- TODO: Replace with actual measured position from scanner
+-- Measured by `VOC_SCANNER` (local position on the player board object).
+-- Screenshot: Yellow measured {5.717, 0.592, -0.442} (error: 0.000)
+-- Assumption (per your note): same local position for every player board.
 local CHARACTER_SLOT_LOCAL = {
-  Yellow = {x=0.0, y=0.592, z=0.0},  -- PLACEHOLDER - Replace with measured position
-  Blue = {x=0.0, y=0.592, z=0.0},    -- PLACEHOLDER - Replace with measured position
-  Red = {x=0.0, y=0.592, z=0.0},     -- PLACEHOLDER - Replace with measured position
-  Green = {x=0.0, y=0.592, z=0.0},   -- PLACEHOLDER - Replace with measured position
+  Yellow = {x=5.717, y=0.592, z=-0.442},
+  Blue   = {x=5.717, y=0.592, z=-0.442},
+  Red    = {x=5.717, y=0.592, z=-0.442},
+  Green  = {x=5.717, y=0.592, z=-0.442},
 }
 
 -- Storage position for tiles (when not on board)
-local STORAGE_POSITION = {0, 5, 0}  -- Off-screen, adjust as needed
+-- Storage position for tiles (when not on board)
+-- You requested to avoid the middle of the table. We store relative to the TABLE object:
+-- Update: better solution — store vocation tiles ON the VocationsController object itself.
+-- This makes the storage deterministic and always visible.
+-- Store as ONE tidy stack (tower) on top of this controller.
+local STORAGE_LOCAL_ORIGIN = {x=0.0, y=0.55, z=0.0}   -- center of controller, slightly above
+local STORAGE_STACK_LIFT   = 0.12                     -- extra Y per tile (keeps stack stable)
+local STORAGE_STACK_DELAY  = 0.08                     -- delay between placements (reduces physics jitter)
+
+local function getVocationStorageWorldPosForIndex(i)
+  i = tonumber(i) or 1
+  if i < 1 then i = 1 end
+
+  local localPos = {
+    x = STORAGE_LOCAL_ORIGIN.x,
+    y = STORAGE_LOCAL_ORIGIN.y + ((i - 1) * STORAGE_STACK_LIFT),
+    z = STORAGE_LOCAL_ORIGIN.z,
+  }
+
+  if self and self.positionToWorld then
+    local ok, wp = pcall(function()
+      return self.positionToWorld(localPos)
+    end)
+    if ok and wp then
+      -- Ensure tiles are clearly above the controller
+      wp.y = math.max(wp.y, (self.getPosition and self.getPosition().y or wp.y) + STORAGE_LOCAL_ORIGIN.y + ((i - 1) * STORAGE_STACK_LIFT))
+      return wp
+    end
+  end
+
+  -- Fallback: somewhere above table origin
+  return {0, 5, 0}
+end
+
+local function parkTileOnController(obj, idx)
+  if not obj then return end
+  local wp = getVocationStorageWorldPosForIndex(idx)
+
+  -- Place deterministically and prevent physics from piling them up.
+  pcall(function() if obj.setLock then obj.setLock(false) end end)
+  pcall(function() if obj.setVelocity then obj.setVelocity({0,0,0}) end end)
+  pcall(function() if obj.setAngularVelocity then obj.setAngularVelocity({0,0,0}) end end)
+
+  -- Prefer instant position for stability.
+  pcall(function()
+    if obj.setPosition then
+      obj.setPosition(wp)
+    else
+      obj.setPositionSmooth(wp, false, true)
+    end
+  end)
+
+  -- Align rotation to controller (optional; helps with neat look)
+  pcall(function()
+    if self and self.getRotation and obj.setRotation then
+      local r = self.getRotation()
+      obj.setRotation({0, r.y or 0, 0})
+    end
+  end)
+
+  -- Lock after a short delay so it settles first
+  if Wait and Wait.time and obj.setLock then
+    Wait.time(function()
+      pcall(function() obj.setLock(true) end)
+    end, 0.15)
+  else
+    pcall(function() if obj.setLock then obj.setLock(true) end end)
+  end
+end
+
+local function countTilesNearStorage()
+  -- Best-effort: count vocation tiles already near the stack origin (so single returns stack on top)
+  local origin = getVocationStorageWorldPosForIndex(1)
+  local count = 0
+  for _, obj in ipairs(getAllObjects()) do
+    if obj and obj.getPosition and obj.hasTag and (obj.hasTag(TAG_VOCATION_TILE) or obj.hasTag("WLB_VOCATION_TILE")) then
+      -- Ignore currently assigned-to-player tiles
+      local hasColor = false
+      for _, c in ipairs(COLORS) do
+        if obj.hasTag(colorTag(c)) then hasColor = true break end
+      end
+      if not hasColor then
+        local ok, p = pcall(function() return obj.getPosition() end)
+        if ok and p then
+          local dx = (p.x or 0) - (origin.x or 0)
+          local dz = (p.z or 0) - (origin.z or 0)
+          if (dx*dx + dz*dz) < 0.9 then
+            count = count + 1
+          end
+        end
+      end
+    end
+  end
+  return count
+end
 
 -- Selection UI positions (WORLD coordinates - center of table)
 local SELECTION_AREA_CENTER = {x=0, y=2.0, z=0}  -- Center of table, elevated high for visibility
@@ -645,7 +741,8 @@ local function removeTileFromBoard(color)
   if not tile then return nil end
   
   tile.removeTag(colorTag(color))
-  tile.setPositionSmooth(STORAGE_POSITION, false, true)
+  local idx = countTilesNearStorage() + 1
+  tile.setPositionSmooth(getVocationStorageWorldPosForIndex(idx), false, true)
   
   log("Removed tile from " .. color .. " board")
   return tile
@@ -699,6 +796,81 @@ end
 
 -- Call when starting a new game so vocations from the previous game are cleared
 function VOC_ResetForNewGame(params)
+  -- 1) Force-remove vocation tiles from ALL boards (even unused colors)
+  -- This prevents situations like: in a 2-player game, a tile stays tagged on Red board
+  -- and becomes "unavailable" for Yellow/Blue selection.
+  local function looksLikeVocationTile(obj)
+    if not obj or not obj.hasTag then return false end
+    if obj.hasTag(TAG_VOCATION_TILE) or obj.hasTag("WLB_VOCATION_TILE") then return true end
+    -- Fallback heuristic: has both vocation id tag and level tag
+    if obj.getTags then
+      local tags = obj.getTags() or {}
+      local hasVoc = false
+      local hasLvl = false
+      for _,t in ipairs(tags) do
+        if type(t) == "string" then
+          if string.sub(t, 1, 8) == "WLB_VOC_" then hasVoc = true end
+          if string.sub(t, 1, 14) == "WLB_VOC_LEVEL_" then hasLvl = true end
+        end
+        if hasVoc and hasLvl then return true end
+      end
+    end
+    return false
+  end
+
+  local function stripAllColorTags(obj)
+    if not obj or not obj.removeTag then return end
+    for _, c in ipairs(COLORS) do
+      pcall(function() obj.removeTag(colorTag(c)) end)
+    end
+  end
+
+  -- First, try the fast per-color removal (if tiles are correctly tagged)
+  for _, c in ipairs(COLORS) do
+    pcall(function() removeTileFromBoard(c) end)
+  end
+
+  -- Then, do a full scan and reclaim any vocation tiles still tagged with a player color
+  -- and place them neatly on top of THIS controller.
+  local tiles = {}
+  for _, obj in ipairs(getAllObjects()) do
+    if looksLikeVocationTile(obj) then
+      table.insert(tiles, obj)
+    end
+  end
+
+  -- Sort for stable, pretty layout (by name, fallback GUID)
+  table.sort(tiles, function(a,b)
+    local an, bn = nil, nil
+    pcall(function() an = a.getName and a.getName() or "" end)
+    pcall(function() bn = b.getName and b.getName() or "" end)
+    an = tostring(an or "")
+    bn = tostring(bn or "")
+    if an ~= bn then return an < bn end
+    local ag = tostring(a.getGUID and a.getGUID() or "")
+    local bg = tostring(b.getGUID and b.getGUID() or "")
+    return ag < bg
+  end)
+
+  -- Place sequentially with small delays to avoid physics jitter
+  for i, obj in ipairs(tiles) do
+    stripAllColorTags(obj)
+    if Wait and Wait.time then
+      Wait.time(function()
+        parkTileOnController(obj, i)
+      end, STORAGE_STACK_DELAY * i)
+    else
+      parkTileOnController(obj, i)
+    end
+  end
+
+  -- Clear any selection artifacts (level-1 cards / explanation card / summary)
+  pcall(function() VOC_CleanupSelection({color="Yellow"}) end)
+  pcall(function() VOC_CleanupSelection({color="Blue"}) end)
+  pcall(function() VOC_CleanupSelection({color="Red"}) end)
+  pcall(function() VOC_CleanupSelection({color="Green"}) end)
+
+  -- 2) Reset saved state
   state.vocations = { Yellow = nil, Blue = nil, Red = nil, Green = nil }
   state.levels = { Yellow = 1, Blue = 1, Red = 1, Green = 1 }
   state.workAP = { Yellow = 0, Blue = 0, Red = 0, Green = 0 }
@@ -861,58 +1033,72 @@ function VOC_CanPromote(params)
   local vocationData = VOCATION_DATA[vocation]
   if not vocationData then return false, "Invalid vocation data" end
   
-  local nextLevel = level + 1
-  local nextLevelData = vocationData.levels[nextLevel]
-  if not nextLevelData then return false, "Next level data not found" end
+  -- Requirements to level up FROM current level are in current level's promotion (not next level's)
+  local currentLevelData = vocationData.levels[level]
+  if not currentLevelData then return false, "Level data not found" end
   
-  local promotion = nextLevelData.promotion
+  local promotion = currentLevelData.promotion
   if not promotion then return false, "No promotion data" end
   
   -- Get Stats Controller
   local statsCtrl = findStatsController(color)
   if not statsCtrl then return false, "Stats Controller not found" end
   
-  -- Check Knowledge and Skills
-  local ok, knowledge = pcall(function() return statsCtrl.call("getKnowledge") end)
-  local ok2, skills = pcall(function() return statsCtrl.call("getSkills") end)
-  
-  if not ok or not ok2 then
-    return false, "Could not query stats"
+  -- Get Knowledge and Skills (try getKnowledge/getSkills first, then getState as fallback)
+  local knowledge, skills = 0, 0
+  local ok1, k1 = pcall(function() return statsCtrl.call("getKnowledge") end)
+  local ok2, s1 = pcall(function() return statsCtrl.call("getSkills") end)
+  if ok1 and (tonumber(k1) or k1) ~= nil then
+    knowledge = tonumber(k1) or 0
+  end
+  if ok2 and (tonumber(s1) or s1) ~= nil then
+    skills = tonumber(s1) or 0
+  end
+  if (not ok1 or not ok2) or (knowledge == 0 and skills == 0) then
+    local ok3, st = pcall(function() return statsCtrl.call("getState") end)
+    if ok3 and type(st) == "table" then
+      knowledge = tonumber(st.k) or knowledge
+      skills = tonumber(st.s) or skills
+    end
   end
   
-  knowledge = tonumber(knowledge) or 0
-  skills = tonumber(skills) or 0
+  -- Build full requirement message and check all conditions (so player sees K, S, and Time/Work)
+  local function failMsg(parts)
+    return table.concat(parts, ". ")
+  end
   
-  -- Check requirements based on promotion type (all Level 1 and 2 need Knowledge, Skills, and Time or vocation-specific)
+  -- Check requirements based on promotion type
   if promotion.type == "standard" then
-    -- Need Knowledge, Skills, and Experience (Time = rounds at current level)
-    if knowledge < promotion.knowledge then
-      return false, "Need " .. promotion.knowledge .. " Knowledge (have " .. knowledge .. ")"
+    local parts = {}
+    if knowledge < (promotion.knowledge or 0) then
+      table.insert(parts, "Need " .. tostring(promotion.knowledge) .. " Knowledge (have " .. tostring(knowledge) .. ")")
     end
-    if skills < promotion.skills then
-      return false, "Need " .. promotion.skills .. " Skills (have " .. skills .. ")"
+    if skills < (promotion.skills or 0) then
+      table.insert(parts, "Need " .. tostring(promotion.skills) .. " Skills (have " .. tostring(skills) .. ")")
     end
     local currentRound = getCurrentRound()
     local roundAtLevel = state.levelUpRound[color] or 1
     local roundsAtLevel = math.max(0, currentRound - roundAtLevel)
     local needYears = promotion.experience or 0
     if roundsAtLevel < needYears then
-      return false, "Need " .. needYears .. " years at this level (have " .. roundsAtLevel .. " rounds)"
+      table.insert(parts, "Need " .. needYears .. " years at this level (have " .. roundsAtLevel .. " rounds)")
     end
+    if #parts > 0 then return false, failMsg(parts) end
     return true, "All requirements met"
     
   elseif promotion.type == "work_based" then
-    -- Need Knowledge, Skills, and Work AP on current level
-    if knowledge < promotion.knowledge then
-      return false, "Need " .. promotion.knowledge .. " Knowledge (have " .. knowledge .. ")"
+    local parts = {}
+    if knowledge < (promotion.knowledge or 0) then
+      table.insert(parts, "Need " .. tostring(promotion.knowledge) .. " Knowledge (have " .. tostring(knowledge) .. ")")
     end
-    if skills < promotion.skills then
-      return false, "Need " .. promotion.skills .. " Skills (have " .. skills .. ")"
+    if skills < (promotion.skills or 0) then
+      table.insert(parts, "Need " .. tostring(promotion.skills) .. " Skills (have " .. tostring(skills) .. ")")
     end
     local workAP = state.workAPThisLevel[color] or 0
-    if workAP < promotion.workAP then
-      return false, "Need " .. promotion.workAP .. " AP work on this level (have " .. workAP .. ")"
+    if workAP < (promotion.workAP or 0) then
+      table.insert(parts, "Need " .. tostring(promotion.workAP) .. " AP work on this level (have " .. tostring(workAP) .. ")")
     end
+    if #parts > 0 then return false, failMsg(parts) end
     -- Check additional cost (e.g., Celebrity Level 3 needs 4000 VIN)
     if promotion.additionalCost then
       -- TODO: Check if player has enough money
@@ -941,6 +1127,21 @@ function VOC_Promote(params)
   local color = normalizeColor(params.color)
   if not color then return false, "Invalid color" end
   
+  -- Only the owner of the vocation card can level it up
+  local tileGuid = params.tileGuid
+  if tileGuid and tileGuid ~= "" then
+    local tile = getObjectFromGUID(tileGuid)
+    if tile and tile.hasTag then
+      local ownerColor = nil
+      for _, c in ipairs(COLORS) do
+        if tile.hasTag(colorTag(c)) then ownerColor = c; break end
+      end
+      if ownerColor and ownerColor ~= color then
+        return false, "Only the owner of this vocation can level up"
+      end
+    end
+  end
+  
   local canPromote, reason = VOC_CanPromote({color=color})
   if not canPromote then
     log("Cannot promote " .. color .. ": " .. tostring(reason))
@@ -951,17 +1152,18 @@ function VOC_Promote(params)
   local oldLevel = state.levels[color] or 1
   local newLevel = oldLevel + 1
   
-  -- Update level
+  -- Replace vocation card with higher-level card first; only then update state
+  local swapOk = swapTileOnPromotion(color, vocation, oldLevel, newLevel)
+  if not swapOk then
+    log("Promotion aborted: could not replace vocation card for " .. color .. " (Level " .. newLevel .. " tile not found or place failed)")
+    return false, "Could not replace vocation card – ensure Level " .. newLevel .. " vocation tiles exist with correct tags"
+  end
+  
+  -- Update level and round after successful card swap
   state.levels[color] = newLevel
-  state.levelUpRound[color] = getCurrentRound()  -- Time/Experience: rounds at this level
-  
-  -- Reset work AP for this level (for Celebrity tracking)
+  state.levelUpRound[color] = getCurrentRound()
   state.workAPThisLevel[color] = 0
-  
   saveState()
-  
-  -- Swap tile on board
-  swapTileOnPromotion(color, vocation, oldLevel, newLevel)
   
   local vocationData = VOCATION_DATA[vocation]
   local newLevelData = vocationData.levels[newLevel]
@@ -970,6 +1172,16 @@ function VOC_Promote(params)
   broadcastToAll(color .. " promoted to " .. vocationData.name .. " - " .. newLevelData.jobTitle, {0.3, 1, 0.3})
   
   return true
+end
+
+-- Called at end of player's turn: if they meet promotion requirements, promote automatically (no tile context menu).
+function VOC_CheckAndAutoPromote(params)
+  local color = normalizeColor(params and params.color)
+  if not color then return false end
+  local canPromote = VOC_CanPromote({ color = color })
+  if not canPromote then return false end
+  local ok = VOC_Promote({ color = color })
+  return ok
 end
 
 -- =========================================================
@@ -2515,6 +2727,19 @@ function UI_ConfirmVocation(player, value, id)
     color = normalizeColor(player and player.color or nil)
   end
   
+  -- Special handling for "White" (spectator/host clicks via Global UI):
+  -- treat it as the active selecting player so Confirm works in solo testing / hotseat.
+  if color == "White" then
+    log("WARNING: Confirm click detected from White (spectator). Attempting to use active color instead.")
+    color = uiState.activeColor or selectionState.activeColor or state.currentPickerColor
+    if not color then
+      log("ERROR: Confirm clicked as White but no active color is set")
+      broadcastToAll("⚠ Please sit at a player color seat (Yellow/Blue/Red/Green) to confirm.", {1, 0.5, 0.2})
+      return
+    end
+    log("Using active color instead for confirm: " .. tostring(color))
+  end
+  
   if not color then return end
   
   -- Verify it's the active player
@@ -2595,6 +2820,18 @@ function UI_BackToSelection(player, value, id)
     color = normalizeColor(player)
   else
     color = normalizeColor(player and player.color or nil)
+  end
+  
+  -- Special handling for "White" (spectator/host clicks via Global UI): use active color.
+  if color == "White" then
+    log("WARNING: Back click detected from White (spectator). Attempting to use active color instead.")
+    color = uiState.activeColor or selectionState.activeColor or state.currentPickerColor
+    if not color then
+      log("UI_BackToSelection: No active color available (clicked as White)")
+      broadcastToAll("⚠ Please sit at a player color seat (Yellow/Blue/Red/Green) to go back.", {1, 0.5, 0.2})
+      return
+    end
+    log("Using active color instead for back: " .. tostring(color))
   end
   
   if not color then 

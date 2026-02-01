@@ -116,6 +116,29 @@ local function log(msg)  if DEBUG then print("[WLB EVENT] " .. tostring(msg)) en
 local function warn(msg) print("[WLB EVENT][WARN] " .. tostring(msg)) end
 local function colorTag(color) return COLOR_TAG_PREFIX .. tostring(color) end
 
+-- Money resolver: supports legacy money tiles OR player boards with embedded money API
+local function resolveMoney(color)
+  color = tostring(color or "")
+  if color == "" then return nil end
+
+  -- IMPORTANT:
+  -- If both exist (legacy money tile + new money-on-board), we must prefer the board
+  -- to avoid using the old tile by accident.
+
+  -- 1) Player board with embedded money API (PlayerBoardController_Shared)
+  local b = findOneByTags({TAG_BOARD, colorTag(color)})
+  if b and b.call then
+    local ok = pcall(function() return b.call("getMoney") end)
+    if ok then return b end
+  end
+
+  -- 2) Legacy money tile
+  local m = findOneByTags({TAG_MONEY, colorTag(color)})
+  if m then return m end
+
+  return nil
+end
+
 local function safeCall(fn)
   local ok, res = pcall(fn)
   if ok then return true, res end
@@ -316,7 +339,7 @@ local function moneyGet(moneyObj)
 end
 
 local function canAfford(color, negativeDelta)
-  local moneyObj = findOneByTags({TAG_MONEY, colorTag(color)})
+  local moneyObj = resolveMoney(color)
   if not moneyObj then return false end
   local cur = moneyGet(moneyObj)
   if type(cur) ~= "number" then return false end
@@ -557,7 +580,7 @@ local function applyToPlayer_NoAP(color, effect, dbgLabel)
   if not effect then return true end
 
   if effect.money and effect.money ~= 0 then
-    local moneyObj = findOneByTags({TAG_MONEY, colorTag(color)})
+    local moneyObj = resolveMoney(color)
     if not moneyObj then warn("Money object not found for "..tostring(color)); return false end
     local ok = moneyAdd(moneyObj, effect.money)
     if not ok then warn("Money API mismatch for "..tostring(color)) end
@@ -1035,7 +1058,7 @@ local function allPlayerColors()
 end
 
 local function resolveBirthday(activeColorNow)
-  local moneyActive = findOneByTags({TAG_MONEY, colorTag(activeColorNow)})
+  local moneyActive = resolveMoney(activeColorNow)
   for _, c in ipairs(allPlayerColors()) do
     if c ~= activeColorNow then
       local satObj = getSatToken(c)
@@ -1043,7 +1066,7 @@ local function resolveBirthday(activeColorNow)
 
       applyAP_Move(c, {to="INACTIVE", amount=1, duration=1})
 
-      local moneyOther = findOneByTags({TAG_MONEY, colorTag(c)})
+      local moneyOther = resolveMoney(c)
       if moneyOther and moneyActive and canAfford(c, -100) then
         pcall(function()
           moneyAdd(moneyOther, -100)
@@ -1056,14 +1079,14 @@ local function resolveBirthday(activeColorNow)
 end
 
 local function resolveMarriageMulti(activeColorNow)
-  local moneyActive = findOneByTags({TAG_MONEY, colorTag(activeColorNow)})
+  local moneyActive = resolveMoney(activeColorNow)
   for _, c in ipairs(allPlayerColors()) do
     if c ~= activeColorNow then
       local satObj = getSatToken(c)
       if satObj then satAdd(satObj, 2, "Marriage:"..c) end
       applyAP_Move(c, {to="INACTIVE", amount=2, duration=1})
 
-      local moneyOther = findOneByTags({TAG_MONEY, colorTag(c)})
+      local moneyOther = resolveMoney(c)
       if moneyOther and moneyActive and canAfford(c, -200) then
         pcall(function()
           moneyAdd(moneyOther, -200)

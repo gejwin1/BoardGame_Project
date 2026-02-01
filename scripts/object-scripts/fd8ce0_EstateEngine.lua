@@ -27,6 +27,7 @@ local TAG_TOKEN_ENGINE  = "WLB_TOKEN_SYSTEM"
 local TAG_MONEY         = "WLB_MONEY"
 local TAG_COSTS_CALC    = "WLB_COSTS_CALC"
 local COLOR_TAG_PREFIX  = "WLB_COLOR_"
+local TAG_PLAYERBOARD   = "WLB_BOARD"
 
 -- placed/ownership tags
 local TAG_ESTATE_OWNED     = "WLB_ESTATE_OWNED"
@@ -517,10 +518,27 @@ end
 -- =========================
 local function findMoneyCtrlForColor(color)
   color = normalizeColor(color)
+  local ctag = colorTag(color)
+
+  -- IMPORTANT:
+  -- If both exist (legacy money tile + new money-on-board), we must prefer the board
+  -- to avoid using the old tile by accident.
+
+  -- 1) Player board with embedded money API (PlayerBoardController_Shared)
+  local boards = getObjectsWithTag(TAG_PLAYERBOARD) or {}
+  for _,b in ipairs(boards) do
+    if b and b.hasTag and b.hasTag(ctag) and b.call then
+      local ok = pcall(function() return b.call("getMoney") end)
+      if ok then return b end
+    end
+  end
+
+  -- 2) Legacy money tile
   local list = getObjectsWithTag(TAG_MONEY) or {}
   for _,o in ipairs(list) do
-    if o and o.hasTag and o.hasTag(colorTag(color)) then return o end
+    if o and o.hasTag and o.hasTag(ctag) then return o end
   end
+
   return nil
 end
 
