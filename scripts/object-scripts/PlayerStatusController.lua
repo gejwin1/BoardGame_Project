@@ -26,6 +26,9 @@ local TAG_STATUS_ADDICTION  = "WLB_STATUS_ADDICTION"
 local TAG_STATUS_DATING     = "WLB_STATUS_DATING"
 local TAG_STATUS_GOODKARMA  = "WLB_STATUS_GOOD_KARMA"
 local TAG_STATUS_EXPERIENCE = "WLB_STATUS_EXPERIENCE"
+local TAG_STATUS_VOUCH_C    = "WLB_STATUS_VOUCH_C"
+local TAG_STATUS_VOUCH_H    = "WLB_STATUS_VOUCH_H"
+local TAG_STATUS_VOUCH_P    = "WLB_STATUS_VOUCH_P"
 
 -- High-level keys from EventEngine -> status tags
 -- (EventEngine can send either statusTag directly OR "effect"/"statusKey")
@@ -34,8 +37,11 @@ local MAP_KEY_TO_TAG = {
   WOUNDED    = TAG_STATUS_WOUNDED,
   ADDICTION  = TAG_STATUS_ADDICTION,
   DATING     = TAG_STATUS_DATING,
-  GOODKARMA  = TAG_STATUS_GOODKARMA,
+  GOODKARMA  = TAG_STATUS_GOOD_KARMA,
   EXPERIENCE = TAG_STATUS_EXPERIENCE,
+  VOUCH_C    = TAG_STATUS_VOUCH_C,
+  VOUCH_H    = TAG_STATUS_VOUCH_H,
+  VOUCH_P    = TAG_STATUS_VOUCH_P,
 }
 
 -- State
@@ -152,6 +158,20 @@ local function TE_HasStatus(color, statusTag)
   return ok and res == true
 end
 
+local function TE_GetStatusCount(color, statusTag)
+  if not ensureEngine() then return 0 end
+  local ok, res = safeCall(TokenEngine, "TE_GetStatusCount_ARGS", { color=color, statusTag=statusTag })
+  if ok and type(res) == "number" then return math.max(0, math.floor(res)) end
+  return 0
+end
+
+local function TE_RemoveStatusCount(color, statusTag, count)
+  if not ensureEngine() then return false end
+  count = math.max(0, math.floor(tonumber(count) or 0))
+  if count == 0 then return true end
+  return safeCall(TokenEngine, "TE_RemoveStatusCount_ARGS", { color=color, statusTag=statusTag, count=count })
+end
+
 -- =========================================================
 -- PUBLIC API for EventEngine
 -- =========================================================
@@ -181,7 +201,7 @@ function PS_Event(payload)
     return true
   end
 
-  if op == "ADD_STATUS" or op == "REMOVE_STATUS" or op == "HAS_STATUS" then
+  if op == "ADD_STATUS" or op == "REMOVE_STATUS" or op == "HAS_STATUS" or op == "GET_STATUS_COUNT" or op == "REMOVE_STATUS_COUNT" then
     local statusTag = resolveStatusTag(payload)
     if statusTag == "" then
       warn("PS_Event: cannot resolve statusTag (provide statusTag or statusKey/effect)")
@@ -196,8 +216,15 @@ function PS_Event(payload)
       local ok, err = TE_RemoveStatus(color, statusTag)
       if not ok then warn("REMOVE_STATUS failed: "..tostring(err)) end
       return ok
-    else -- HAS_STATUS
+    elseif op == "HAS_STATUS" then
       return TE_HasStatus(color, statusTag)
+    elseif op == "GET_STATUS_COUNT" then
+      return TE_GetStatusCount(color, statusTag)
+    elseif op == "REMOVE_STATUS_COUNT" then
+      local count = math.max(0, math.floor(tonumber(payload.count) or 0))
+      local ok, err = TE_RemoveStatusCount(color, statusTag, count)
+      if not ok then warn("REMOVE_STATUS_COUNT failed: "..tostring(err)) end
+      return ok
     end
   end
 
