@@ -36,6 +36,7 @@ local ROUND_TOKEN_GUID = "465776"
 -- AP areas
 local AREA_WORK = "W"
 local AREA_REST = "REST"
+local AREA_SCHOOL = "SC"
 
 -- Health bounds (for forecast)
 local MIN_HEALTH = 0
@@ -54,6 +55,9 @@ local POS = {
   -- Right pair: use for WORK
   work_plus  = {x=-6.9, y=0.592, z=3.45},
   work_minus = {x=-5.3, y=0.657, z=3.45},
+  -- SCHOOL / LEARNING (right side of REST, same row)
+  school_free = {x= 2.3, y=0.592, z=3.45},
+  school_paid = {x= 4.5, y=0.592, z=3.45},
 }
 
 -- Money display (LOCAL to player board)
@@ -79,6 +83,8 @@ local FS_MONEY = 250
 local COL_PLUS  = {0.15, 0.70, 0.20, 0.98}
 local COL_MINUS = {0.85, 0.20, 0.20, 0.98}
 local COL_LOCK  = {0.35, 0.35, 0.35, 0.98}
+local COL_SCHOOL_FREE = {0.25, 0.55, 0.95, 0.98}
+local COL_SCHOOL_PAID = {0.55, 0.25, 0.85, 0.98}
 local COL_TXT   = {1,1,1,1}
 local COL_MONEY_BG = {0.95, 0.95, 0.95, 0.98}
 local COL_MONEY_FG = {0.05, 0.05, 0.05, 1}
@@ -90,6 +96,8 @@ local S = {
   -- player can still add more WORK AP, but cannot remove below paidWorkCount.
   paidWorkCount = 0,
   money = START_MONEY,
+  -- transient UI state
+  schoolPending = nil, -- "FREE" | "PAID" | nil
 }
 
 -- =========================================
@@ -224,6 +232,34 @@ local function apGetCount(ap, area)
     end
   end
   return 0
+end
+
+local function apCanSpend(ap, toArea, amount)
+  amount = tonumber(amount) or 0
+  if amount <= 0 then return true end
+  if not ap or not ap.call then return false end
+  local ok, can = pcall(function()
+    return ap.call("canSpendAP", {to=toArea, amount=amount})
+  end)
+  return ok and can == true
+end
+
+local function apMove(ap, toArea, amount)
+  if not ap or not ap.call then return {ok=false, moved=0, requested=amount, reason="no_ap_ctrl"} end
+  local ok, ret = pcall(function()
+    return ap.call("moveAP", {to=toArea, amount=amount})
+  end)
+  if not ok or type(ret) ~= "table" then
+    return {ok=false, moved=0, requested=amount, reason="move_failed"}
+  end
+  return ret
+end
+
+local function statsApplyDelta(delta)
+  local st = findStatsCtrlForMyColor()
+  if not st or not st.call then return false end
+  local ok = pcall(function() st.call("applyDelta", delta) end)
+  return ok == true
 end
 
 local function statsGetHealthNow()
@@ -388,6 +424,97 @@ local function doWorkMove(amount)
   redraw()
 end
 
+-- =========================================
+-- SCHOOL / LEARNING (FREE / PAID)
+-- =========================================
+local SCHOOL_AP_COST = 3
+local SCHOOL_PAID_COST = 400
+
+local function doSchoolBegin(mode)
+  if mode ~= "FREE" and mode ~= "PAID" then return end
+  S.schoolPending = mode
+  redraw()
+end
+
+local function doSchoolCancel()
+  S.schoolPending = nil
+  redraw()
+end
+
+local function doSchoolResolve(choice)
+  local color = getMyColor()
+  if not color then return end
+
+  local ap = findApCtrlForMyColor()
+  if not ap then return end
+
+  local mode = S.schoolPending
+  if mode ~= "FREE" and mode ~= "PAID" then
+    -- No pending selection; ignore.
+    return
+  end
+
+  local paid = (mode == "PAID")
+  local moneyCost = paid and SCHOOL_PAID_COST or 0
+
+  -- Choice mapping:
+  -- FREE: +1 Knowledge OR +1 Skill
+  -- PAID: +2 Knowledge OR +2 Skill
+  local dk, ds = 0, 0
+  if choice == "K" then
+    dk = paid and 2 or 1
+  elseif choice == "S" then
+    ds = paid and 2 or 1
+  else
+    return
+  end
+
+  -- Pre-check money
+  if moneyCost > 0 and getMoney() < moneyCost then
+    broadcastToAll("⛔ "..color..": Not enough money for PAID school ("..tostring(moneyCost).." WIN).", {1,0.6,0.2})
+    return
+  end
+
+  -- Pre-check AP
+  if not apCanSpend(ap, AREA_SCHOOL, SCHOOL_AP_COST) then
+    broadcastToAll("⛔ "..color..": Not enough free AP for school ("..tostring(SCHOOL_AP_COST).." AP).", {1,0.6,0.2})
+    return
+  end
+
+  -- Move AP to SCHOOL
+  local ret = apMove(ap, AREA_SCHOOL, SCHOOL_AP_COST)
+  local moved = tonumber(ret.moved or 0) or 0
+  if ret.ok ~= true or moved ~= SCHOOL_AP_COST then
+    -- Best-effort rollback if partial move happened
+    if moved > 0 then
+      pcall(function() ap.call("moveAP", {to=AREA_SCHOOL, amount=-moved}) end)
+    end
+    broadcastToAll("⛔ "..color..": Failed to place AP on SCHOOL (moved "..tostring(moved).."/"..tostring(SCHOOL_AP_COST)..").", {1,0.6,0.2})
+    return
+  end
+
+  -- Pay money (PAID)
+  if moneyCost > 0 then
+    addMoney({delta = -moneyCost})
+  end
+
+  -- Apply stats
+  local okStats = statsApplyDelta({k=dk, s=ds})
+  if not okStats then
+    broadcastToAll("⚠️ "..color..": School completed, but failed to apply stats (check STATS CTRL).", {1,0.8,0.3})
+  end
+
+  local rewardText = (dk > 0) and ("+"..tostring(dk).." KNOWLEDGE") or ("+"..tostring(ds).." SKILL")
+  if paid then
+    broadcastToAll("🎓 "..color..": PAID school (-"..tostring(moneyCost).." WIN, -"..tostring(SCHOOL_AP_COST).." AP) → "..rewardText, {0.75,0.9,1})
+  else
+    broadcastToAll("🎓 "..color..": FREE school (-"..tostring(SCHOOL_AP_COST).." AP) → "..rewardText, {0.75,0.9,1})
+  end
+
+  S.schoolPending = nil
+  redraw()
+end
+
 -- Called by CostsCalculator after PAY resolves for a color (locks WORK for rest of turn)
 function WORK_OnPaid(params)
   local my = getMyColor()
@@ -476,6 +603,91 @@ function redraw()
     tooltip        = workMinusTip
   })
 
+  -- SCHOOL buttons (FREE / PAID) + follow-up choice menu
+  if S.schoolPending == "FREE" or S.schoolPending == "PAID" then
+    local paid = (S.schoolPending == "PAID")
+    local hdr = paid and "PAID: choose reward" or "FREE: choose reward"
+    local costLine = paid and ("-400 WIN, -3 AP") or ("-3 AP")
+
+    -- small header label (non-clickable)
+    self.createButton({
+      click_function = "noop",
+      function_owner = self,
+      label          = "SCHOOL\n"..hdr.."\n"..costLine,
+      position       = {((POS.school_free.x + POS.school_paid.x) / 2), POS.school_free.y, (POS.school_free.z - 1.05)},
+      width          = 1800,
+      height         = 520,
+      font_size      = 130,
+      color          = {0.95, 0.95, 0.95, 0.95},
+      font_color     = {0.05, 0.05, 0.05, 1},
+      tooltip        = ""
+    })
+
+    self.createButton({
+      click_function = "school_choose_k",
+      function_owner = self,
+      label          = "KNOWLEDGE",
+      position       = {POS.school_free.x, POS.school_free.y, POS.school_free.z},
+      width          = 1100,
+      height         = H_BTN,
+      font_size      = 150,
+      color          = COL_SCHOOL_FREE,
+      font_color     = COL_TXT,
+      tooltip        = paid and "+2 KNOWLEDGE" or "+1 KNOWLEDGE"
+    })
+
+    self.createButton({
+      click_function = "school_choose_s",
+      function_owner = self,
+      label          = "SKILL",
+      position       = {POS.school_paid.x, POS.school_paid.y, POS.school_paid.z},
+      width          = 1100,
+      height         = H_BTN,
+      font_size      = 170,
+      color          = COL_SCHOOL_PAID,
+      font_color     = COL_TXT,
+      tooltip        = paid and "+2 SKILL" or "+1 SKILL"
+    })
+
+    self.createButton({
+      click_function = "school_cancel",
+      function_owner = self,
+      label          = "CANCEL",
+      position       = {((POS.school_free.x + POS.school_paid.x) / 2), POS.school_free.y, (POS.school_free.z - 2.05)},
+      width          = 1400,
+      height         = 320,
+      font_size      = 140,
+      color          = COL_LOCK,
+      font_color     = COL_TXT,
+      tooltip        = "Back"
+    })
+  else
+    self.createButton({
+      click_function = "school_free",
+      function_owner = self,
+      label          = "FREE",
+      position       = {POS.school_free.x, POS.school_free.y, POS.school_free.z},
+      width          = 500,
+      height         = H_BTN,
+      font_size      = 170,
+      color          = COL_SCHOOL_FREE,
+      font_color     = COL_TXT,
+      tooltip        = "SCHOOL (FREE)\nUses 3 AP\nThen choose: Knowledge or Skill"
+    })
+    self.createButton({
+      click_function = "school_paid",
+      function_owner = self,
+      label          = "PAID",
+      position       = {POS.school_paid.x, POS.school_paid.y, POS.school_paid.z},
+      width          = 500,
+      height         = H_BTN,
+      font_size      = 170,
+      color          = COL_SCHOOL_PAID,
+      font_color     = COL_TXT,
+      tooltip        = "SCHOOL (PAID)\nUses 3 AP + 400 WIN\nThen choose: +2 Knowledge or +2 Skill"
+    })
+  end
+
   -- MONEY display (2 lines, separate buttons; non-clickable)
   self.createButton({
     click_function = "noop",
@@ -509,6 +721,13 @@ function rest_minus(_, player_color, alt_click) doRestMove(-1); redraw() end
 
 function work_plus(_, player_color, alt_click) doWorkMove(1) end
 function work_minus(_, player_color, alt_click) doWorkMove(-1) end
+
+function school_free(_, player_color, alt_click) doSchoolBegin("FREE") end
+function school_paid(_, player_color, alt_click) doSchoolBegin("PAID") end
+
+function school_choose_k(_, player_color, alt_click) doSchoolResolve("K") end
+function school_choose_s(_, player_color, alt_click) doSchoolResolve("S") end
+function school_cancel(_, player_color, alt_click) doSchoolCancel() end
 
 -- Unlock WORK when it's not our turn anymore (simple per-turn lock behavior)
 local function tick()
@@ -552,6 +771,7 @@ function resetNewGame()
   -- Reset money and board-local locks for a new game
   S.money = START_MONEY
   S.paidWorkCount = 0
+  S.schoolPending = nil
   redraw()
   return S.money
 end
@@ -592,6 +812,8 @@ function onLoad(saved)
         else
           S.money = START_MONEY
         end
+        -- Do not persist transient menus across reload
+        S.schoolPending = nil
       end
     end
     if S.money == nil then S.money = START_MONEY end

@@ -339,14 +339,11 @@ end
 -- =========================================================
 -- [S4B] PER TURN AUTOMATION HOOKS
 -- =========================================================
+-- Source of truth: TokenEngine state via PlayerStatusController (no tag scan; tokens have no color tag)
 local function countAddictionTokens(color)
-  local count = 0
-  for _, o in ipairs(getAllObjects()) do
-    if o and o.hasTag and o.hasTag(TAG_STATUS_ADDICTION) and o.hasTag(COLOR_TAG_PREFIX..color) then
-      count = count + 1
-    end
-  end
-  return count
+  local ok, ret = pscCall("PS_Event", { color = color, op = "GET_STATUS_COUNT", statusTag = TAG_STATUS_ADDICTION })
+  if ok and type(ret) == "number" then return math.max(0, math.floor(ret)) end
+  return 0
 end
 
 local function removeOneAddictionToken(color)

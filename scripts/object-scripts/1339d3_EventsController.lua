@@ -73,6 +73,7 @@ local PIPE_SETTLE_SEC     = 0.85  -- Increased to allow cards to settle after me
 
 -- Track card UI
 local UI_TOOLTIP_TEXT = "Do you want to play this card?"
+local UI_KARMA_QUESTION  = "Use Good Karma to avoid results of this card?"
 local UI_LIFT_Y = 2.2
 local UI_LOCK_WHEN_MODAL = true
 
@@ -91,6 +92,8 @@ local POST_NEXT_OBLIGATORY_DELAY = 0.35
 
 -- Watchdog for obligatory lock refresh (seconds)
 local OBLIG_WATCHDOG_SEC = 0.45
+-- Dev: set true to log karma modal decisions (obligatory? effectiveColor? hasKarma?)
+local DEBUG_KARMA = false
 
 -- === SECTION 1.0: TRACK LOCAL VECTORS =======================================
 
@@ -152,8 +155,10 @@ local state = {
 }
 
 local uiState = {
-  modalOpen = {}, -- [cardGuid]=true
-  homePos = {},   -- [cardGuid]={x,y,z}
+  modalOpen = {},   -- [cardGuid]=true
+  homePos = {},     -- [cardGuid]={x,y,z}
+  karmaChoice = {}, -- [cardGuid]=true when showing "Use Good Karma?" (obligatory + has karma)
+  modalColor = {},  -- [cardGuid]=clickerColor (fallback when Turns.turn_color empty)
 }
 
 local nextBusy = false
@@ -210,6 +215,7 @@ local function loadState()
 
   state.resetInProgress = (state.resetInProgress == true)
   state.jobId = tonumber(state.jobId) or 0
+  state.karmaDiagnostics = (state.karmaDiagnostics == true)
 end
 
 -- === SECTION 3: BOARD + WORLD POSITIONS ======================================
@@ -589,6 +595,50 @@ local function uiAttachQuestionLabel_MODAL(card)
   })
 end
 
+-- Good Karma choice: "Use Good Karma to avoid results?" YES (use karma) / NO (resolve as usual). Used when card is obligatory AND player has Good Karma.
+local function uiAttachKarmaChoice_MODAL(card)
+  if not isCard(card) then return end
+  card.createButton({
+    click_function = "ui_noop",
+    function_owner = self,
+    label          = UI_KARMA_QUESTION,
+    position       = {0, 0.95, 0},
+    rotation       = {0, 0, 0},
+    width          = 3800,
+    height         = 360,
+    font_size      = 150,
+    color          = {0, 0, 0, 0.70},
+    font_color     = {1, 1, 1, 1},
+    tooltip        = "",
+  })
+  card.createButton({
+    click_function = "evt_onYes",
+    function_owner = self,
+    label          = "YES",
+    position       = UI_POS_YES,
+    rotation       = {0, 0, 0},
+    width          = UI_BTN_W,
+    height         = UI_BTN_H,
+    font_size      = UI_BTN_FONT,
+    color          = {1.0, 0.84, 0.0, 0.95},
+    font_color     = {0, 0, 0, 1},
+    tooltip        = "Use Good Karma: skip this card without consequences (token consumed)",
+  })
+  card.createButton({
+    click_function = "evt_onNo",
+    function_owner = self,
+    label          = "NO",
+    position       = UI_POS_NO,
+    rotation       = {0, 0, 0},
+    width          = UI_BTN_W,
+    height         = UI_BTN_H,
+    font_size      = UI_BTN_FONT,
+    color          = {0.2, 0.7, 0.2, 0.95},
+    font_color     = {1, 1, 1, 1},
+    tooltip        = "No, resolve this card as usual",
+  })
+end
+
 local function uiAttachYesNo_MODAL(card)
   if not isCard(card) then return end
   uiAttachQuestionLabel_MODAL(card)
@@ -620,51 +670,7 @@ local function uiAttachYesNo_MODAL(card)
     font_color     = {1, 1, 1, 1},
     tooltip        = "",
   })
-  
-  -- Add "USE KARMA" button if card is obligatory AND player has Good Karma
-  -- Wrap entire check in pcall to prevent any errors from breaking the UI
-  local okKarma, shouldShowKarma = pcall(function()
-    local playerColor = ""
-    local ok, result = pcall(function()
-      return (Turns and Turns.turn_color and Turns.turn_color ~= "") and Turns.turn_color or nil
-    end)
-    if ok and result then
-      playerColor = result
-    end
-    if playerColor == "" then return false end
-    
-    -- Check if card is obligatory and player has Good Karma
-    local isObligatory = false
-    if isCardObligatory then
-      isObligatory = isCardObligatory(card) == true
-    end
-    if not isObligatory then return false end
-    
-    local hasKarma = false
-    if hasGoodKarma then
-      hasKarma = hasGoodKarma(playerColor) == true
-    end
-    
-    return hasKarma
-  end)
-  
-  if okKarma and shouldShowKarma then
-    local UI_POS_KARMA = {0, 0.5, 0}  -- Position below YES/NO, centered
-    
-    card.createButton({
-      click_function = "evt_onUseKarma",
-      function_owner = self,
-      label          = "USE KARMA",
-      position       = UI_POS_KARMA,
-      rotation       = {0, 0, 0},
-      width          = UI_BTN_W,
-      height         = UI_BTN_H,
-      font_size      = UI_BTN_FONT,
-      color          = {1.0, 0.84, 0.0, 0.95},  -- Gold color for karma
-      font_color     = {0, 0, 0, 1},
-      tooltip        = "Skip this card without consequences (uses Good Karma token)",
-    })
-  end
+  -- Obligatory + Good Karma: karma-choice modal is shown instead (in uiOpenModal)
 end
 
 -- Engine-side modal buttons we must NOT overwrite
@@ -694,6 +700,63 @@ local function cardHasEngineModalUI(card)
   return false
 end
 
+-- Karma/obligatory helpers MUST be defined in same scope as uiOpenModal (TTS may chunk script; later locals can be nil here)
+local function getEngine()
+  return objByGUID(EVENT_ENGINE_GUID)
+end
+local function getPSC()
+  if type(getObjectsWithTag) == "function" then
+    local list = getObjectsWithTag("WLB_PLAYER_STATUS_CTRL") or {}
+    if #list > 0 then return list[1] end
+  end
+  for _, o in ipairs(getAllObjects()) do
+    if o and o.hasTag and o.hasTag("WLB_PLAYER_STATUS_CTRL") then return o end
+  end
+  return nil
+end
+local getPlayerStatusController = getPSC
+local function hasGoodKarma(color)
+  if not color or color == "" then return false end
+  local c = tostring(color)
+  c = c:sub(1,1):upper() .. c:sub(2):lower()
+  local psc = getPSC()
+  if not psc or not psc.call then return false end
+  local ok, res = pcall(function()
+    return psc.call("PS_Event", {
+      color = c,
+      op = "HAS_STATUS",
+      statusTag = "WLB_STATUS_GOOD_KARMA"
+    })
+  end)
+  return (ok and res == true) and true or false
+end
+local function consumeGoodKarma(color)
+  if not color or color == "" then return false end
+  local c = tostring(color)
+  c = c:sub(1,1):upper() .. c:sub(2):lower()
+  local psc = getPSC()
+  if not psc or not psc.call then return false end
+  local ok, _ = pcall(function()
+    psc.call("PS_Event", {
+      color = c,
+      op = "REMOVE_STATUS",
+      statusTag = "WLB_STATUS_GOOD_KARMA"
+    })
+  end)
+  return ok
+end
+local function isCardObligatory(card)
+  if not card then return false end
+  local engine = getEngine()
+  if not engine or not engine.call then return false end
+  local cardGuid = card.getGUID()
+  if not cardGuid or cardGuid == "" then return false end
+  local ok, result = pcall(function()
+    return engine.call("isObligatoryCard", { card_guid = cardGuid })
+  end)
+  return (ok and result == true)
+end
+
 function uiEnsureIdle(card)
   if not isCard(card) then return end
   local g = card.getGUID()
@@ -705,22 +768,74 @@ function uiEnsureIdle(card)
   uiAttachClickCatcher_IDLE(card)
 end
 
-function uiOpenModal(card)
+function uiOpenModal(card, clickerColor)
   if not isCard(card) then return end
   local g = card.getGUID()
   if uiState.modalOpen[g] then return end
   uiState.modalOpen[g] = true
+  if clickerColor then uiState.modalColor[g] = clickerColor end
+
+  -- Obligatory + Good Karma check MUST run before uiSetTrackDescription(card), so EventEngine
+  -- can read card ID from name/description (isObligatoryCard uses card_guid → extractCardId).
+  local effectiveColor = (Turns and Turns.turn_color and Turns.turn_color ~= "") and Turns.turn_color or (uiState.modalColor and uiState.modalColor[g]) or clickerColor or nil
+  local showKarmaChoice = false
+  local ok1, ok2, obligatory, hasKarma = nil, nil, nil, nil
+  if effectiveColor and effectiveColor ~= "" and type(isCardObligatory) == "function" and type(hasGoodKarma) == "function" then
+    ok1, obligatory = pcall(function() return isCardObligatory(card) end)
+    ok2, hasKarma = pcall(function() return hasGoodKarma(effectiveColor) end)
+    if DEBUG_KARMA and type(print) == "function" then
+      print("[WLB EVT CTRL] karma check: obligatory="..tostring(ok1 and obligatory).." effectiveColor="..tostring(effectiveColor).." hasKarma="..tostring(ok2 and hasKarma))
+    end
+    if ok1 and obligatory == true and ok2 and hasKarma == true then
+      showKarmaChoice = true
+    end
+  end
+
+  -- Karma diagnostics: broadcast to chat when card is clicked so you can see why karma modal did/didn't show
+  if state.karmaDiagnostics then
+    local reason
+    if not effectiveColor or effectiveColor == "" then
+      reason = "normal (no effectiveColor)"
+    elseif type(isCardObligatory) ~= "function" or type(hasGoodKarma) ~= "function" then
+      reason = "normal (isCardObligatory or hasGoodKarma is nil)"
+    elseif not ok1 then
+      reason = "normal (isCardObligatory call failed)"
+    elseif obligatory ~= true then
+      reason = "normal (obligatory=false; card ID may be missing from name/description)"
+    elseif not ok2 then
+      reason = "normal (hasGoodKarma call failed)"
+    elseif hasKarma ~= true then
+      reason = "normal (hasKarma=false; no token in TokenEngine for this color)"
+    else
+      reason = "KARMA MODAL"
+    end
+    broadcastToAll(
+      "[Karma diag] color=" .. tostring(effectiveColor or "") ..
+      " obligatory=" .. tostring(obligatory) ..
+      " hasKarma=" .. tostring(hasKarma) ..
+      " → " .. reason,
+      {0.9, 0.85, 0.6}
+    )
+  end
 
   uiSetTrackDescription(card)
   uiLift(card)
   uiClearButtons(card)
-  uiAttachYesNo_MODAL(card)
+
+  if showKarmaChoice then
+    uiState.karmaChoice[g] = true
+    uiAttachKarmaChoice_MODAL(card)
+  else
+    uiAttachYesNo_MODAL(card)
+  end
 end
 
 function uiCloseModal(card)
   if not isCard(card) then return end
   local g = card.getGUID()
   uiState.modalOpen[g] = nil
+  if uiState.karmaChoice then uiState.karmaChoice[g] = nil end
+  if uiState.modalColor then uiState.modalColor[g] = nil end
   uiReturnHome(card)
   uiEnsureIdle(card)
 end
@@ -729,6 +844,8 @@ function uiCloseModalSoft(card)
   if not isCard(card) then return end
   local g = card.getGUID()
   uiState.modalOpen[g] = nil
+  if uiState.karmaChoice then uiState.karmaChoice[g] = nil end
+  if uiState.modalColor then uiState.modalColor[g] = nil end
   uiReturnHome(card)
 end
 
@@ -1471,6 +1588,8 @@ function drawUI()
   btn("SETUP="..tostring(state.setup), "ui_noop", x2, r3)
   btn("JOB="..tostring(state.jobId), "ui_noop", x3, r3)
   btn("NEWGAME "..tostring(state.deckKind), "ui_newgame", x4, r3)
+
+  btn(state.karmaDiagnostics and "KARMA DIAG ON" or "KARMA DIAG OFF", "ui_karmaDiag", x1, -0.55)
 end
 
 function ui_toggleMode()
@@ -1511,51 +1630,18 @@ function ui_newgame()
   WLB_EVT_NEWGAME({kind = state.deckKind, refill = true})
 end
 
+function ui_karmaDiag()
+  state.karmaDiagnostics = not state.karmaDiagnostics
+  saveState()
+  drawUI()
+  broadcastToAll(
+    state.karmaDiagnostics and "[Karma] Diagnostics ON – click an event card to see why karma modal shows or not." or "[Karma] Diagnostics OFF.",
+    {0.9, 0.85, 0.6}
+  )
+end
+
 -- === SECTION 11: Card UI callbacks + Engine integration ======================
-
-local function getEngine()
-  return objByGUID(EVENT_ENGINE_GUID)
-end
-
--- Check if player has Good Karma status token
-local function hasGoodKarma(color)
-  if not color or color == "" then return false end
-  
-  -- Normalize color to match token tags
-  local normalizedColor = tostring(color)
-  if type(color) == "string" and color ~= "" then
-    normalizedColor = color:sub(1,1):upper() .. color:sub(2):lower()
-  end
-  
-  local TAG_GOOD_KARMA = "WLB_STATUS_GOOD_KARMA"
-  local TAG_COLOR_PREFIX = "WLB_COLOR_"
-  local colorTagStr = TAG_COLOR_PREFIX .. normalizedColor
-  
-  -- Check for Good Karma token on player board by searching for objects with both tags
-  for _, o in ipairs(getAllObjects()) do
-    if o and o.hasTag and o.hasTag(TAG_GOOD_KARMA) and o.hasTag(colorTagStr) then
-      return true
-    end
-  end
-  
-  return false
-end
-
--- Check if card is obligatory (via Event Engine)
-local function isCardObligatory(card)
-  if not card then return false end
-  local engine = getEngine()
-  if not engine or not engine.call then return false end
-  
-  local cardGuid = card.getGUID()
-  if not cardGuid or cardGuid == "" then return false end
-  
-  local ok, result = pcall(function()
-    return engine.call("isObligatoryCard", { card_guid = cardGuid })
-  end)
-  
-  return (ok and result == true)
-end
+-- (getEngine, getPSC, hasGoodKarma, consumeGoodKarma, isCardObligatory are defined above, before uiOpenModal, so they are in scope when modal runs)
 
 local function safeBroadcastTo(color, msg, rgb)
   rgb = rgb or {1,1,1}
@@ -1693,11 +1779,18 @@ function evt_onCardClicked(card, player_color, alt_click)
   if not isCard(card) then return end
   if not isObjNearAnySlot(card) then return end
   if cardHasEngineModalUI(card) then return end
-  uiOpenModal(card)
+  uiOpenModal(card, player_color)
 end
 
 function evt_onNo(card, player_color, alt_click)
   if not isCard(card) then return end
+  local g = card.getGUID()
+  -- Karma choice modal: NO = "No, resolve card as usual"
+  if uiState.karmaChoice and uiState.karmaChoice[g] then
+    uiState.karmaChoice[g] = nil
+    evt_onYes(card, player_color, alt_click)
+    return
+  end
   uiCloseModal(card)
 end
 
@@ -1717,58 +1810,19 @@ function evt_onUseKarma(card, player_color, alt_click)
     return
   end
   
-  -- Check if player still has Good Karma (might have been used already)
+  -- Consume via PSC only (no token scan); fail if PSC missing
+  local psc = getPSC()
+  if not psc or not psc.call then
+    safeBroadcastTo(playerColor, "⛔ PlayerStatusController not found. Cannot consume Good Karma.", {1,0.6,0.2})
+    uiCloseModal(card)
+    return
+  end
   if not hasGoodKarma(playerColor) then
     safeBroadcastTo(playerColor, "⛔ Good Karma token not found. Card not skipped.", {1,0.6,0.2})
     uiCloseModal(card)
     return
   end
-  
-  -- Normalize color
-  local normalizedColor = tostring(playerColor)
-  if type(playerColor) == "string" and playerColor ~= "" then
-    normalizedColor = playerColor:sub(1,1):upper() .. playerColor:sub(2):lower()
-  end
-  
-  -- Remove Good Karma token from player board
-  local TAG_GOOD_KARMA = "WLB_STATUS_GOOD_KARMA"
-  local TAG_COLOR_PREFIX = "WLB_COLOR_"
-  local colorTagStr = TAG_COLOR_PREFIX .. normalizedColor
-  local karmaToken = nil
-  
-  for _, o in ipairs(getAllObjects()) do
-    if o and o.hasTag and o.hasTag(TAG_GOOD_KARMA) and o.hasTag(colorTagStr) then
-      karmaToken = o
-      break
-    end
-  end
-  
-  if karmaToken then
-    -- Remove token (call PlayerStatusController or destroy token)
-    -- Try PlayerStatusController first
-    local TAG_PLAYER_STATUS_CTRL = "WLB_PLAYER_STATUS_CTRL"
-    local statusCtrl = nil
-    for _, o in ipairs(getAllObjects()) do
-      if o and o.hasTag and o.hasTag(TAG_PLAYER_STATUS_CTRL) then
-        statusCtrl = o
-        break
-      end
-    end
-    
-    if statusCtrl and statusCtrl.call then
-      -- Remove status via PlayerStatusController
-      pcall(function()
-        statusCtrl.call("PS_Event", {
-          color = normalizedColor,
-          op = "REMOVE_STATUS",
-          statusTag = TAG_GOOD_KARMA
-        })
-      end)
-    else
-      -- Fallback: destroy token directly (not ideal, but works)
-      pcall(function() karmaToken.destruct() end)
-    end
-  end
+  consumeGoodKarma(playerColor)
   
   -- Get slot index and clear from tracking
   local cardGuid = card.getGUID()
@@ -1795,17 +1849,24 @@ function evt_onUseKarma(card, player_color, alt_click)
 end
 
 function evt_onYes(card, player_color, alt_click)
-  if not isCard(card) then return end
-  if not isObjNearAnySlot(card) then
-    uiCloseModal(card)
-    return
+  if not isCard(card) then return "ERROR" end
+  local cardGuid = card.getGUID()
+  -- Karma choice modal: YES = "Use Good Karma" (skip card without consequences)
+  if uiState.karmaChoice and uiState.karmaChoice[cardGuid] then
+    uiState.karmaChoice[cardGuid] = nil
+    evt_onUseKarma(card, player_color, alt_click)
+    return "KARMA_USED"
   end
 
-  local cardGuid = card.getGUID()
+  if not isObjNearAnySlot(card) then
+    uiCloseModal(card)
+    return "IGNORED"
+  end
+
   local slotIdx = getSlotIndexForCardGuid(cardGuid)
   if not slotIdx then
     uiCloseModal(card)
-    return
+    return "ERROR"
   end
 
   if slotIdx ~= 1 and slot1HasObligatory() then
@@ -1814,14 +1875,14 @@ function evt_onYes(card, player_color, alt_click)
       {1,0.6,0.2}
     )
     uiCloseModal(card)
-    return
+    return "BLOCKED"
   end
 
   local engine = getEngine()
   if not engine then
     safeBroadcastTo(player_color, "Event Engine not found.", {1,0.4,0.4})
     uiCloseModal(card)
-    return
+    return "ERROR"
   end
 
   uiCloseModalSoft(card)
@@ -1859,7 +1920,7 @@ function evt_onYes(card, player_color, alt_click)
         {1,0.6,0.2}
       )
       uiEnsureIdle(card)
-      return
+      return "BLOCKED"
     end
   end
 
@@ -1876,12 +1937,12 @@ function evt_onYes(card, player_color, alt_click)
   if not ok then
     warn("Engine call failed for card="..tostring(cardGuid))
     uiEnsureIdle(card)
-    return
+    return "ERROR"
   end
 
   if ret == "BLOCKED" or ret == "ERROR" or ret == false or ret == nil then
     uiEnsureIdle(card)
-    return
+    return (ret == nil) and "ERROR" or ret
   end
 
   -- 3) SUCCESS => charge extra AP now
@@ -1923,6 +1984,7 @@ function evt_onYes(card, player_color, alt_click)
   end
 
   refreshEventSlotUI_later(0.35)
+  return ret
 end
 
 -- === SECTION 12: PUBLIC API ==================================================
@@ -1931,16 +1993,49 @@ end
 -- Some older UI / scripts call EventController.playCardFromUI({card_guid, player_color, slot_idx}).
 -- This wrapper executes the same flow as clicking YES on a track card.
 function playCardFromUI(args)
-  args = args or {}
-  local cardGuid = args.card_guid or args.cardGuid or args.guid
-  local usedColor = args.player_color or args.color or args.playerColor
-  local slotIdx = tonumber(args.slot_idx or args.slot or args.slotIndex)
+  -- IMPORTANT:
+  -- This function is called via <call/playCardFromUI> from other scripts.
+  -- TTS can compile large scripts into multiple chunks; treat EVERY helper as potentially missing here.
+  -- This implementation must never hard-crash (no "attempt to call a nil value").
 
-  if not cardGuid or cardGuid == "" then
-    warn("playCardFromUI: missing card_guid")
+  -- Signature so you can confirm the new code is running in TTS console.
+  if type(print) == "function" then
+    print("[WLB EVT CTRL] playCardFromUI v2 (chunk-safe)")
+  end
+
+  if type(getObjectFromGUID) ~= "function" then
+    if type(print) == "function" then
+      print("[WLB EVT CTRL][WARN] playCardFromUI: getObjectFromGUID missing")
+    end
     return "ERROR"
   end
 
+  if type(pcall) ~= "function" then
+    if type(print) == "function" then
+      print("[WLB EVT CTRL][WARN] playCardFromUI: pcall missing")
+    end
+    return "ERROR"
+  end
+
+  if type(args) ~= "table" then args = {} end
+
+  local cardGuid = args.card_guid or args.cardGuid or args.guid
+  if not cardGuid or cardGuid == "" then
+    if type(print) == "function" then
+      print("[WLB EVT CTRL][WARN] playCardFromUI: missing card_guid")
+    end
+    return "ERROR"
+  end
+
+  local card = getObjectFromGUID(cardGuid)
+  if not card or card.tag ~= "Card" then
+    if type(print) == "function" then
+      print("[WLB EVT CTRL][WARN] playCardFromUI: card not found / not Card guid="..tostring(cardGuid))
+    end
+    return "ERROR"
+  end
+
+  local usedColor = args.player_color or args.color or args.playerColor
   if not usedColor or usedColor == "" then
     local ok, tc = pcall(function()
       return (Turns and Turns.turn_color and Turns.turn_color ~= "") and Turns.turn_color or nil
@@ -1948,30 +2043,55 @@ function playCardFromUI(args)
     usedColor = (ok and tc) or usedColor or "White"
   end
 
-  if not slotIdx then
-    slotIdx = getSlotIndexForCardGuid(cardGuid)
+  -- Obligatory + Good Karma: must show karma modal, do not resolve directly
+  if type(isCardObligatory) == "function" and type(hasGoodKarma) == "function" then
+    local okObl, obligatory = pcall(function() return isCardObligatory(card) end)
+    local okKar, hasKarma = pcall(function() return hasGoodKarma(usedColor) end)
+    if okObl and obligatory == true and okKar and hasKarma == true then
+      if type(uiOpenModal) == "function" then
+        uiOpenModal(card, usedColor)
+        return "KARMA_CHOICE"
+      end
+    end
   end
-  if not slotIdx then
-    warn("playCardFromUI: cannot resolve slot_idx for card="..tostring(cardGuid))
+
+  -- Preferred: delegate to evt_onYes (same logic as clicking YES)
+  if type(evt_onYes) == "function" then
+    local okCall, ret = pcall(function()
+      return evt_onYes(card, usedColor, false)
+    end)
+    if okCall then
+      return ret or "DONE"
+    end
+    if type(print) == "function" then
+      print("[WLB EVT CTRL][WARN] playCardFromUI: evt_onYes crashed guid="..tostring(cardGuid).." err="..tostring(ret))
+    end
     return "ERROR"
   end
 
-  if slotIdx ~= 1 and slot1HasObligatory() then
-    return "BLOCKED"
+  -- Fallback: call Event Engine directly (requires slot_idx in args)
+  local slotIdx = tonumber(args.slot_idx or args.slot or args.slotIndex)
+  if not slotIdx then
+    if type(print) == "function" then
+      print("[WLB EVT CTRL][WARN] playCardFromUI: missing slot_idx and evt_onYes not available")
+    end
+    return "ERROR"
   end
 
-  local engine = getEngine()
+  local engine = getObjectFromGUID(EVENT_ENGINE_GUID)
   if not engine or not engine.call then
-    warn("playCardFromUI: Event Engine not found")
+    if type(print) == "function" then
+      print("[WLB EVT CTRL][WARN] playCardFromUI: Event Engine not found guid="..tostring(EVENT_ENGINE_GUID))
+    end
     return "ERROR"
   end
 
-  local extra = (EXTRA_BY_SLOT[slotIdx] or 0)
-  if extra > 0 and (not canSpendExtraAP(usedColor, extra)) then
-    return "BLOCKED"
+  local extra = 0
+  if type(EXTRA_BY_SLOT) == "table" then
+    extra = tonumber(EXTRA_BY_SLOT[slotIdx] or 0) or 0
   end
 
-  local ok, ret = pcall(function()
+  local okEng, retEng = pcall(function()
     return engine.call("playCardFromUI", {
       card_guid = cardGuid,
       player_color = usedColor,
@@ -1979,42 +2099,15 @@ function playCardFromUI(args)
       slot_extra_ap = extra,
     })
   end)
-  if not ok then
-    warn("playCardFromUI: engine call failed for card="..tostring(cardGuid))
+
+  if not okEng then
+    if type(print) == "function" then
+      print("[WLB EVT CTRL][WARN] playCardFromUI: engine call failed err="..tostring(retEng))
+    end
     return "ERROR"
   end
-  if ret == "BLOCKED" or ret == "ERROR" or ret == false or ret == nil then
-    return (ret == nil) and "ERROR" or ret
-  end
 
-  -- charge extra AP after success (Engine handled base AP)
-  local adjustedExtra = extra
-  if extra > 0 then
-    local okAdj, adjusted = pcall(function()
-      return engine.call("getAdjustedSlotExtraAP", { card_guid = cardGuid })
-    end)
-    if okAdj and adjusted ~= nil then
-      adjustedExtra = tonumber(adjusted) or 0
-    end
-  end
-
-  if adjustedExtra > 0 then
-    local paid = spendExtraAP(usedColor, adjustedExtra)
-    if not paid then
-      warn("playCardFromUI: EXTRA AP spend failed after engine success. color="..tostring(usedColor).." extra="..tostring(adjustedExtra))
-    end
-  end
-
-  if slotIdx == 1 then
-    Wait.time(function()
-      refreshTrackedSlots()
-      refreshObligatoryLock()
-      saveState()
-    end, 0.25)
-  end
-  refreshEventSlotUI_later(0.35)
-
-  return ret
+  return retEng or "DONE"
 end
 
 function EVT_AUTO_REFILL_AFTER_RESET(params)

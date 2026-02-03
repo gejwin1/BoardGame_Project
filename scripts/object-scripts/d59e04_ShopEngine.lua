@@ -74,6 +74,10 @@ local TAG_STATUS_SICK       = "WLB_STATUS_SICK"
 local TAG_STATUS_WOUNDED    = "WLB_STATUS_WOUNDED"
 local TAG_STATUS_GOOD_KARMA = "WLB_STATUS_GOOD_KARMA"
 local TAG_STATUS_ADDICTION  = "WLB_STATUS_ADDICTION"
+local TAG_STATUS_VOUCH_C    = "WLB_STATUS_VOUCH_C"
+local TAG_STATUS_VOUCH_H    = "WLB_STATUS_VOUCH_H"
+-- Consumables / Hi-Tech: up to 100% discount (4 tokens × 25%). Hi-Tech rarely exceeds 50% in practice (few vouchers in game).
+-- Estate/properties: max 40% (only 2 property vouchers exist) — capped in EstateEngine.
 
 -- Name prefixes (authoritative)
 local PAT_C = "^CSHOP_%d%d_"
@@ -127,6 +131,29 @@ local SLOTS_LOCAL = {
     }
   }
 }
+
+-- =========================
+-- [S1C] USED CARDS STORAGE (LOCAL@SHOPS_BOARD)
+-- =========================
+-- Used CONSUMABLES (C) and one-off INVESTMENTS (I) should NOT go back on top of the deck.
+-- Instead, we place them in a "used row" outside the shop board area.
+--
+-- User request: local X = 10.5 and "one row".
+-- Interpretation: we start at x=10.5 and extend along +X.
+local TAG_SHOP_USED   = "WLB_SHOP_USED"
+local TAG_SHOP_USED_C = "WLB_SHOP_USED_C"
+local TAG_SHOP_USED_I = "WLB_SHOP_USED_I"
+
+-- Keep used cards in the SAME Z-row as their shop row:
+--  - Consumables row (C) is around z≈-4.83
+--  - Investments row (I) is around z≈ 5.22
+-- (High-Tech row is around z≈0.20, so we avoid mixing by z.)
+local USED_ROW_LOCAL_BY_ROW = {
+  C = { x=10.5, y=0.592, z=-4.83 },
+  I = { x=10.5, y=0.592, z= 5.22 },
+}
+local USED_ROW_DX = 1.40
+local USED_ROW_Y_LIFT = 0.20
 
 -- =========================
 -- [S2] STATE
@@ -286,6 +313,57 @@ local function normalizeBoolResult(okCall, ret)
   return true
 end
 
+-- PSC/status helpers early so they are in scope for all voucher/status flows (avoids TTS chunk/scope issue)
+local function resolvePSC()
+  return firstWithTag(TAG_PLAYER_STATUS_CTRL)
+end
+local function pscHasStatus(color, statusTag)
+  local psc = resolvePSC()
+  if not psc or not psc.call then
+    warn("pscHasStatus: PlayerStatusController not found")
+    return false
+  end
+  local ok, hasStatus = safeCall(psc, "PS_Event", {color=color, op="HAS_STATUS", statusTag=statusTag})
+  if ok and type(hasStatus) == "boolean" then
+    return hasStatus
+  end
+  warn("pscHasStatus: PS_Event HAS_STATUS returned invalid result")
+  return false
+end
+local function pscRemoveStatus(color, statusTag)
+  local psc = resolvePSC()
+  if not psc then return false end
+  local ok, ret = safeCall(psc, "PS_Event", {color=color, op="REMOVE_STATUS", statusTag=statusTag})
+  return normalizeBoolResult(ok, ret)
+end
+local function pscAddStatus(color, statusTag)
+  local psc = resolvePSC()
+  if not psc then return false end
+  local ok, ret = safeCall(psc, "PS_Event", {color=color, op="ADD_STATUS", statusTag=statusTag})
+  return normalizeBoolResult(ok, ret)
+end
+local function pscAddChild(color, sex)
+  local psc = resolvePSC()
+  if not psc then return false end
+  local ok, ret = safeCall(psc, "PS_Event", {color=color, op="ADD_CHILD", sex=sex})
+  return normalizeBoolResult(ok, ret)
+end
+local function pscGetStatusCount(color, statusTag)
+  local psc = resolvePSC()
+  if not psc then return 0 end
+  local ok, ret = safeCall(psc, "PS_Event", {color=color, op="GET_STATUS_COUNT", statusTag=statusTag})
+  if ok and type(ret)=="number" then return math.max(0, math.floor(ret)) end
+  return 0
+end
+local function pscRemoveStatusCount(color, statusTag, count)
+  local psc = resolvePSC()
+  if not psc then return false end
+  count = math.max(0, math.floor(tonumber(count) or 0))
+  if count == 0 then return true end
+  local ok, ret = safeCall(psc, "PS_Event", {color=color, op="REMOVE_STATUS_COUNT", statusTag=statusTag, count=count})
+  return normalizeBoolResult(ok, ret)
+end
+
 -- =========================
 -- [S3B] BOARD RESOLVE
 -- =========================
@@ -348,6 +426,28 @@ local function forceFaceUp(card)
       pcall(function() card.flip() end)
     end
   end, 0.25)
+end
+
+-- Force face-up for Card OR Deck (used piles should stay visible)
+local function forceFaceUpAny(obj)
+  if not obj or (obj.tag ~= "Card" and obj.tag ~= "Deck") then return end
+  if obj.tag == "Card" then
+    forceFaceUp(obj)
+    return
+  end
+  -- Deck
+  local isDown = nil
+  pcall(function() isDown = obj.is_face_down end)
+  if isDown == true then
+    pcall(function() obj.flip() end)
+    Wait.time(function()
+      local isDown2 = nil
+      pcall(function() isDown2 = obj.is_face_down end)
+      if obj and obj.tag=="Deck" and isDown2 == true then
+        pcall(function() obj.flip() end)
+      end
+    end, 0.25)
+  end
 end
 
 local function lockBrief(obj)
@@ -428,6 +528,14 @@ local function classifyRowByName(obj)
   return nil
 end
 
+local function classifyRowByNameStr(name)
+  local n = tostring(name or "")
+  if string.match(n, PAT_C) then return "C" end
+  if string.match(n, PAT_H) then return "H" end
+  if string.match(n, PAT_I) then return "I" end
+  return nil
+end
+
 local function isShopCardByName(obj)
   return classifyRowByName(obj) ~= nil
 end
@@ -462,6 +570,9 @@ local diceInitialValue = {} -- [guid] = initial die value when button shown (to 
 
 -- Pending investment input state (for interactive investment cards)
 local pendingInvestment = {} -- [guid] = { color, def, card, kind, counterValue, ... }
+
+-- Pending voucher choice (C/H): after YES on buy, ask "Use discount? (S)" then optionally "How many?"
+local pendingVoucherChoice = {} -- [guid] = { buyer, row, card, def, voucherCount, voucherTag, step }
 
 -- Die reading helper (must be defined early, used in UI functions)
 local function tryReadDieValue(die)
@@ -586,6 +697,88 @@ local function uiAttachYesNo_MODAL(card)
     font_color     = {1, 1, 1, 1},
     tooltip        = "",
   })
+end
+
+-- Voucher: "Use discount? (S)" Yes/No (S = voucher count)
+local function uiAttachVoucherUseModal(card, voucherCount)
+  if not isCard(card) then return end
+  uiClearButtons(card)
+  local label = "Use discount? ("..tostring(voucherCount)..")"
+  card.createButton({
+    click_function = "ui_noop",
+    function_owner = self,
+    label          = label,
+    position       = {0, 0.95, 0},
+    rotation       = {0, 0, 0},
+    width          = 3000,
+    height         = 340,
+    font_size      = 160,
+    color          = {0, 0, 0, 0.70},
+    font_color     = {1, 1, 1, 1},
+    tooltip        = "",
+  })
+  card.createButton({
+    click_function = "shop_voucherYes",
+    function_owner = self,
+    label          = "YES",
+    position       = UI_POS_YES,
+    rotation       = {0, 0, 0},
+    width          = UI_BTN_W,
+    height         = UI_BTN_H,
+    font_size      = UI_BTN_FONT,
+    color          = {0.2, 0.7, 0.2, 0.95},
+    font_color     = {1, 1, 1, 1},
+    tooltip        = "",
+  })
+  card.createButton({
+    click_function = "shop_voucherNo",
+    function_owner = self,
+    label          = "NO",
+    position       = UI_POS_NO,
+    rotation       = {0, 0, 0},
+    width          = UI_BTN_W,
+    height         = UI_BTN_H,
+    font_size      = UI_BTN_FONT,
+    color          = {0.8, 0.2, 0.2, 0.95},
+    font_color     = {1, 1, 1, 1},
+    tooltip        = "",
+  })
+end
+
+-- Voucher: "How many? 1..S" (buttons 1, 2, ..., min(S,4))
+local function uiAttachVoucherCountModal(card, voucherCount)
+  if not isCard(card) then return end
+  uiClearButtons(card)
+  local n = math.min(4, math.max(1, math.floor(tonumber(voucherCount) or 1)))
+  card.createButton({
+    click_function = "ui_noop",
+    function_owner = self,
+    label          = "How many tokens? (1.."..tostring(n)..")",
+    position       = {0, 0.95, 0},
+    rotation       = {0, 0, 0},
+    width          = 3200,
+    height         = 340,
+    font_size      = 140,
+    color          = {0, 0, 0, 0.70},
+    font_color     = {1, 1, 1, 1},
+    tooltip        = "",
+  })
+  local zOff = -0.55
+  for i = 1, n do
+    card.createButton({
+      click_function = (i == 1 and "shop_voucherUse1") or (i == 2 and "shop_voucherUse2") or (i == 3 and "shop_voucherUse3") or "shop_voucherUse4",
+      function_owner = self,
+      label          = tostring(i),
+      position       = { -1.2 + (i-1) * 0.8, 0.65, zOff },
+      rotation       = {0, 0, 0},
+      width          = 500,
+      height         = UI_BTN_H,
+      font_size      = UI_BTN_FONT,
+      color          = {0.25, 0.5, 0.8, 0.95},
+      font_color     = {1, 1, 1, 1},
+      tooltip        = "Use "..tostring(i).." discount token(s)",
+    })
+  end
 end
 
 local function isNearPosObj(obj, pos, eps)
@@ -847,10 +1040,6 @@ local function findOne(tagA, tagB)
   return nil
 end
 
-local function resolvePSC()
-  return firstWithTag(TAG_PLAYER_STATUS_CTRL)
-end
-
 local function resolveMoney(color)
   -- IMPORTANT:
   -- If both exist (legacy money tile + new money-on-board), we must prefer the board
@@ -1093,57 +1282,6 @@ local function satAdd(color, amount)
   end
 
   return ok
-end
-
-local function pscHasStatus(color, statusTag)
-  -- Query PlayerStatusController for status (central authority)
-  local psc = resolvePSC()
-  if not psc then 
-    warn("pscHasStatus: PlayerStatusController not found, falling back to direct search")
-    -- Fallback: direct search (not ideal but better than nothing)
-    for _,o in ipairs(getAllObjects()) do
-      if o and o.hasTag and o.hasTag(statusTag) and o.hasTag(colorTag(color)) then
-        return true
-      end
-    end
-    return false
-  end
-  
-  -- Use PlayerStatusController API (queries TokenEngine's internal state)
-  local ok, hasStatus = safeCall(psc, "PS_HasStatus", {color=color, statusTag=statusTag})
-  if ok and type(hasStatus) == "boolean" then
-    return hasStatus
-  end
-  
-  warn("pscHasStatus: PS_HasStatus returned invalid result, falling back to direct search")
-  -- Fallback: direct search
-  for _,o in ipairs(getAllObjects()) do
-    if o and o.hasTag and o.hasTag(statusTag) and o.hasTag(colorTag(color)) then
-      return true
-    end
-  end
-  return false
-end
-
-local function pscRemoveStatus(color, statusTag)
-  local psc = resolvePSC()
-  if not psc then return false end
-  local ok, ret = safeCall(psc, "PS_Event", {color=color, op="REMOVE_STATUS", statusTag=statusTag})
-  return normalizeBoolResult(ok, ret)
-end
-
-local function pscAddStatus(color, statusTag)
-  local psc = resolvePSC()
-  if not psc then return false end
-  local ok, ret = safeCall(psc, "PS_Event", {color=color, op="ADD_STATUS", statusTag=statusTag})
-  return normalizeBoolResult(ok, ret)
-end
-
-local function pscAddChild(color, sex)
-  local psc = resolvePSC()
-  if not psc then return false end
-  local ok, ret = safeCall(psc, "PS_Event", {color=color, op="ADD_CHILD", sex=sex})
-  return normalizeBoolResult(ok, ret)
 end
 
 -- =========================
@@ -1987,39 +2125,67 @@ local function stashPurchasedCard(card)
     return
   end
 
-  local d = deckForRow(row)
-  if d and d.tag=="Deck" then
-    local g = card.getGUID()
-    uiClearButtons(card)
-    uiClearDescription(card)
-    forceFaceDown(card)
-    UI.modalOpen[g] = nil
-    UI.homePos[g] = nil
-    pendingDice[g] = nil  -- Clear any pending dice state
-    diceInitialValue[g] = nil
-
-    Wait.time(function()
-      if card and card.tag=="Card" then
-        pcall(function() d.putObject(card) end)
-      end
-    end, 0.15)
+  -- Safety: Hi-Tech should never be stashed here (it is owned/placed near player boards),
+  -- but if it happens, fall back to putting it back in the deck.
+  if row == "H" then
+    local dH = deckForRow("H")
+    if dH and dH.tag == "Deck" then
+      pcall(function() dH.putObject(card) end)
+    end
     return
   end
 
-  local sw = slotWorlds(row)
-  if sw and sw.closed then
-    local g = card.getGUID()
-    uiClearButtons(card)
-    uiClearDescription(card)
-    forceFaceDown(card)
-    UI.modalOpen[g] = nil
-    UI.homePos[g] = nil
-    pendingDice[g] = nil  -- Clear any pending dice state
-    diceInitialValue[g] = nil
-    pcall(function()
-      card.setPositionSmooth({sw.closed.x, sw.closed.y + DEAL_Y, sw.closed.z}, false, true)
-    end)
+  -- New behavior (requested):
+  -- Used CONSUMABLES/INVESTMENTS go to USED piles (stacked into mini-decks), not back into the deck.
+  local g = card.getGUID()
+  uiClearButtons(card)
+  uiClearDescription(card)
+  -- Keep used cards face-up (requested)
+  forceFaceUp(card)
+  ensureTag(card, TAG_SHOP_USED)
+  UI.modalOpen[g] = nil
+  UI.homePos[g] = nil
+  pendingDice[g] = nil
+  diceInitialValue[g] = nil
+
+  -- Separate rows: C next to C, I next to I
+  local usedTag = nil
+  if row == "C" then usedTag = TAG_SHOP_USED_C end
+  if row == "I" then usedTag = TAG_SHOP_USED_I end
+  if usedTag then ensureTag(card, usedTag) end
+
+  -- Prefer putting into an existing USED pile deck for this row.
+  local usedDeck = nil
+  if usedTag then
+    for _,o in ipairs(getAllObjects()) do
+      if isDeck(o) and o.hasTag and o.hasTag(usedTag) then
+        usedDeck = o
+        break
+      end
+    end
   end
+
+  -- Base used pile position (fixed; cards stack into a deck automatically)
+  local base = USED_ROW_LOCAL_BY_ROW[row] or { x=10.5, y=0.592, z=0.0 }
+  local wp = worldFromLocal(base)
+  if not wp then
+    local p = card.getPosition()
+    pcall(function() card.setPositionSmooth({p.x, p.y + 5, p.z}, false, true) end)
+    return
+  end
+
+  if usedDeck and usedDeck.tag=="Deck" then
+    -- Keep used pile visible and merge card into it.
+    forceFaceUpAny(usedDeck)
+    pcall(function() usedDeck.putObject(card) end)
+    return
+  end
+
+  pcall(function()
+    card.setPositionSmooth({wp.x, wp.y + USED_ROW_Y_LIFT, wp.z}, false, true)
+    if S.desiredYaw then card.setRotationSmooth({0, S.desiredYaw, 0}, false, true) end
+    lockBrief(card)
+  end)
 end
 
 local function applyConsumableEffect(color, card, def, rollValue)
@@ -2920,7 +3086,8 @@ function inv_estateinvest_resign(card, player_color, alt_click)
   end
 end
 
-local function attemptBuyCard(card, buyerColor)
+local function attemptBuyCard(card, buyerColor, options)
+  options = options or {}
   if not isCard(card) then return false end
   if not isShopOpenSlotCard(card) then
     safeBroadcastToColor("⛔ This card is no longer in an OPEN shop slot.", buyerColor, {1,0.6,0.2})
@@ -2964,7 +3131,14 @@ local function attemptBuyCard(card, buyerColor)
     end
   end
 
-  local okMoney = moneySpend(buyerColor, def.cost or 0)
+  -- Voucher discount: 25% per token for C/H (options.discountTokens, options.voucherTag)
+  local cost = def.cost or 0
+  local discountTokens = (row == "C" or row == "H") and options.discountTokens and options.voucherTag and math.max(0, math.min(4, math.floor(tonumber(options.discountTokens) or 0))) or 0
+  if discountTokens > 0 then
+    cost = math.max(0, math.floor(cost * (1 - 0.25 * discountTokens)))
+  end
+
+  local okMoney = moneySpend(buyerColor, cost)
   if not okMoney then
     safeBroadcastToColor("⛔ Not enough funds (WIN) to purchase this card.", buyerColor, {1,0.6,0.2})
     return false
@@ -2984,7 +3158,12 @@ local function attemptBuyCard(card, buyerColor)
     -- Give card to player - place at fixed position near player board
     giveCardToPlayer(card, buyerColor)
     
-    safeBroadcastToColor("🛒 Purchased: "..tostring(name).." (Hi-Tech)", buyerColor, {0.8,0.9,1})
+    if options.discountTokens and options.voucherTag and options.discountTokens > 0 then
+      pscRemoveStatusCount(buyerColor, options.voucherTag, options.discountTokens)
+      safeBroadcastToColor("🛒 Purchased: "..tostring(name).." (Hi-Tech) with "..tostring(options.discountTokens).."× discount", buyerColor, {0.8,0.9,1})
+    else
+      safeBroadcastToColor("🛒 Purchased: "..tostring(name).." (Hi-Tech)", buyerColor, {0.8,0.9,1})
+    end
     return true
   end
 
@@ -3232,7 +3411,12 @@ local function attemptBuyCard(card, buyerColor)
     end
   end, 0.05)
 
-  safeBroadcastToColor("🛒 Purchased: "..tostring(name), buyerColor, {0.8,0.9,1})
+  if options.discountTokens and options.voucherTag and options.discountTokens > 0 then
+    pscRemoveStatusCount(buyerColor, options.voucherTag, options.discountTokens)
+    safeBroadcastToColor("🛒 Purchased: "..tostring(name).." with "..tostring(options.discountTokens).."× discount", buyerColor, {0.8,0.9,1})
+  else
+    safeBroadcastToColor("🛒 Purchased: "..tostring(name), buyerColor, {0.8,0.9,1})
+  end
   return true
 end
 
@@ -3250,6 +3434,70 @@ function shop_onNo(card, player_color, alt_click)
   uiCloseModal(card)
 end
 
+-- Voucher: "Use discount? (S)" No -> buy at full price
+function shop_voucherNo(card, player_color, alt_click)
+  if not isCard(card) then return end
+  if checkBusyGate(player_color) then return end
+  local g = card.getGUID()
+  local pending = pendingVoucherChoice[g]
+  pendingVoucherChoice[g] = nil
+  UI.modalOpen[g] = nil
+  if not pending or not pending.buyer then
+    uiEnsureIdle(card)
+    return
+  end
+  local ok = attemptBuyCard(card, pending.buyer)
+  uiReturnHome(card)
+  uiEnsureIdle(card)
+  if ok and not pendingDice[g] then refreshShopOpenUI_later(0.25) end
+end
+
+-- Voucher: "Use discount? (S)" Yes -> if S==1 buy with 1 token; if S>1 show "How many?"
+function shop_voucherYes(card, player_color, alt_click)
+  if not isCard(card) then return end
+  if checkBusyGate(player_color) then return end
+  local g = card.getGUID()
+  local pending = pendingVoucherChoice[g]
+  if not pending or not pending.buyer then
+    pendingVoucherChoice[g] = nil
+    uiEnsureIdle(card)
+    return
+  end
+  if pending.voucherCount == 1 then
+    pendingVoucherChoice[g] = nil
+    UI.modalOpen[g] = nil
+    local ok = attemptBuyCard(card, pending.buyer, { discountTokens = 1, voucherTag = pending.voucherTag })
+    uiReturnHome(card)
+    uiEnsureIdle(card)
+    if ok and not pendingDice[g] then refreshShopOpenUI_later(0.25) end
+    return
+  end
+  pending.step = "ask_count"
+  uiAttachVoucherCountModal(card, pending.voucherCount)
+end
+
+-- Voucher: "How many?" -> use N tokens (N=1..4)
+function shop_voucherUseN(card, player_color, N)
+  if not isCard(card) or not N or N < 1 or N > 4 then return end
+  if checkBusyGate(player_color) then return end
+  local g = card.getGUID()
+  local pending = pendingVoucherChoice[g]
+  pendingVoucherChoice[g] = nil
+  UI.modalOpen[g] = nil
+  if not pending or not pending.buyer then
+    uiEnsureIdle(card)
+    return
+  end
+  local ok = attemptBuyCard(card, pending.buyer, { discountTokens = N, voucherTag = pending.voucherTag })
+  uiReturnHome(card)
+  uiEnsureIdle(card)
+  if ok and not pendingDice[g] then refreshShopOpenUI_later(0.25) end
+end
+function shop_voucherUse1(card, pc, alt) shop_voucherUseN(card, pc, 1) end
+function shop_voucherUse2(card, pc, alt) shop_voucherUseN(card, pc, 2) end
+function shop_voucherUse3(card, pc, alt) shop_voucherUseN(card, pc, 3) end
+function shop_voucherUse4(card, pc, alt) shop_voucherUseN(card, pc, 4) end
+
 function shop_onYes(card, player_color, alt_click)
   if not (card and card.tag=="Card") then return end
   if checkBusyGate(player_color) then return end
@@ -3258,21 +3506,31 @@ function shop_onYes(card, player_color, alt_click)
     return
   end
 
-  -- For interactive investment cards, we'll keep the card lifted
-  -- So don't close modal yet - let attemptBuyCard handle it
   local name = getNameSafe(card)
   local row = classifyRowByName(card)
   local def = nil
   if row == "I" then
     def = INVESTMENT_DEF[name]
-    -- If it's an interactive investment card, keep modal open (card lifted)
     if def and (def.kind == "DEBENTURES" or def.kind == "LOAN" or def.kind == "STOCK" or def.kind == "ENDOWMENT" or def.kind == "ESTATEINVEST") then
-      -- Don't close modal - keep card lifted for interactive UI
-      -- Just clear YES/NO buttons, attemptBuyCard will add new buttons
       uiClearButtons(card)
     else
       uiCloseModalSoft(card)
     end
+  elseif row == "C" or row == "H" then
+    local active = getActiveTurnColor()
+    local buyer  = resolveBuyerColor(player_color)
+    if active and buyer and buyer == active then
+      local voucherTag = (row == "C") and TAG_STATUS_VOUCH_C or TAG_STATUS_VOUCH_H
+      local voucherCount = pscGetStatusCount(buyer, voucherTag)
+      if voucherCount >= 1 then
+        local g = card.getGUID()
+        pendingVoucherChoice[g] = { buyer = buyer, row = row, card = card, voucherCount = voucherCount, voucherTag = voucherTag, step = "ask_use" }
+        uiClearButtons(card)
+        uiAttachVoucherUseModal(card, voucherCount)
+        return
+      end
+    end
+    uiCloseModalSoft(card)
   else
     uiCloseModalSoft(card)
   end
@@ -3964,6 +4222,138 @@ local function collectAllShopCardsIntoDecks()
 
   local moved = {C=0,H=0,I=0,UNK=0}
 
+  -- 1) If any shop cards were merged into a deck (by players), extract them and put back.
+  --    NOTE: We skip the main shop decks themselves (TAG_SHOP_DECK).
+  local function isMainShopDeck(o)
+    if not (o and o.hasTag) then return false end
+
+    -- USED piles must NEVER be treated as "main shop decks"
+    if o.hasTag(TAG_SHOP_USED) or o.hasTag(TAG_SHOP_USED_C) or o.hasTag(TAG_SHOP_USED_I) then
+      return false
+    end
+
+    -- Main deck must have WLB_SHOP_DECK + one of the authoritative deck tags
+    if o.hasTag(TAG_SHOP_DECK) then
+      return o.hasTag(TAG_DECK_C) or o.hasTag(TAG_DECK_H) or o.hasTag(TAG_DECK_I)
+    end
+
+    return false
+  end
+
+  local function deckShopRowSummary(deckObj)
+    local okList, list = pcall(function() return deckObj.getObjects() end)
+    if (not okList) or type(list) ~= "table" or #list == 0 then
+      return {C=0,H=0,I=0,total=0}
+    end
+    local out = {C=0,H=0,I=0,total=#list}
+    for _, entry in ipairs(list) do
+      local nm = entry.nickname or entry.name or ""
+      local row = classifyRowByNameStr(nm)
+      if row == "C" then out.C = out.C + 1 end
+      if row == "H" then out.H = out.H + 1 end
+      if row == "I" then out.I = out.I + 1 end
+    end
+    return out
+  end
+
+  local function guessRowForMergedDeckByTags(deckObj)
+    if not deckObj then return nil end
+
+    -- 1) Prefer explicit USED tags (recommended: stable even if names are empty)
+    if deckObj.hasTag then
+      if deckObj.hasTag(TAG_SHOP_USED_C) then return "C" end
+      if deckObj.hasTag(TAG_SHOP_USED_I) then return "I" end
+
+      -- fallback if USED tags are missing but deck-tag exists
+      if deckObj.hasTag(TAG_DECK_C) then return "C" end
+      if deckObj.hasTag(TAG_DECK_I) then return "I" end
+      if deckObj.hasTag(TAG_DECK_H) then return "H" end
+    end
+    return nil
+  end
+
+  for _,o in ipairs(getAllObjects()) do
+    if isDeck(o) and (not isMainShopDeck(o)) then
+      -- If this is a used-pile deck, merge it back by USED tags even when card names are empty.
+      local rowHint = guessRowForMergedDeckByTags(o)
+      if rowHint == "C" or rowHint == "I" then
+        local target = (rowHint == "C") and dc or di
+        local qty = 0
+        pcall(function() qty = o.getQuantity() end)
+        qty = tonumber(qty) or 0
+        forceFaceDown(o)
+        uiClearButtons(o)
+        uiClearDescription(o)
+        pcall(function() target.putObject(o) end)
+        if rowHint == "C" then moved.C = moved.C + qty end
+        if rowHint == "I" then moved.I = moved.I + qty end
+      else
+        -- Only touch decks that ACTUALLY contain shop cards (by contained names).
+        local sum = deckShopRowSummary(o)
+        local anyShop = (sum.C + sum.H + sum.I) > 0
+        if anyShop then
+          -- Prefer merging whole deck if it contains ONLY one shop row type.
+          local onlyC = (sum.C > 0) and (sum.H == 0) and (sum.I == 0)
+          local onlyH = (sum.H > 0) and (sum.C == 0) and (sum.I == 0)
+          local onlyI = (sum.I > 0) and (sum.C == 0) and (sum.H == 0)
+
+          if onlyC or onlyH or onlyI then
+            local target = onlyC and dc or onlyH and dh or di
+            local qty = 0
+            pcall(function() qty = o.getQuantity() end)
+            qty = tonumber(qty) or 0
+            forceFaceDown(o)
+            uiClearButtons(o)
+            uiClearDescription(o)
+            pcall(function() target.putObject(o) end)
+            if onlyC then moved.C = moved.C + qty end
+            if onlyH then moved.H = moved.H + qty end
+            if onlyI then moved.I = moved.I + qty end
+          else
+            -- Mixed decks: extract matching shop cards by guid (best effort).
+            local okList, list = pcall(function() return o.getObjects() end)
+            if okList and type(list) == "table" and #list > 0 then
+              local extracted = 0
+              for _, entry in ipairs(list) do
+                local nm = entry.nickname or entry.name or ""
+                local row = classifyRowByNameStr(nm)
+                if row then
+                  extracted = extracted + 1
+                  local target = (row=="C") and dc or (row=="H") and dh or di
+                  local guid = entry.guid
+                  Wait.time(function()
+                    if not (o and o.tag=="Deck") then return end
+                    pcall(function()
+                      o.takeObject({
+                        guid = guid,
+                        flip = false,
+                        smooth = false,
+                        callback_function = function(card)
+                          if not card or card.tag ~= "Card" then return end
+                          ensureTag(card, TAG_SHOP_CARD)
+                          uiClearButtons(card)
+                          uiClearDescription(card)
+                          forceFaceDown(card)
+                          UI.modalOpen[card.getGUID()] = nil
+                          UI.homePos[card.getGUID()] = nil
+                          pcall(function() target.putObject(card) end)
+                        end
+                      })
+                    end)
+                  end, 0.03 * extracted)
+                end
+              end
+              if extracted > 0 then
+                log("Collect: extracted "..tostring(extracted).." shop cards from mixed deck guid="..tostring(o.getGUID()))
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  -- 2) Collect any loose shop cards by name into their decks (original behavior)
   for _,o in ipairs(getAllObjects()) do
     if isCard(o) then
       local row = classifyRowByName(o)

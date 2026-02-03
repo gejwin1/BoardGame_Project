@@ -20,6 +20,13 @@ local TAG_TOKEN_ENGINE = "WLB_TOKEN_SYSTEM" -- your snapshot confirms this tag e
 local TAG_SHOP_ENGINE  = "WLB_SHOP_ENGINE"
 
 -- Status tags (must match TokenEngine constants)
+-- These are the STRING VALUES used in scripts (PS_Event, HAS_STATUS, etc.).
+--
+-- PHYSICAL TOKEN IN TTS (Good Karma example):
+--   The Good Karma token object in Tabletop Simulator must have exactly these tags:
+--     - WLB_STATUS_TOKEN
+--     - WLB_STATUS_GOOD_KARMA
+--   Nothing else (no WLB_COLOR_*). TokenEngine pools by these tags; logic uses PSC/TokenEngine state, not color on token.
 local TAG_STATUS_SICK       = "WLB_STATUS_SICK"
 local TAG_STATUS_WOUNDED    = "WLB_STATUS_WOUNDED"
 local TAG_STATUS_ADDICTION  = "WLB_STATUS_ADDICTION"
@@ -37,7 +44,7 @@ local MAP_KEY_TO_TAG = {
   WOUNDED    = TAG_STATUS_WOUNDED,
   ADDICTION  = TAG_STATUS_ADDICTION,
   DATING     = TAG_STATUS_DATING,
-  GOODKARMA  = TAG_STATUS_GOOD_KARMA,
+  GOODKARMA  = TAG_STATUS_GOODKARMA,
   EXPERIENCE = TAG_STATUS_EXPERIENCE,
   VOUCH_C    = TAG_STATUS_VOUCH_C,
   VOUCH_H    = TAG_STATUS_VOUCH_H,
@@ -288,18 +295,10 @@ function PS_GetChildBlockedAP(params)
   -- Calculate number of babies (each baby blocks 2 AP normally)
   local numBabies = math.floor(rawBlocked / 2)
   
-  -- Check for MARRIAGE (reduces by 1 AP per child)
+  -- Check for MARRIAGE (reduces by 1 AP per child) — source of truth: TokenEngine state
   local marriageReduction = 0
-  local TAG_MARRIAGE = "WLB_STATUS_MARRIAGE"
-  local TAG_COLOR_PREFIX = "WLB_COLOR_"
-  local colorTagStr = TAG_COLOR_PREFIX .. color
-  
-  for _, o in ipairs(getAllObjects()) do
-    if o and o.hasTag and o.hasTag(TAG_MARRIAGE) and o.hasTag(colorTagStr) then
-      -- Player is married: reduce by 1 AP per child
-      marriageReduction = numBabies
-      break
-    end
+  if TE_HasStatus(color, "WLB_STATUS_MARRIAGE") then
+    marriageReduction = numBabies
   end
   
   -- Check for BABYMONITOR ownership (count how many BABYMONITOR cards player owns, max 2)
@@ -421,16 +420,41 @@ function PS_GetNonChildBlockedAP(params)
 end
 
 -- =========================================================
--- MANUAL TEST buttons (optional quick debugging)
+-- MANUAL TEST buttons (testing: Good Karma + vouchers)
 -- =========================================================
-function PS_TestAddSick(_, pc)
-  PS_Event({color="Yellow", op="ADD_STATUS", statusTag=TAG_STATUS_SICK})
-  broadcastToAll("PS_TestAddSick -> Yellow", {1,1,0.6})
+local function testTargetColor(pc)
+  if Turns and Turns.turn_color and Turns.turn_color ~= "" then
+    return normalizeColor(Turns.turn_color)
+  end
+  return normalizeColor(pc or "")
 end
 
-function PS_TestRemoveSick(_, pc)
-  PS_Event({color="Yellow", op="REMOVE_STATUS", statusTag=TAG_STATUS_SICK})
-  broadcastToAll("PS_TestRemoveSick -> Yellow", {1,0.8,0.6})
+function PS_TestAddGoodKarma(_, pc)
+  local c = testTargetColor(pc)
+  if c == "" then broadcastToAll("No current player (set turn or click as that color)", {1,0.5,0.5}) return end
+  PS_Event({color=c, op="ADD_STATUS", statusTag=TAG_STATUS_GOODKARMA})
+  broadcastToAll("+ Good Karma ("..c..")", {1,0.9,0.5})
+end
+
+function PS_TestAddVouchC(_, pc)
+  local c = testTargetColor(pc)
+  if c == "" then broadcastToAll("No current player (set turn or click as that color)", {1,0.5,0.5}) return end
+  PS_Event({color=c, op="ADD_STATUS", statusTag=TAG_STATUS_VOUCH_C})
+  broadcastToAll("+ Consumable voucher ("..c..")", {0.85,0.95,0.9})
+end
+
+function PS_TestAddVouchH(_, pc)
+  local c = testTargetColor(pc)
+  if c == "" then broadcastToAll("No current player (set turn or click as that color)", {1,0.5,0.5}) return end
+  PS_Event({color=c, op="ADD_STATUS", statusTag=TAG_STATUS_VOUCH_H})
+  broadcastToAll("+ Hi-Tech voucher ("..c..")", {0.85,0.95,0.9})
+end
+
+function PS_TestAddVouchP(_, pc)
+  local c = testTargetColor(pc)
+  if c == "" then broadcastToAll("No current player (set turn or click as that color)", {1,0.5,0.5}) return end
+  PS_Event({color=c, op="ADD_STATUS", statusTag=TAG_STATUS_VOUCH_P})
+  broadcastToAll("+ Property voucher ("..c..")", {0.85,0.95,0.9})
 end
 
 function onSave()
@@ -459,14 +483,22 @@ function onLoad(saved)
   
   print("[WLB_STATUS_CTRL] loaded v"..VERSION)
 
-  -- tiny debug UI
+  -- Test UI: Good Karma + voucher tokens for current player (status preserved via TokenEngine)
   self.clearButtons()
   self.createButton({
-    label="TEST +SICK (Y)", click_function="PS_TestAddSick", function_owner=self,
-    position={0,0.2,0.3}, width=1400, height=260, font_size=140
+    label="+ Good Karma", click_function="PS_TestAddGoodKarma", function_owner=self,
+    position={0,0.2,0.45}, width=1200, height=240, font_size=120
   })
   self.createButton({
-    label="TEST -SICK (Y)", click_function="PS_TestRemoveSick", function_owner=self,
-    position={0,0.2,0.0}, width=1400, height=260, font_size=140
+    label="+ Vouch C", click_function="PS_TestAddVouchC", function_owner=self,
+    position={0,0.2,0.15}, width=1000, height=220, font_size=110
+  })
+  self.createButton({
+    label="+ Vouch H", click_function="PS_TestAddVouchH", function_owner=self,
+    position={0,0.2,-0.15}, width=1000, height=220, font_size=110
+  })
+  self.createButton({
+    label="+ Vouch P", click_function="PS_TestAddVouchP", function_owner=self,
+    position={0,0.2,-0.45}, width=1000, height=220, font_size=110
   })
 end

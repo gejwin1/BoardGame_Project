@@ -23,8 +23,10 @@ local DEBUG = true
 -- =========================================================
 
 local REAL_DICE_GUID     = "14d4a4"
-local DICE_ROLL_TIMEOUT  = 2.2
-local DICE_STABLE_READS  = 4
+-- Dice read can be slow if physics keeps the die rolling (or it falls).
+-- Use a slightly longer timeout and fewer stable reads to reduce "no resolution" cases.
+local DICE_ROLL_TIMEOUT  = 6.0
+local DICE_STABLE_READS  = 3
 local DICE_POLL          = 0.12
 local diceHome           = nil
 
@@ -53,6 +55,9 @@ local STATUS_TAG = {
   WOUNDED  = "WLB_STATUS_WOUNDED",
   ADDICT   = "WLB_STATUS_ADDICTION",
   EXP      = "WLB_STATUS_EXPERIENCE",
+  VOUCH_C  = "WLB_STATUS_VOUCH_C",   -- 25% discount Consumables
+  VOUCH_H  = "WLB_STATUS_VOUCH_H",   -- 25% discount Hi-Tech
+  VOUCH_P  = "WLB_STATUS_VOUCH_P",   -- 20% discount Properties
 }
 
 local SAT_TOKEN_GUIDS = {
@@ -116,6 +121,10 @@ local function log(msg)  if DEBUG then print("[WLB EVENT] " .. tostring(msg)) en
 local function warn(msg) print("[WLB EVENT][WARN] " .. tostring(msg)) end
 local function colorTag(color) return COLOR_TAG_PREFIX .. tostring(color) end
 
+-- Forward declaration (Lua local visibility rule):
+-- resolveMoney() uses findOneByTags(), so we must declare it before resolveMoney is defined.
+local findOneByTags
+
 -- Money resolver: supports legacy money tiles OR player boards with embedded money API
 local function resolveMoney(color)
   color = tostring(color or "")
@@ -176,7 +185,7 @@ local function extractCardId(cardObj)
   return nil
 end
 
-local function findOneByTags(tags)
+findOneByTags = function(tags)
   for _, o in ipairs(getAllObjects()) do
     local ok = true
     for _, t in ipairs(tags) do
@@ -581,7 +590,11 @@ local function applyToPlayer_NoAP(color, effect, dbgLabel)
 
   if effect.money and effect.money ~= 0 then
     local moneyObj = resolveMoney(color)
-    if not moneyObj then warn("Money object not found for "..tostring(color)); return false end
+    if not moneyObj then
+      warn("Money object not found for "..tostring(color))
+      safeBroadcastTo(color, "⛔ Money controller missing. Add PlayerBoardController_Shared to your player board (WLB_BOARD + WLB_COLOR_"..tostring(color)..") or restore legacy WLB_MONEY tile.", {1,0.6,0.2})
+      return false
+    end
     local ok = moneyAdd(moneyObj, effect.money)
     if not ok then warn("Money API mismatch for "..tostring(color)) end
   end
@@ -768,6 +781,12 @@ end
 
 local function moveDieNearCard(die, cardObj)
   if not die or not cardObj then return end
+  -- Moving the die near the card sometimes causes it to fall off the board/table.
+  -- Prefer rolling at the cached home position (usually a safe area on the table).
+  if diceHome and diceHome.pos then
+    die.setPositionSmooth({diceHome.pos.x, diceHome.pos.y + 2.0, diceHome.pos.z}, false, true)
+    return
+  end
   local cp = cardObj.getPosition()
   die.setPositionSmooth({cp.x + 1.3, cp.y + 2.0, cp.z + 0.4}, false, true)
 end
@@ -1389,17 +1408,25 @@ function evt_roll(cardObj, player_color, alt_click)
       safeBroadcastTo(pd.color, "Die read failed; used fallback roll: "..tostring(roll), {1,0.8,0.3})
     end
 
+    -- Always show the roll result to the player (otherwise it feels like "no resolution").
+    safeBroadcastTo(pd.color, "🎲 Roll result: "..tostring(roll), {0.85,0.95,1})
+
     local typeKey = CARD_TYPE[pd.cardId]
     local def = typeKey and TYPES[typeKey] or nil
 
-    -- Resolve dice and handle any errors
-    local diceOk = pcall(function()
-      resolveDiceByValue(pd.color, pd.diceKey, roll, pd.cardId, def)
+    -- Resolve dice and handle any errors (log the error text for debugging)
+    local okDice, resOrErr = pcall(function()
+      return resolveDiceByValue(pd.color, pd.diceKey, roll, pd.cardId, def)
     end)
-    
-    if not diceOk then
-      warn("resolveDiceByValue failed for "..tostring(pd.cardId).." (diceKey="..tostring(pd.diceKey).." roll="..tostring(roll)..")")
+
+    if not okDice then
+      warn("resolveDiceByValue failed for "..tostring(pd.cardId)..
+        " (diceKey="..tostring(pd.diceKey).." roll="..tostring(roll)..") err="..tostring(resOrErr))
       safeBroadcastTo(pd.color, "⚠️ Card resolution error occurred. Card will still be moved to used deck.", {1,0.7,0.3})
+    elseif resOrErr == false then
+      -- Normal failure path (no Lua error), e.g. missing money controller
+      warn("resolveDiceByValue returned false for "..tostring(pd.cardId)..
+        " (diceKey="..tostring(pd.diceKey).." roll="..tostring(roll)..")")
     end
     
     pcall(function() cardObj.setDescription("DICE: "..tostring(pd.diceKey).." -> "..tostring(roll)) end)
@@ -1637,6 +1664,39 @@ local function playCardById(cardId, cardObj, explicitSlotIdx)
     warn("No TYPES def for "..tostring(typeKey))
     safeBroadcastTo(color, "⚠️ No TYPES def for: "..tostring(typeKey), {1,0.6,0.2})
     return STATUS.ERROR
+  end
+
+  -- VOUCHER-ONLY: grant token(s), move card to USED deck (no AP, no money, no other effects)
+  if def.voucher then
+    local msg = "🎫 Voucher: "
+    if typeKey == "VOUCH_CONS" then
+      -- Youth 50% Consumables → 2x 25% tokens; delay 2nd so they stack without collision
+      PS_AddStatus(color, STATUS_TAG.VOUCH_C)
+      msg = msg .. "2× Consumables discount (25% each)"
+      safeBroadcastTo(color, msg, {0.85,0.95,0.9})
+      finalizeCard(cardObj, "instant", color)
+      Wait.time(function()
+        PS_AddStatus(color, STATUS_TAG.VOUCH_C)
+      end, 1.0)
+      return STATUS.DONE
+    elseif typeKey == "VOUCH_HI" then
+      PS_AddStatus(color, STATUS_TAG.VOUCH_H)
+      msg = msg .. "1× Hi-Tech discount (25%)"
+    elseif typeKey == "AD_VOUCH_CONS" then
+      PS_AddStatus(color, STATUS_TAG.VOUCH_C)
+      msg = msg .. "1× Consumables discount (25%)"
+    elseif typeKey == "AD_VOUCH_HI" then
+      PS_AddStatus(color, STATUS_TAG.VOUCH_H)
+      msg = msg .. "1× Hi-Tech discount (25%)"
+    elseif typeKey == "AD_VOUCH_PROP" then
+      PS_AddStatus(color, STATUS_TAG.VOUCH_P)
+      msg = msg .. "1× Properties discount (20%)"
+    else
+      msg = msg .. "unknown voucher type"
+    end
+    safeBroadcastTo(color, msg, {0.85,0.95,0.9})
+    finalizeCard(cardObj, "instant", color)
+    return STATUS.DONE
   end
 
   -- marriage requirement guard (check DATING status BEFORE spending AP/money)

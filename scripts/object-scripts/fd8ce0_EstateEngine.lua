@@ -24,8 +24,12 @@ local TAG_DECK_L4 = "WLB_DECK_L4"
 local TAG_PLAYERBOARD   = "WLB_BOARD"
 local TAG_AP_CTRL       = "WLB_AP_CTRL"
 local TAG_TOKEN_ENGINE  = "WLB_TOKEN_SYSTEM"
+local TAG_PLAYER_STATUS_CTRL = "WLB_PLAYER_STATUS_CTRL"
 local TAG_MONEY         = "WLB_MONEY"
 local TAG_COSTS_CALC    = "WLB_COSTS_CALC"
+local TAG_STATUS_VOUCH_P    = "WLB_STATUS_VOUCH_P"
+-- Property vouchers: only 2 exist in the game → max 40% discount (2 × 20%)
+local PROPERTY_VOUCHER_MAX  = 2
 local COLOR_TAG_PREFIX  = "WLB_COLOR_"
 local TAG_PLAYERBOARD   = "WLB_BOARD"
 
@@ -147,6 +151,7 @@ local S = {
   shopboard = nil,
   enteredEstateThisTurn = { Yellow=false, Blue=false, Red=false, Green=false },  -- Per-turn entry tracking (like Shop Engine)
   currentEstateLevel = { Yellow="L0", Blue="L0", Red="L0", Green="L0" },  -- Track current rental level per player (L0 = grandma's house)
+  pendingEstateVoucher = nil,  -- { level, acting, voucherCount, step } when asking "Use discount?"
 }
 
 -- =========================
@@ -227,6 +232,31 @@ local function findTokenEngine()
     end
   end
   return nil
+end
+
+-- Find PlayerStatusController for voucher count / remove
+local function findPSC()
+  for _, o in ipairs(getAllObjects()) do
+    if o and o.hasTag and o.hasTag(TAG_PLAYER_STATUS_CTRL) then return o end
+  end
+  return nil
+end
+
+local function pscGetStatusCount(color, statusTag)
+  local psc = findPSC()
+  if not psc or not psc.call then return 0 end
+  local ok, ret = pcall(function() return psc.call("PS_Event", { color = color, op = "GET_STATUS_COUNT", statusTag = statusTag }) end)
+  if ok and type(ret) == "number" then return math.max(0, math.floor(ret)) end
+  return 0
+end
+
+local function pscRemoveStatusCount(color, statusTag, count)
+  local psc = findPSC()
+  if not psc or not psc.call then return false end
+  count = math.max(0, math.floor(tonumber(count) or 0))
+  if count == 0 then return true end
+  local ok, ret = pcall(function() return psc.call("PS_Event", { color = color, op = "REMOVE_STATUS_COUNT", statusTag = statusTag, count = count }) end)
+  return ok and ret
 end
 
 -- Call Token Engine to remove tokens to safe park
@@ -945,31 +975,19 @@ local function doRent(level, clickedColor)
   end, 0.3)
 end
 
-local function doBuy(level, clickedColor)
-  local acting = getActingColor(clickedColor)
-  if not acting then broadcastToAll("⛔ Brak aktywnego gracza.", {1,0.6,0.2}) return end
-
-  local owned = findOwnedEstateOnBoard(acting)
-  if owned then
-    blockAlreadyHasEstate(acting, level)
-    return
-  end
-
-  -- Pay entry AP if needed (CAR waives entry, per-turn tracking)
-  if not payEstateEntryAPIfNeeded(acting) then
-    return  -- Error message already shown
-  end
-
-  -- Check and pay estate purchase price
-  local price = ESTATE_PRICE[level] or 0
-  if price > 0 then
-    if not moneyTrySpend(acting, price) then
-      return  -- Error message already shown (insufficient funds)
+-- Inner buy: pay finalPrice, optionally remove voucherTokensToRemove (20% per token), take card, place
+local function doBuyExecute(level, acting, finalPrice, voucherTokensToRemove)
+  voucherTokensToRemove = math.max(0, math.floor(tonumber(voucherTokensToRemove) or 0))
+  if finalPrice > 0 then
+    if not moneyTrySpend(acting, finalPrice) then return end
+    local msg = "💰 BUY: Paid "..tostring(finalPrice).." WIN for "..level.." estate."
+    if voucherTokensToRemove > 0 then
+      msg = msg .. " (used "..tostring(voucherTokensToRemove).." discount token(s))"
+      pscRemoveStatusCount(acting, TAG_STATUS_VOUCH_P, voucherTokensToRemove)
     end
-    sayToColor(acting, "💰 BUY: Paid "..tostring(price).." WIN for "..level.." estate.", {0.7,1,0.7})
+    sayToColor(acting, msg, {0.7,1,0.7})
   end
 
-  -- Remove tokens to safe park before placing estate card
   removeTokensToSafePark(acting)
   
   -- Small delay to let tokens move
@@ -1026,6 +1044,143 @@ local function doBuy(level, clickedColor)
 
     doNothing(level)
   end, 0.3)
+end
+
+local function showVoucherChoiceOnDeck(level)
+  local deck = S.decks[level]
+  if not isAlive(deck) then return end
+  local p = S.pendingEstateVoucher
+  if not p or p.level ~= level then return end
+  setDeckStage(deck, STAGE_ACTIONS)
+  deck.clearButtons()
+  local price = ESTATE_PRICE[level] or 0
+  deck.createButton({
+    click_function = "ME_estateFullPrice",
+    function_owner = self,
+    label = "FULL PRICE\n("..tostring(price).." WIN)",
+    position = {0, TILE_UIY, ACTIONS_Z_SPREAD},
+    width = TILE_BTN_W, height = TILE_BTN_H, font_size = TILE_BTN_FS,
+    color = COL_BUY_BG, font_color = COL_BUY_FC,
+    tooltip = "Pay full price",
+  })
+  deck.createButton({
+    click_function = "ME_estateUseDiscount",
+    function_owner = self,
+    label = "USE DISCOUNT ("..tostring(p.voucherCount)..")",
+    position = {0, TILE_UIY, -ACTIONS_Z_SPREAD},
+    width = TILE_BTN_W, height = TILE_BTN_H, font_size = TILE_BTN_FS,
+    color = {0.3, 0.6, 0.9, 1}, font_color = {1,1,1,1},
+    tooltip = "Use 1+ property discount tokens (20% each)",
+  })
+end
+
+local function showVoucherCountOnDeck(level)
+  local deck = S.decks[level]
+  if not isAlive(deck) then return end
+  local p = S.pendingEstateVoucher
+  if not p or p.level ~= level then return end
+  deck.clearButtons()
+  local n = math.min(PROPERTY_VOUCHER_MAX, math.max(1, p.voucherCount or 1))
+  deck.createButton({
+    click_function = "ME_estateNoop",
+    function_owner = self,
+    label = "How many tokens? (1.."..tostring(n)..")",
+    position = {0, TILE_UIY, ACTIONS_Z_SPREAD + 0.3},
+    width = TILE_BTN_W * 1.2, height = 340, font_size = 140,
+    color = PROMPT_BG, font_color = PROMPT_FC,
+    tooltip = "",
+  })
+  for i = 1, n do
+    local price = ESTATE_PRICE[level] or 0
+    local finalP = math.max(0, math.floor(price * (1 - 0.20 * i)))
+    deck.createButton({
+      click_function = (i==1 and "ME_estateUse1") or (i==2 and "ME_estateUse2") or (i==3 and "ME_estateUse3") or "ME_estateUse4",
+      function_owner = self,
+      label = tostring(i).." token(s)\n("..tostring(finalP).." WIN)",
+      position = {0, TILE_UIY, -ACTIONS_Z_SPREAD - (i-1)*0.5},
+      width = TILE_BTN_W * 0.9, height = TILE_BTN_H, font_size = TILE_BTN_FS * 0.9,
+      color = {0.25, 0.5, 0.85, 1}, font_color = {1,1,1,1},
+      tooltip = "Use "..tostring(i).." token(s)",
+    })
+  end
+end
+
+function ME_estateNoop() end
+
+function ME_estateFullPrice(deck, pc)
+  local p = S.pendingEstateVoucher
+  S.pendingEstateVoucher = nil
+  if not p or not p.level or not p.acting then
+    if p and p.level then rebuildDeckUI(p.level) end
+    return
+  end
+  local price = ESTATE_PRICE[p.level] or 0
+  doBuyExecute(p.level, p.acting, price, 0)
+  rebuildDeckUI(p.level)
+end
+
+function ME_estateUseDiscount(deck, pc)
+  local p = S.pendingEstateVoucher
+  if not p or not p.level or not p.acting then
+    S.pendingEstateVoucher = nil
+    if p and p.level then rebuildDeckUI(p.level) end
+    return
+  end
+  if p.voucherCount == 1 then
+    S.pendingEstateVoucher = nil
+    local price = ESTATE_PRICE[p.level] or 0
+    local finalP = math.max(0, math.floor(price * 0.80))
+    doBuyExecute(p.level, p.acting, finalP, 1)
+    rebuildDeckUI(p.level)
+    return
+  end
+  p.step = "ask_count"
+  showVoucherCountOnDeck(p.level)
+end
+
+function ME_estateUseN(deck, pc, N)
+  N = math.max(1, math.min(PROPERTY_VOUCHER_MAX, math.floor(tonumber(N) or 1)))
+  local p = S.pendingEstateVoucher
+  S.pendingEstateVoucher = nil
+  if not p or not p.level or not p.acting then
+    if p and p.level then rebuildDeckUI(p.level) end
+    return
+  end
+  local price = ESTATE_PRICE[p.level] or 0
+  local finalP = math.max(0, math.floor(price * (1 - 0.20 * N)))
+  doBuyExecute(p.level, p.acting, finalP, N)
+  rebuildDeckUI(p.level)
+end
+function ME_estateUse1(deck, pc) ME_estateUseN(deck, pc, 1) end
+function ME_estateUse2(deck, pc) ME_estateUseN(deck, pc, 2) end
+function ME_estateUse3(deck, pc) ME_estateUseN(deck, pc, 3) end
+function ME_estateUse4(deck, pc) ME_estateUseN(deck, pc, 4) end
+
+local function doBuy(level, clickedColor)
+  local acting = getActingColor(clickedColor)
+  if not acting then broadcastToAll("⛔ Brak aktywnego gracza.", {1,0.6,0.2}) return end
+
+  local owned = findOwnedEstateOnBoard(acting)
+  if owned then
+    blockAlreadyHasEstate(acting, level)
+    return
+  end
+
+  if not payEstateEntryAPIfNeeded(acting) then
+    return
+  end
+
+  local price = ESTATE_PRICE[level] or 0
+  local voucherCount = pscGetStatusCount(acting, TAG_STATUS_VOUCH_P)
+
+  if voucherCount >= 1 then
+    S.pendingEstateVoucher = { level = level, acting = acting, voucherCount = voucherCount, step = "ask_use" }
+    showVoucherChoiceOnDeck(level)
+    sayToColor(acting, "Use discount? You have "..tostring(voucherCount).." property voucher(s). Choose FULL PRICE or USE DISCOUNT.", {0.85,0.95,1})
+    return
+  end
+
+  doBuyExecute(level, acting, price, 0)
 end
 
 function ME_prompt_L1(_, pc) doPrompt("L1") end
