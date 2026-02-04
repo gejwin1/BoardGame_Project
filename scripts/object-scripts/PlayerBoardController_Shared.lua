@@ -133,6 +133,20 @@ local function getRoundToken()
   return getObjectFromGUID(ROUND_TOKEN_GUID)
 end
 
+-- Current round (1-13). Used to hide school buttons during Youth (rounds 1-5); show from round 6 (Adult) or when game started in Adult.
+local function getCurrentRound()
+  local rt = getRoundToken()
+  if rt and rt.call then
+    local ok, r = pcall(function() return rt.call("getRound") end)
+    if ok and type(r) == "number" then return math.floor(r) end
+  end
+  return 1
+end
+
+local function isSchoolPeriodActive()
+  return getCurrentRound() >= 6
+end
+
 local function isPlayableColor(c)
   return c=="Yellow" or c=="Blue" or c=="Red" or c=="Green"
 end
@@ -603,89 +617,91 @@ function redraw()
     tooltip        = workMinusTip
   })
 
-  -- SCHOOL buttons (FREE / PAID) + follow-up choice menu
-  if S.schoolPending == "FREE" or S.schoolPending == "PAID" then
-    local paid = (S.schoolPending == "PAID")
-    local hdr = paid and "PAID: choose reward" or "FREE: choose reward"
-    local costLine = paid and ("-400 WIN, -3 AP") or ("-3 AP")
+  -- SCHOOL buttons (FREE / PAID) + follow-up choice menu — only in Adult period (round 6+); hidden during Youth (rounds 1-5)
+  if isSchoolPeriodActive() then
+    if S.schoolPending == "FREE" or S.schoolPending == "PAID" then
+      local paid = (S.schoolPending == "PAID")
+      local hdr = paid and "PAID: choose reward" or "FREE: choose reward"
+      local costLine = paid and ("-400 WIN, -3 AP") or ("-3 AP")
 
-    -- small header label (non-clickable)
-    self.createButton({
-      click_function = "noop",
-      function_owner = self,
-      label          = "SCHOOL\n"..hdr.."\n"..costLine,
-      position       = {((POS.school_free.x + POS.school_paid.x) / 2), POS.school_free.y, (POS.school_free.z - 1.05)},
-      width          = 1800,
-      height         = 520,
-      font_size      = 130,
-      color          = {0.95, 0.95, 0.95, 0.95},
-      font_color     = {0.05, 0.05, 0.05, 1},
-      tooltip        = ""
-    })
+      -- small header label (non-clickable)
+      self.createButton({
+        click_function = "noop",
+        function_owner = self,
+        label          = "SCHOOL\n"..hdr.."\n"..costLine,
+        position       = {((POS.school_free.x + POS.school_paid.x) / 2), POS.school_free.y, (POS.school_free.z - 1.05)},
+        width          = 1800,
+        height         = 520,
+        font_size      = 130,
+        color          = {0.95, 0.95, 0.95, 0.95},
+        font_color     = {0.05, 0.05, 0.05, 1},
+        tooltip        = ""
+      })
 
-    self.createButton({
-      click_function = "school_choose_k",
-      function_owner = self,
-      label          = "KNOWLEDGE",
-      position       = {POS.school_free.x, POS.school_free.y, POS.school_free.z},
-      width          = 1100,
-      height         = H_BTN,
-      font_size      = 150,
-      color          = COL_SCHOOL_FREE,
-      font_color     = COL_TXT,
-      tooltip        = paid and "+2 KNOWLEDGE" or "+1 KNOWLEDGE"
-    })
+      self.createButton({
+        click_function = "school_choose_k",
+        function_owner = self,
+        label          = "KNOWLEDGE",
+        position       = {POS.school_free.x, POS.school_free.y, POS.school_free.z},
+        width          = 1100,
+        height         = H_BTN,
+        font_size      = 150,
+        color          = COL_SCHOOL_FREE,
+        font_color     = COL_TXT,
+        tooltip        = paid and "+2 KNOWLEDGE" or "+1 KNOWLEDGE"
+      })
 
-    self.createButton({
-      click_function = "school_choose_s",
-      function_owner = self,
-      label          = "SKILL",
-      position       = {POS.school_paid.x, POS.school_paid.y, POS.school_paid.z},
-      width          = 1100,
-      height         = H_BTN,
-      font_size      = 170,
-      color          = COL_SCHOOL_PAID,
-      font_color     = COL_TXT,
-      tooltip        = paid and "+2 SKILL" or "+1 SKILL"
-    })
+      self.createButton({
+        click_function = "school_choose_s",
+        function_owner = self,
+        label          = "SKILL",
+        position       = {POS.school_paid.x, POS.school_paid.y, POS.school_paid.z},
+        width          = 1100,
+        height         = H_BTN,
+        font_size      = 170,
+        color          = COL_SCHOOL_PAID,
+        font_color     = COL_TXT,
+        tooltip        = paid and "+2 SKILL" or "+1 SKILL"
+      })
 
-    self.createButton({
-      click_function = "school_cancel",
-      function_owner = self,
-      label          = "CANCEL",
-      position       = {((POS.school_free.x + POS.school_paid.x) / 2), POS.school_free.y, (POS.school_free.z - 2.05)},
-      width          = 1400,
-      height         = 320,
-      font_size      = 140,
-      color          = COL_LOCK,
-      font_color     = COL_TXT,
-      tooltip        = "Back"
-    })
-  else
-    self.createButton({
-      click_function = "school_free",
-      function_owner = self,
-      label          = "FREE",
-      position       = {POS.school_free.x, POS.school_free.y, POS.school_free.z},
-      width          = 500,
-      height         = H_BTN,
-      font_size      = 170,
-      color          = COL_SCHOOL_FREE,
-      font_color     = COL_TXT,
-      tooltip        = "SCHOOL (FREE)\nUses 3 AP\nThen choose: Knowledge or Skill"
-    })
-    self.createButton({
-      click_function = "school_paid",
-      function_owner = self,
-      label          = "PAID",
-      position       = {POS.school_paid.x, POS.school_paid.y, POS.school_paid.z},
-      width          = 500,
-      height         = H_BTN,
-      font_size      = 170,
-      color          = COL_SCHOOL_PAID,
-      font_color     = COL_TXT,
-      tooltip        = "SCHOOL (PAID)\nUses 3 AP + 400 WIN\nThen choose: +2 Knowledge or +2 Skill"
-    })
+      self.createButton({
+        click_function = "school_cancel",
+        function_owner = self,
+        label          = "CANCEL",
+        position       = {((POS.school_free.x + POS.school_paid.x) / 2), POS.school_free.y, (POS.school_free.z - 2.05)},
+        width          = 1400,
+        height         = 320,
+        font_size      = 140,
+        color          = COL_LOCK,
+        font_color     = COL_TXT,
+        tooltip        = "Back"
+      })
+    else
+      self.createButton({
+        click_function = "school_free",
+        function_owner = self,
+        label          = "FREE",
+        position       = {POS.school_free.x, POS.school_free.y, POS.school_free.z},
+        width          = 500,
+        height         = H_BTN,
+        font_size      = 170,
+        color          = COL_SCHOOL_FREE,
+        font_color     = COL_TXT,
+        tooltip        = "SCHOOL (FREE)\nUses 3 AP\nThen choose: Knowledge or Skill"
+      })
+      self.createButton({
+        click_function = "school_paid",
+        function_owner = self,
+        label          = "PAID",
+        position       = {POS.school_paid.x, POS.school_paid.y, POS.school_paid.z},
+        width          = 500,
+        height         = H_BTN,
+        font_size      = 170,
+        color          = COL_SCHOOL_PAID,
+        font_color     = COL_TXT,
+        tooltip        = "SCHOOL (PAID)\nUses 3 AP + 400 WIN\nThen choose: +2 Knowledge or +2 Skill"
+      })
+    end
   end
 
   -- MONEY display (2 lines, separate buttons; non-clickable)
@@ -730,6 +746,7 @@ function school_choose_s(_, player_color, alt_click) doSchoolResolve("S") end
 function school_cancel(_, player_color, alt_click) doSchoolCancel() end
 
 -- Unlock WORK when it's not our turn anymore (simple per-turn lock behavior)
+-- School buttons at round 6: TurnController notifies boards via rebuildUI() when round changes (event-driven).
 local function tick()
   local my = getMyColor()
   local active = getActiveColor()

@@ -5,7 +5,7 @@
   <!--
     This is the ONLY place vocation panels live. VocationsController Lua
     uses UI.setAttribute / UI.getAttribute on these IDs. Do NOT duplicate
-    these panels in the VocationsController object’s UI tab.
+    these panels in the VocationsController object's UI tab.
   -->
   <!-- Single row: 6 vocation cards horizontally -->
   
@@ -24,9 +24,12 @@
       <Text id="selectionSubtitle" text="" fontSize="45" color="#cccccc" 
             position="0,-220" width="1600" height="50" alignment="MiddleCenter" active="false" />
 
-      <!-- Science points / pool info -->
+      <!-- Science points (when Adult start only); hidden when Youth -->
       <Text id="selectionSciencePoints" text="Science Points: 0" fontSize="40" color="#cccccc" 
             position="0,-175" width="1600" height="45" alignment="MiddleCenter" />
+      <!-- Knowledge • Skill on one line (when Youth, round 1 or 6); hidden when Adult start -->
+      <Text id="selectionKnowledgeSkillLine" text="Knowledge: 0  •  Skill: 0" fontSize="40" color="#cccccc" 
+            position="0,-175" width="1600" height="45" alignment="MiddleCenter" active="false" />
 
       
       <!-- Vocation Cards - Single Row: 6 cards horizontally -->
@@ -82,6 +85,44 @@
              width="1600" 
              height="800" 
              active="false" />
+      
+      <!-- Selection card: appears after Confirm; full resolution, no resize (image set by Lua per vocation) -->
+      <Panel id="selectionCardPanel" width="1600" height="800" position="0,-30" rectAlignment="MiddleCenter" active="false">
+        <Image id="selectionCardImage" 
+               position="0,0" 
+               width="1600" 
+               height="800" />
+        <!-- Science points allocation: adjust positions by editing the position attribute (x,y) -->
+        <!-- Science points number (only the number; Lua sets text when panel is shown) -->
+        <Text id="selectionCardSciencePoints" text="0" fontSize="30" color="#ffffff" 
+              position="260,-185" width="200" height="80" alignment="MiddleCenter" />
+        <!-- Allocated Knowledge (number only); adjust position as needed -->
+        <Text id="selectionCardKnowledgeValue" text="0" fontSize="50" color="#ffffff" 
+              position="-512,-375" width="120" height="70" alignment="MiddleCenter" />
+        <!-- Knowledge + (red); adjust position as needed -->
+        <Button id="selectionCardKPlus" text="+" fontSize="70" 
+                position="-635,-300" width="95" height="65" 
+                onClick="UI_AllocScience" color="#cc2222" fontColor="#ffffff" />
+        <!-- Knowledge - (blue); adjust position as needed -->
+        <Button id="selectionCardKMinus" text="-" fontSize="70" 
+                position="-390,-300" width="95" height="65" 
+                onClick="UI_AllocScience" color="#2222cc" fontColor="#ffffff" />
+        <!-- Allocated Skills (number only); adjust position as needed -->
+        <Text id="selectionCardSkillsValue" text="0" fontSize="50" color="#ffffff" 
+              position="487,-375" width="120" height="70" alignment="MiddleCenter" />
+        <!-- Skills + (red); adjust position as needed -->
+        <Button id="selectionCardSPlus" text="+" fontSize="70" 
+                position="360,-300" width="95" height="65" 
+                onClick="UI_AllocScience" color="#cc2222" fontColor="#ffffff" />
+        <!-- Skills - (blue); adjust position as needed -->
+        <Button id="selectionCardSMinus" text="-" fontSize="70" 
+                position="605,-300" width="95" height="65" 
+                onClick="UI_AllocScience" color="#2222cc" fontColor="#ffffff" />
+        <!-- Apply K/S to player board (enabled when pool is 0); adjust position as needed -->
+        <Button id="selectionCardApply" text="Confirm" fontSize="44" 
+                position="0,-320" width="300" height="75" 
+                onClick="UI_ApplyAllocScience" color="#2d6a4f" fontColor="#ffffff" />
+      </Panel>
       
       <!-- Summary Content Area -->
       <Panel id="summaryContent" width="1600" height="600" position="0,0" color="#2a2a2a">

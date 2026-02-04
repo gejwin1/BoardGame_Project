@@ -39,6 +39,8 @@ local COLOR_TAG_PREFIX      = "WLB_COLOR_"
 
 -- PlayerStatusController hub
 local TAG_PLAYER_STATUS_CTRL = "WLB_PLAYER_STATUS_CTRL"
+-- VocationsController (salary per AP for work bonus)
+local TAG_VOCATIONS_CTRL    = "WLB_VOCATIONS_CTRL"
 
 -- Keep/discard targets are found by TAG (can be Zone or any marker object with position)
 local TAG_KEEP_ZONE         = "WLB_KEEP_ZONE"
@@ -247,6 +249,11 @@ local function PS_AddStatus(color, statusTag)
   return PS_EventCall({ color=color, op="ADD_STATUS", statusTag=statusTag })
 end
 
+local function PS_RemoveStatus(color, statusTag)
+  if not color or not statusTag then return false end
+  return PS_EventCall({ color=color, op="REMOVE_STATUS", statusTag=statusTag })
+end
+
 -- Check if player has DATING status token (required for marriage)
 -- Uses PlayerStatusController as central authority (queries TokenEngine's internal state)
 local function hasDatingStatus(color)
@@ -314,6 +321,17 @@ end
 local function PS_AddChild(color, sex)
   if not color or not sex then return false end
   return PS_EventCall({ color=color, op="ADD_CHILD", sex=sex })
+end
+
+-- Salary per AP from current vocation (for work bonus card)
+local function getSalaryPerAP(color)
+  if not color then return 0 end
+  color = normalizeColor(color)
+  local voc = findOneByTags({TAG_VOCATIONS_CTRL})
+  if not voc or not voc.call then return 0 end
+  local ok, salary = pcall(function() return voc.call("VOC_GetSalary", { color = color }) end)
+  if not ok or type(salary) ~= "number" then return 0 end
+  return math.max(0, salary)
 end
 
 -- =========================================================
@@ -582,6 +600,53 @@ local function applyAP_Move(color, apEff)
     warn("moveAP() not supported by AP CTRL.")
     return false
   end
+  return true
+end
+
+-- Party-with-friends (HANGOVER) fix: move N AP to INACTIVE; if player has no available AP,
+-- take the shortfall from REST and move those to INACTIVE as well.
+local function applyAP_ToInactive_WithRestFallback(color, amount, duration)
+  if not amount or (tonumber(amount) or 0) <= 0 then return true end
+  amount = tonumber(amount) or 0
+  local apCtrl = getApCtrl(color)
+  if not apCtrl or not apCtrl.call then
+    warn("AP CTRL not found for "..tostring(color).." -> cannot apply hangover AP.")
+    return false
+  end
+
+  local apEff = { to = "INACTIVE", amount = amount }
+  if duration then apEff.duration = duration end
+
+  local ok, ret = pcall(function() return apCtrl.call("moveAP", apEff) end)
+  if not ok then
+    warn("moveAP(INACTIVE) failed for "..tostring(color))
+    return false
+  end
+
+  local moved = (type(ret) == "table" and (tonumber(ret.moved) or 0)) or 0
+  local shortfall = math.max(0, amount - moved)
+
+  if shortfall <= 0 then return true end
+
+  -- Get REST count (AP controller may use area="REST" or field="REST")
+  local restCount = 0
+  pcall(function()
+    restCount = apCtrl.call("getCount", { area = "REST" })
+      or apCtrl.call("getCount", { field = "REST" })
+      or apCtrl.call("getCount", { to = "REST" })
+      or 0
+    restCount = tonumber(restCount) or 0
+  end)
+
+  local takeFromRest = math.min(shortfall, restCount)
+  if takeFromRest <= 0 then return true end
+
+  -- Move from REST to START, then from START to INACTIVE
+  pcall(function() apCtrl.call("moveAP", { to = "REST", amount = -takeFromRest }) end)
+  pcall(function()
+    apCtrl.call("moveAP", { to = "INACTIVE", amount = takeFromRest, duration = duration })
+  end)
+  safeBroadcastTo(color, "🍻 Hangover: "..tostring(takeFromRest).." AP taken from REST to INACTIVE (no free AP left).", {0.9,0.7,0.4})
   return true
 end
 
@@ -985,7 +1050,7 @@ local TYPES = {
 
   AD_MARRIAGE   = { kind="instant", money=-500, ap={to="EVENT", amount=4}, sat=2, special="AD_MARRIAGE_MULTI" },
 
-  AD_VOUCH_PROP = { kind="keep", voucher={ category="PROPERTY", discount=0.20 }, todo=true, note="Property purchase system not implemented yet" },
+  AD_VOUCH_PROP = { kind="keep", voucher={ category="PROPERTY", discount=0.20 } },
 
   -- ✅ FIX: Adult Karma like Youth Karma (instant + GOODKARMA token, NOT keep)
   AD_KARMA      = { kind="instant", ap={to="EVENT", amount=1}, karma=true, statusAddTag=STATUS_TAG.GOODKARMA },
@@ -1048,6 +1113,99 @@ local DICE = {
 }
 
 -- =========================================================
+-- SECTION 10b) DICE RESULT UI MESSAGES (on-screen + chat)
+-- =========================================================
+-- Returns title (short, for big label on card) and full (for chat + description), or nil if no message.
+
+local DICE_RESULT_UI = {
+  BEAUTY_D6 = {
+    [1] = {
+      title = "Roll: 1 — You won! Main prize: 500 Vins",
+      full  = "========== BEAUTY CONTEST ==========\nYou rolled: 1\nCongratulations! You won the beauty contest! Main prize: 500 Vins.\n========================================",
+    },
+    [2] = {
+      title = "Roll: 2 — Second place! 300 Vins",
+      full  = "========== BEAUTY CONTEST ==========\nYou rolled: 2\nCongratulations! You took second place in the beauty contest. You win 300 Vins.\n========================================",
+    },
+    [3] = {
+      title = "Roll: 3 — Second place! 300 Vins",
+      full  = "========== BEAUTY CONTEST ==========\nYou rolled: 3\nCongratulations! You took second place in the beauty contest. You win 300 Vins.\n========================================",
+    },
+    [4] = {
+      title = "Roll: 4 — No prize this time",
+      full  = "========== BEAUTY CONTEST ==========\nYou rolled: 4\nYour beauty didn't charm the jury. This time you didn't win anything.\n========================================",
+    },
+    [5] = {
+      title = "Roll: 5 — No prize this time",
+      full  = "========== BEAUTY CONTEST ==========\nYou rolled: 5\nYour beauty didn't charm the jury. This time you didn't win anything.\n========================================",
+    },
+    [6] = {
+      title = "Roll: 6 — No prize this time",
+      full  = "========== BEAUTY CONTEST ==========\nYou rolled: 6\nYour beauty didn't charm the jury. This time you didn't win anything.\n========================================",
+    },
+  },
+  HANGOVER = {
+    [1] = {
+      title = "Roll: 1 — Terrible hangover! −2 AP",
+      full  = "========== PARTY WITH FRIENDS ==========\nYou rolled: 1\nOh my God, you had a terrible hangover. You need to spend a lot of time in bed — or even in the toilet. (−2 AP to inactive)\n========================================",
+    },
+    [2] = {
+      title = "Roll: 2 — Difficult morning, −1 AP",
+      full  = "========== PARTY WITH FRIENDS ==========\nYou rolled: 2\nYou had a difficult morning, but later you got on track. (−1 AP to inactive)\n========================================",
+    },
+    [3] = {
+      title = "Roll: 3 — Difficult morning, −1 AP",
+      full  = "========== PARTY WITH FRIENDS ==========\nYou rolled: 3\nYou had a difficult morning, but later you got on track. (−1 AP to inactive)\n========================================",
+    },
+    [4] = {
+      title = "Roll: 4 — Feel great! No penalty",
+      full  = "========== PARTY WITH FRIENDS ==========\nYou rolled: 4\nYou feel better than ever. Can't wait for the next party!\n========================================",
+    },
+    [5] = {
+      title = "Roll: 5 — Feel great! No penalty",
+      full  = "========== PARTY WITH FRIENDS ==========\nYou rolled: 5\nYou feel better than ever. Can't wait for the next party!\n========================================",
+    },
+    [6] = {
+      title = "Roll: 6 — Feel great! No penalty",
+      full  = "========== PARTY WITH FRIENDS ==========\nYou rolled: 6\nYou feel better than ever. Can't wait for the next party!\n========================================",
+    },
+  },
+  AD_SPORT_D6 = {
+    [1] = {
+      title = "Roll: 1 — Your team lost",
+      full  = "========== SPORTS EVENT ==========\nYou rolled: 1\nYour team lost. Better luck next time! (+2 SAT for taking part)\n========================================",
+    },
+    [2] = {
+      title = "Roll: 2 — Your team lost",
+      full  = "========== SPORTS EVENT ==========\nYou rolled: 2\nYour team lost. Better luck next time! (+2 SAT for taking part)\n========================================",
+    },
+    [3] = {
+      title = "Roll: 3 — Your team drew",
+      full  = "========== SPORTS EVENT ==========\nYou rolled: 3\nYour team drew. A fair result. (+3 SAT)\n========================================",
+    },
+    [4] = {
+      title = "Roll: 4 — Your team drew",
+      full  = "========== SPORTS EVENT ==========\nYou rolled: 4\nYour team drew. A fair result. (+3 SAT)\n========================================",
+    },
+    [5] = {
+      title = "Roll: 5 — Your team won!",
+      full  = "========== SPORTS EVENT ==========\nYou rolled: 5\nYour team won! Celebration time! (+4 SAT)\n========================================",
+    },
+    [6] = {
+      title = "Roll: 6 — Your team won!",
+      full  = "========== SPORTS EVENT ==========\nYou rolled: 6\nYour team won! Celebration time! (+4 SAT)\n========================================",
+    },
+  },
+}
+
+local function getDiceResultMessage(diceKey, roll)
+  if not diceKey or not roll then return nil end
+  local t = DICE_RESULT_UI[diceKey]
+  if not t then return nil end
+  return t[roll]
+end
+
+-- =========================================================
 -- SECTION 11) CHOICES
 -- =========================================================
 
@@ -1076,42 +1234,51 @@ local function allPlayerColors()
   return {"Yellow","Blue","Red","Green"}
 end
 
+-- Invited players: obliged to go (always lose 1 AP). If they can pay 100 Vins they get +1 SAT and pay; otherwise no payment, no SAT.
 local function resolveBirthday(activeColorNow)
   local moneyActive = resolveMoney(activeColorNow)
   for _, c in ipairs(allPlayerColors()) do
     if c ~= activeColorNow then
-      local satObj = getSatToken(c)
-      if satObj then satAdd(satObj, 1, "Birthday:"..c) end
-
+      -- Always "go" to the birthday: lose 1 AP to INACTIVE
       applyAP_Move(c, {to="INACTIVE", amount=1, duration=1})
 
-      local moneyOther = resolveMoney(c)
-      if moneyOther and moneyActive and canAfford(c, -100) then
-        pcall(function()
-          moneyAdd(moneyOther, -100)
-          moneyAdd(moneyActive, 100)
-        end)
+      if canAfford(c, -100) then
+        local satObj = getSatToken(c)
+        if satObj then satAdd(satObj, 1, "Birthday:"..c) end
+        local moneyOther = resolveMoney(c)
+        if moneyOther and moneyActive then
+          pcall(function()
+            moneyAdd(moneyOther, -100)
+            moneyAdd(moneyActive, 100)
+          end)
+        end
       end
+      -- If cannot afford 100: no SAT, no payment (still went, so AP already applied)
     end
   end
   safeBroadcastTo(activeColorNow, "🎉 Birthday: inni +1 SAT, 1 AP INACTIVE (1 tura) i płatność 100 (jeśli mogli).", {0.7,1,0.7})
 end
 
+-- Invited players: obliged to attend (always lose 2 AP). If they can pay 200 Vins they get +2 SAT and pay; otherwise no payment, no SAT.
 local function resolveMarriageMulti(activeColorNow)
   local moneyActive = resolveMoney(activeColorNow)
   for _, c in ipairs(allPlayerColors()) do
     if c ~= activeColorNow then
-      local satObj = getSatToken(c)
-      if satObj then satAdd(satObj, 2, "Marriage:"..c) end
+      -- Always attend the wedding: lose 2 AP to INACTIVE
       applyAP_Move(c, {to="INACTIVE", amount=2, duration=1})
 
-      local moneyOther = resolveMoney(c)
-      if moneyOther and moneyActive and canAfford(c, -200) then
-        pcall(function()
-          moneyAdd(moneyOther, -200)
-          moneyAdd(moneyActive, 200)
-        end)
+      if canAfford(c, -200) then
+        local satObj = getSatToken(c)
+        if satObj then satAdd(satObj, 2, "Marriage:"..c) end
+        local moneyOther = resolveMoney(c)
+        if moneyOther and moneyActive then
+          pcall(function()
+            moneyAdd(moneyOther, -200)
+            moneyAdd(moneyActive, 200)
+          end)
+        end
       end
+      -- If cannot afford 200: no SAT, no payment (still attended, so 2 AP already applied)
     end
   end
 end
@@ -1129,12 +1296,20 @@ local function handleSpecial(color, cardId, def, cardObj)
     -- Add DATING status token (required for marriage)
     PS_AddStatus(color, STATUS_TAG.DATING)
     
-    safeBroadcastTo(color, "💑 DATE: +"..tostring(sat).." SAT"..(married[color] and " (married bonus)" or "").." + DATING status", {0.7,1,0.7})
+    safeBroadcastTo(color, "💑 You went for your first date. Let's see if it can become something serious in the future! +"..tostring(sat).." SAT"..(married[color] and " (married bonus)" or "").." + DATING status.", {0.7,1,0.7})
     return STATUS.DONE
   end
 
   if def.special == "AD_WORKBONUS_PAY4" then
-    safeBroadcastTo(color, "ℹ️ WORK BONUS: profesje jeszcze TODO.", {0.7,0.9,1})
+    -- Work bonus = 4× salary (salary = WIN per AP from current vocation)
+    local salary = getSalaryPerAP(color)
+    if salary and salary > 0 then
+      local bonus = salary * 4
+      applyToPlayer_NoAP(color, { money = bonus }, "AD_WORKBONUS")
+      safeBroadcastTo(color, "💼 Work bonus: +"..tostring(bonus).." WIN (4× your salary: "..tostring(salary).." WIN/AP).", {0.7,0.95,1})
+    else
+      safeBroadcastTo(color, "💼 Work bonus: No vocation or salary — no bonus this time.", {0.8,0.8,0.8})
+    end
     return STATUS.DONE
   end
 
@@ -1146,15 +1321,18 @@ local function handleSpecial(color, cardId, def, cardObj)
       return STATUS.BLOCKED
     end
     
+    -- Remove DATING token (it effectively becomes the marriage token)
+    PS_RemoveStatus(color, STATUS_TAG.DATING)
     married[color] = true
     PS_AddMarriage(color)
     resolveMarriageMulti(color)
-    safeBroadcastTo(color, "💍 Marriage: Ty +2 SAT. Inni: +2 SAT, 2 AP INACTIVE (1 tura) i płatność 200 (jeśli mogli).", {0.7,1,0.7})
+    safeBroadcastTo(color, "💍 You just got married. Congratulations, and wish you a great future! (+2 SAT for you; others: +2 SAT, 2 AP INACTIVE, 200 WIN if they could pay.)", {0.7,1,0.7})
     return STATUS.DONE
   end
 
   if def.special == "AD_AUCTION_SCHEDULE" then
-    safeBroadcastTo(color, "ℹ️ AUCTION: system aukcji/nieruchomości TODO.", {0.7,0.9,1})
+    -- Auction/property event: no design yet (what should this card do: schedule? bid? property?)
+    safeBroadcastTo(color, "ℹ️ Auction: not implemented yet — no effect. (Design pending.)", {0.7,0.9,1})
     return STATUS.DONE
   end
 
@@ -1372,6 +1550,13 @@ local function resolveDiceByValue(color, diceKey, roll, cardId, def)
     if k ~= "special" then effCopy[k] = v end
   end
 
+  -- HANGOVER (Party with friends): apply AP to INACTIVE with REST fallback so penalty is always applied
+  if diceKey == "HANGOVER" and effCopy.ap and effCopy.ap.to == "INACTIVE" and (tonumber(effCopy.ap.amount) or 0) > 0 then
+    local okAp = applyAP_ToInactive_WithRestFallback(color, effCopy.ap.amount, effCopy.ap.duration)
+    if not okAp then return false end
+    effCopy.ap = nil
+  end
+
   local ok = applyEffect_WithAPMove_NoCost(color, effCopy, "dice:"..tostring(diceKey))
   if not ok then return false end
 
@@ -1428,30 +1613,48 @@ function evt_roll(cardObj, player_color, alt_click)
       warn("resolveDiceByValue returned false for "..tostring(pd.cardId)..
         " (diceKey="..tostring(pd.diceKey).." roll="..tostring(roll)..")")
     end
-    
-    pcall(function() cardObj.setDescription("DICE: "..tostring(pd.diceKey).." -> "..tostring(roll)) end)
-
-    pendingDice[g] = nil
-    
-    -- Always finalize card (move to used deck) even if dice resolution had issues
-    local finalizeOk = pcall(function()
-      finalizeCard(cardObj, pd.kind, pd.color)
-    end)
-    
-    if not finalizeOk then
-      warn("finalizeCard failed for "..tostring(pd.cardId))
-      -- Try to move card manually as fallback
-      local target = findDiscardTarget()
-      if target and target.getPosition then
-        local p = target.getPosition()
-        pcall(function() cardObj.setPositionSmooth({p.x, p.y + 2, p.z}, false, true) end)
-      else
-        warn("Discard target not found - card may remain in slot")
-      end
-    end
 
     local die = getRealDie()
-    if die then Wait.time(function() returnDieHome(die) end, 0.35) end
+    local msg = getDiceResultMessage(pd.diceKey, roll)
+
+    if msg then
+      -- Big on-screen result: label on card + full message in chat + on card description
+      cardUI_title(cardObj, msg.title)
+      safeBroadcastTo(pd.color, msg.full, {0.95,0.95,0.9})
+      pcall(function() cardObj.setDescription(msg.full) end)
+      pendingDice[g] = nil
+      -- Keep result visible for a few seconds, then finalize
+      Wait.time(function()
+        cardUI_clear(cardObj)
+        local finalizeOk = pcall(function() finalizeCard(cardObj, pd.kind, pd.color) end)
+        if not finalizeOk then
+          warn("finalizeCard failed for "..tostring(pd.cardId))
+          local target = findDiscardTarget()
+          if target and target.getPosition then
+            local p = target.getPosition()
+            pcall(function() cardObj.setPositionSmooth({p.x, p.y + 2, p.z}, false, true) end)
+          else
+            warn("Discard target not found - card may remain in slot")
+          end
+        end
+        if die then returnDieHome(die) end
+      end, 4.0)
+    else
+      pcall(function() cardObj.setDescription("DICE: "..tostring(pd.diceKey).." -> "..tostring(roll)) end)
+      pendingDice[g] = nil
+      local finalizeOk = pcall(function() finalizeCard(cardObj, pd.kind, pd.color) end)
+      if not finalizeOk then
+        warn("finalizeCard failed for "..tostring(pd.cardId))
+        local target = findDiscardTarget()
+        if target and target.getPosition then
+          local p = target.getPosition()
+          pcall(function() cardObj.setPositionSmooth({p.x, p.y + 2, p.z}, false, true) end)
+        else
+          warn("Discard target not found - card may remain in slot")
+        end
+      end
+      if die then Wait.time(function() returnDieHome(die) end, 0.35) end
+    end
   end)
 end
 

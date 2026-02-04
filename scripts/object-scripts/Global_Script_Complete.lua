@@ -129,12 +129,21 @@ end
 -- =========================
 -- [SECTION 4] CORE: NEW GAME / END TURN
 -- =========================
+local TAG_PLAYER_STATUS_CTRL = "WLB_PLAYER_STATUS_CTRL"
+
 function WLB_NEW_GAME()
   log("NEW GAME: resetting AP controllers + clearing blocked memory...")
 
   -- reset blocked memory
   for _,c in ipairs(COLORS) do G.blocked[c] = 0 end
   save()
+
+  -- reset child-blocked AP (so no leftover kids from previous game block AP at start)
+  local psc = findOneWithTags(TAG_PLAYER_STATUS_CTRL, nil)
+  if psc and psc.call then
+    pcall(function() psc.call("resetNewGame") end)
+    log(" - PlayerStatusController resetNewGame() called (child-blocked AP cleared)")
+  end
 
   local okAny = false
   for _, c in ipairs(COLORS) do
@@ -417,7 +426,7 @@ function UI_CloseVocationExplanation(player, value, id)
   end)
 end
 
--- UI Callback: Science Points allocation (for future use)
+-- UI Callback: Science Points allocation (+K/-K/+S/-S on selection card or science panel)
 function UI_AllocScience(player, value, id)
   local vocCtrl = findVocationsController()
   if vocCtrl and vocCtrl.call then
@@ -426,6 +435,18 @@ function UI_AllocScience(player, value, id)
     end)
   else
     warn("UI_AllocScience: VocationsController not found!")
+  end
+end
+
+-- UI Callback: Apply allocated K/S to player board (selection card Apply button)
+function UI_ApplyAllocScience(player, value, id)
+  local vocCtrl = findVocationsController()
+  if vocCtrl and vocCtrl.call then
+    pcall(function()
+      vocCtrl.call("UI_ApplyAllocScience", {color=(player and player.color or "White"), value=value, id=id})
+    end)
+  else
+    warn("UI_ApplyAllocScience: VocationsController not found!")
   end
 end
 

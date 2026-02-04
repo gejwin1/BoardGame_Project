@@ -587,7 +587,9 @@ function TE_RefreshStatuses(color)
   local step = 0
   local slotWriteIdx = 0
 
-  -- Compact placement in 6 slots, but stack multi-tokens in the SAME slot.
+  -- Compact placement: each status type gets one slot index; multi-tokens stack in that slot.
+  -- Place ALL tokens so that when a new status is added (e.g. Good Karma), older status tokens
+  -- move to their new slot instead of staying under the new one.
   for _, tag in ipairs(STATUS_ORDER) do
     local tok = s.active[tag]
     if tok then
@@ -596,30 +598,30 @@ function TE_RefreshStatuses(color)
       if not slot then break end
 
       if type(tok) == "table" then
-        -- Multi-status: place ONLY the newest token to avoid re-placing others (re-place caused 2nd token to fly away)
-        local n = 0
-        for _, t in ipairs(tok) do if t then n = n + 1 end end
+        -- Multi-status: place every token in this slot (stacked with Y offset), with delays to avoid fly-away
+        local list = {}
+        for _, t in ipairs(tok) do if t then list[#list+1] = t end end
+        local n = #list
         if n == 1 then
           step = step + 1
-          local t = tok[1]
           local delay = (step - 1) * STEP_DELAY
           Wait.time(function()
-            safePlace(t, worldFromLocal(board, slot))
+            safePlace(list[1], worldFromLocal(board, slot))
           end, delay)
         elseif n >= 2 then
-          step = step + 1
-          local newest = tok[n]
-          local localPos = { x = slot.x, y = slot.y + ((n - 1) * STATUS_STACK_Y), z = slot.z }
-          -- Place only newest token after a delay so first token(s) stay put (no re-place = no fly-away)
-          local delay = (step - 1) * STEP_DELAY + STACK_EXTRA_DELAY
-          Wait.time(function()
-            safePlace(newest, worldFromLocal(board, localPos))
-          end, delay)
+          for i = 1, n do
+            step = step + 1
+            local localPos = { x = slot.x, y = slot.y + ((i - 1) * STATUS_STACK_Y), z = slot.z }
+            local delay = (step - 1) * STEP_DELAY + (i > 1 and STACK_EXTRA_DELAY or 0)
+            Wait.time(function()
+              safePlace(list[i], worldFromLocal(board, localPos))
+            end, delay)
+          end
         end
       else
         -- Single token status
         step = step + 1
-        local delay = (step-1) * STEP_DELAY
+        local delay = (step - 1) * STEP_DELAY
         Wait.time(function()
           safePlace(tok, worldFromLocal(board, slot))
         end, delay)
@@ -633,6 +635,11 @@ function TE_HasStatus(color, statusTag)
   if not color or not isSupportedColor(color) then
     dprint("TE_HasStatus: invalid color:", tostring(color))
     return false
+  end
+  -- Marriage is stored in FAMILY, not in statuses (partner helps with kids → 1 AP blocked per kid instead of 2)
+  if statusTag == TAG_MARRIAGE or statusTag == "WLB_STATUS_MARRIAGE" then
+    local f = ensureFamily(color)
+    return not not f.marriage
   end
   local s = ensureStatuses(color)
   
@@ -853,8 +860,23 @@ function TE_SetHousing(color, levelName, estateObjOrNil)
     return
   end
   local f = ensureFamily(color)
+  levelName = (levelName == nil or levelName == "") and "L0" or tostring(levelName)
+  if levelName ~= "L0" and levelName ~= "L1" and levelName ~= "L2" and levelName ~= "L3" and levelName ~= "L4" then
+    levelName = "L0"
+  end
   f.housing.level = levelName
   f.housing.estate = estateObjOrNil
+  -- Reposition family tokens to the correct slots for this housing level (board L0 or estate card L1–L4)
+  placeFamilyNow(color)
+end
+
+function TE_SetHousing_ARGS(args)
+  args = args or {}
+  local color = resolveTargetColor(args.color, nil)
+  local levelName = args.level or args.levelName or "L0"
+  local estate = args.estate
+  TE_SetHousing(color, levelName, estate)
+  return true
 end
 
 -- =========================
@@ -962,6 +984,27 @@ function TE_RemoveStatusCount_ARGS(args)
   local count = math.max(0, math.floor(tonumber(args.count) or 0))
   TE_RemoveStatusCount(color, statusTag, count)
   return true
+end
+
+-- Family/housing info for per-turn satisfaction (apartment capacity, family size)
+function TE_GetFamilyInfo(color)
+  if not color or not isSupportedColor(color) then
+    return { housingLevel = "L0", hasMarriage = false, kidsCount = 0 }
+  end
+  local f = ensureFamily(color)
+  local level = (f.housing and f.housing.level) or "L0"
+  if level ~= "L0" and level ~= "L1" and level ~= "L2" and level ~= "L3" and level ~= "L4" then
+    level = "L0"
+  end
+  local hasMarriage = not not (f.marriage)
+  local kidsCount = type(f.kids) == "table" and #f.kids or 0
+  return { housingLevel = level, hasMarriage = hasMarriage, kidsCount = kidsCount }
+end
+
+function TE_GetFamilyInfo_ARGS(args)
+  args = args or {}
+  local color = resolveTargetColor(args.color, nil)
+  return TE_GetFamilyInfo(color)
 end
 
 -- =========================
@@ -1090,6 +1133,11 @@ end
 -- PUBLIC API (for TurnCtrl / EventCtrl)
 -- =========================
 function API_collect(args)
+  -- Clear FAMILY and STATUSES for all colors so new game has no leftover marriage/kids/status from previous game
+  for _, c in ipairs(COLORS) do
+    FAMILY[c] = { marriage = nil, kids = {}, housing = { level = "L0", estate = nil } }
+    STATUSES[c] = { active = {} }
+  end
   collectAllStatusTokensToBag()
   return true
 end

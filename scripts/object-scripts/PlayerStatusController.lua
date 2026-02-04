@@ -355,6 +355,15 @@ function PS_RemoveChildBlockedAP(params)
   return remove > 0
 end
 
+-- Reset child-blocked AP for all colors when starting a new game (so no leftover kids from previous game)
+function resetNewGame()
+  childBlockedAP.Yellow = 0
+  childBlockedAP.Blue   = 0
+  childBlockedAP.Red    = 0
+  childBlockedAP.Green  = 0
+  log("resetNewGame: child-blocked AP cleared for all colors")
+end
+
 -- =========================================================
 -- STATUS QUERY API (for other engines)
 -- =========================================================

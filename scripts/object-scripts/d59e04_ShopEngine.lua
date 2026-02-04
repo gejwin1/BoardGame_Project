@@ -3447,8 +3447,11 @@ function shop_voucherNo(card, player_color, alt_click)
     return
   end
   local ok = attemptBuyCard(card, pending.buyer)
-  uiReturnHome(card)
-  uiEnsureIdle(card)
+  -- Hi-Tech: card moved to player board. WAIT_DICE (Nature Trip, PILLS, Lottery, etc.): card must stay lifted for die roll.
+  if classifyRowByName(card) ~= "H" and not pendingDice[g] then
+    uiReturnHome(card)
+    uiEnsureIdle(card)
+  end
   if ok and not pendingDice[g] then refreshShopOpenUI_later(0.25) end
 end
 
@@ -3467,8 +3470,11 @@ function shop_voucherYes(card, player_color, alt_click)
     pendingVoucherChoice[g] = nil
     UI.modalOpen[g] = nil
     local ok = attemptBuyCard(card, pending.buyer, { discountTokens = 1, voucherTag = pending.voucherTag })
-    uiReturnHome(card)
-    uiEnsureIdle(card)
+    -- Hi-Tech: card moved to player board. WAIT_DICE (Nature Trip, PILLS, Lottery, etc.): card must stay lifted for die roll.
+    if classifyRowByName(card) ~= "H" and not pendingDice[g] then
+      uiReturnHome(card)
+      uiEnsureIdle(card)
+    end
     if ok and not pendingDice[g] then refreshShopOpenUI_later(0.25) end
     return
   end
@@ -3489,8 +3495,11 @@ function shop_voucherUseN(card, player_color, N)
     return
   end
   local ok = attemptBuyCard(card, pending.buyer, { discountTokens = N, voucherTag = pending.voucherTag })
-  uiReturnHome(card)
-  uiEnsureIdle(card)
+  -- Hi-Tech: card moved to player board. WAIT_DICE (Nature Trip, PILLS, Lottery, etc.): card must stay lifted for die roll.
+  if classifyRowByName(card) ~= "H" and not pendingDice[g] then
+    uiReturnHome(card)
+    uiEnsureIdle(card)
+  end
   if ok and not pendingDice[g] then refreshShopOpenUI_later(0.25) end
 end
 function shop_voucherUse1(card, pc, alt) shop_voucherUseN(card, pc, 1) end
@@ -5028,7 +5037,7 @@ local function deliverEstateInvestApartment(color, level)
     if tokenEngine and tokenEngine.call then
       safeCall(function()
         pcall(function()
-          tokenEngine.call("TE_SetHousing", color, level, card)
+          tokenEngine.call("TE_SetHousing_ARGS", { color = color, level = level })
         end)
       end)
       log("EstateInvest delivery: Updated TokenEngine housing to "..level.." for "..color)

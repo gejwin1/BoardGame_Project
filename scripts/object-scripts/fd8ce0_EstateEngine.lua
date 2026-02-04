@@ -950,23 +950,18 @@ local function doRent(level, clickedColor)
     S.currentEstateLevel[acting] = level
     updateRentalCostInCalculator(acting, oldLevel, level)
 
-    -- Update TokenEngine housing level BEFORE returning tokens
-    -- This ensures tokens are placed using the correct localization (L1, L2, L3, L4) instead of always L0
-    -- Note: We pass nil for estateObjOrNil because TokenEngine will find the estate card by level in placeFamilyNow
+    -- Update TokenEngine housing level and reposition family tokens to the new apartment's slots (L1–L4)
     local tokenEngine = findTokenEngine()
     if tokenEngine and tokenEngine.call then
-      -- TE_SetHousing expects direct arguments (color, levelName, estateObjOrNil)
-      -- Since objects can't be passed via call(), we pass nil and TokenEngine will find it by level
       safeCall(function()
-        -- Call with direct arguments - TokenEngine's findEstateCardByLevel will find the card
         pcall(function()
-          tokenEngine.call("TE_SetHousing", acting, level, nil)
+          tokenEngine.call("TE_SetHousing_ARGS", { color = acting, level = level })
         end)
       end)
       log("Estate rental: Updated TokenEngine housing to "..level.." for "..acting)
     end
 
-    -- Return tokens after card is placed (small delay to ensure placement is complete)
+    -- Return tokens after card is placed (TE_SetHousing already repositions; this ensures any safe-park flow is consistent)
     Wait.time(function()
       returnTokensFromSafePark(acting)
     end, 0.5)
@@ -1021,23 +1016,18 @@ local function doBuyExecute(level, acting, finalPrice, voucherTokensToRemove)
     S.currentEstateLevel[acting] = level
     updateRentalCostInCalculator(acting, oldLevel, level)
 
-    -- Update TokenEngine housing level BEFORE returning tokens
-    -- This ensures tokens are placed using the correct localization (L1, L2, L3, L4) instead of always L0
-    -- Note: We pass nil for estateObjOrNil because TokenEngine will find the estate card by level in placeFamilyNow
+    -- Update TokenEngine housing level and reposition family tokens to the new apartment's slots (L1–L4)
     local tokenEngine = findTokenEngine()
     if tokenEngine and tokenEngine.call then
-      -- TE_SetHousing expects direct arguments (color, levelName, estateObjOrNil)
-      -- Since objects can't be passed via call(), we pass nil and TokenEngine will find it by level
       safeCall(function()
-        -- Call with direct arguments - TokenEngine's findEstateCardByLevel will find the card
         pcall(function()
-          tokenEngine.call("TE_SetHousing", acting, level, nil)
+          tokenEngine.call("TE_SetHousing_ARGS", { color = acting, level = level })
         end)
       end)
       log("Estate buy: Updated TokenEngine housing to "..level.." for "..acting)
     end
 
-    -- Return tokens after card is placed (small delay to ensure placement is complete)
+    -- Return tokens after card is placed (TE_SetHousing already repositions; this ensures any safe-park flow is consistent)
     Wait.time(function()
       returnTokensFromSafePark(acting)
     end, 0.5)
@@ -1260,14 +1250,12 @@ function ME_returnOrSellEstate(card, pc)
   S.currentEstateLevel[acting] = "L0"  -- Revert to grandma's house
   updateRentalCostInCalculator(acting, oldLevel, "L0")
 
-  -- Update TokenEngine housing level back to L0 BEFORE returning estate
-  -- This ensures tokens are placed using L0 localization when estate is returned
+  -- Update TokenEngine housing level back to L0 and reposition family tokens to board (grandma's house)
   local tokenEngine = findTokenEngine()
   if tokenEngine and tokenEngine.call then
-    -- TE_SetHousing expects direct arguments (color, levelName, estateObjOrNil)
     safeCall(function()
       pcall(function()
-        tokenEngine.call("TE_SetHousing", acting, "L0", nil)
+        tokenEngine.call("TE_SetHousing_ARGS", { color = acting, level = "L0" })
       end)
     end)
     log("Estate return/sell: Updated TokenEngine housing back to L0 for "..acting)

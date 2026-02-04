@@ -2172,6 +2172,48 @@ function WLB_EVT_NEWGAME(params)
 end
 
 function EVT_NEW_GAME_PREP(params) return WLB_EVT_NEWGAME(params) end
+
+-- Youth→Adult (round 5→6): switch event deck to Adult only. No full reset (no collect, no park, no merge).
+-- Current slot cards (youth) are gathered and returned to the youth deck (parked); slots are refilled from adult deck.
+-- Youth and adult decks stay separate (no mixing). Player state is unchanged elsewhere.
+function WLB_EVT_SWITCH_TO_ADULT(params)
+  if state.deckKind == "ADULT" then return true end
+  if state.resetInProgress then return false end
+
+  local youthDeck = findDeckAnywhereByTag(TAG_YOUTH_DECK)
+  for i = 1, 7 do
+    local g = state.track.slots[i]
+    if g and g ~= "" then
+      local obj = objByGUID(g)
+      if obj and isCard(obj) then
+        uiClearButtons(obj)
+        uiClearTrackDescription(obj)
+        if obj.getGUID then
+          uiState.modalOpen[obj.getGUID()] = nil
+          uiState.homePos[obj.getGUID()] = nil
+        end
+        if youthDeck and youthDeck.putObject then
+          pcall(function() youthDeck.putObject(obj) end)
+        else
+          teleportToUsed(obj, i - 1)
+        end
+      end
+    end
+    state.track.slots[i] = nil
+  end
+
+  state.deckKind = "ADULT"
+  saveState()
+  refreshEventSlotUI_later(0.15)
+  Wait.time(function()
+    if state.resetInProgress then return end
+    refillEmptySlots()
+    log("EVT_SWITCH_TO_ADULT: youth cards returned to youth deck (parked), deckKind=ADULT, slots refilled from adult deck")
+  end, 0.35)
+  return true
+end
+
+function EVT_SWITCH_TO_ADULT(params) return WLB_EVT_SWITCH_TO_ADULT(params or {}) end
 function WLB_EVT_REFILL(_) return refillEmptySlots() end
 function WLB_EVT_NEXT(_) return EVT_AUTO_NEXT_TURN() end
 

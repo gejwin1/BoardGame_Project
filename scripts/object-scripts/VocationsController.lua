@@ -78,6 +78,16 @@ local VOCATION_EXPLANATION_IMAGE = {
   [VOC_NGO_WORKER] = "https://steamusercontent-a.akamaihd.net/ugc/15161606966614937150/C0417B3848A1F1D06E92207213881A63EEC04352/",
 }
 
+-- Selection card image URLs (shown when player has chosen a vocation on the summary screen).
+local VOCATION_SELECTION_CARD_IMAGE = {
+  [VOC_GANGSTER] = "https://steamusercontent-a.akamaihd.net/ugc/9894880456177855273/3D5A59699938A36C09124FD69811AF79732DDE9D/",
+  [VOC_NGO_WORKER] = "https://steamusercontent-a.akamaihd.net/ugc/16912365033054427398/B55921DBD756A2AF4A3FE4B89F2C7D580DDDEC0B/",
+  [VOC_PUBLIC_SERVANT] = "https://steamusercontent-a.akamaihd.net/ugc/17637544505239532230/4B793D58020C59CDD36E08FEB4D3B47ABDD0C121/",
+  [VOC_CELEBRITY] = "https://steamusercontent-a.akamaihd.net/ugc/13680959911826208089/A48AE5817D00BC09F2A76823E43C0C5290D19CB8/",
+  [VOC_SOCIAL_WORKER] = "https://steamusercontent-a.akamaihd.net/ugc/17468286109764365863/1135E73AB4BEAC2CE40B14CE29302DCC2DCEF068/",
+  [VOC_ENTREPRENEUR] = "https://steamusercontent-a.akamaihd.net/ugc/11454490895890466202/C2C67D02CA477C809D7E74D98D36721560B5697D/",
+}
+
 -- =========================================================
 -- CHARACTER SLOT POSITION (from scanner)
 -- =========================================================
@@ -1235,6 +1245,7 @@ local function hideSummaryUI()
   pcall(function()
     log("hideSummaryUI: Setting vocationSummaryPanel active=false")
     UI.setAttribute("vocationSummaryPanel", "active", "false")
+    UI.setAttribute("selectionCardPanel", "active", "false")
   end)
   uiState.currentScreen = "selection"
   uiState.previewedVocation = nil
@@ -1257,8 +1268,23 @@ local function hideSelectionUI()
   uiState.currentScreen = nil
 end
 
+-- Refresh selection card allocation numbers and Apply button state (pool=0 => enabled)
+-- Defined early so it is available when called from UI_ConfirmVocation/UI_AllocScience (TTS may chunk scripts)
+function refreshSelectionCardAllocUI(turnCtrl, color)
+  if not turnCtrl or not turnCtrl.call or not color then return end
+  local ok, st = pcall(function() return turnCtrl.call("API_GetAllocState", { color = color }) end)
+  if ok and st and type(st) == "table" then
+    UI.setAttribute("selectionCardSciencePoints", "text", tostring(st.pool or 0))
+    UI.setAttribute("selectionCardKnowledgeValue", "text", tostring(st.k or 0))
+    UI.setAttribute("selectionCardSkillsValue", "text", tostring(st.s or 0))
+    local pool = tonumber(st.pool) or 0
+    UI.setAttribute("selectionCardApply", "interactable", pool == 0 and "true" or "false")
+    UI.setAttribute("selectionCardApply", "color", pool == 0 and "#2d6a4f" or "#333333")
+  end
+end
+
 -- Show the Vocation Selection UI panel
-local function showSelectionUI(color, points)
+local function showSelectionUI(color, points, showSciencePointsLabelParam)
   if not UI then
     log("ERROR: UI system not available - UI is nil. Check that VocationsUI_Global.xml is in Global → UI tab.")
     broadcastToAll("⚠️ UI system not available. Check that VocationsUI_Global.xml is in Global → UI tab.", {1, 0.5, 0.2})
@@ -1320,16 +1346,44 @@ local function showSelectionUI(color, points)
     local verifyAttr = UI.getAttribute("vocationSelectionPanel", "active")
     log("DEBUG: Overlay active=" .. tostring(verifyOverlay) .. ", Panel active=" .. tostring(verifyAttr))
     
-    -- Update subtitle / science points (safe)
+    -- Update subtitle: Adult start = "Science Points: x"; Youth (round 1 or round 6) = Knowledge and Skill
+    -- Use param from TurnController when starting selection (reliable); fallback to API if not provided
     uiSet("selectionSubtitle", "text", "Player: " .. color)
-    -- Get science points: use provided points, or query TurnController, or default to 0
-    local sciencePoints = points
-    if not sciencePoints or sciencePoints == 0 then
-      sciencePoints = getSciencePointsForColor(color)
+    local turnCtrl = findTurnController()
+    local showSciencePointsLabel = (showSciencePointsLabelParam == true)
+    if showSciencePointsLabelParam == nil then
+      if turnCtrl and turnCtrl.call then
+        local ok, v = pcall(function() return turnCtrl.call("API_ShouldShowSciencePointsOnSelectionScreen", {}) end)
+        if ok and v then showSciencePointsLabel = true end
+      end
     end
-    uiSet("selectionSciencePoints", "text", "Science Points: " .. tostring(sciencePoints))
-    log("DEBUG: Set subtitle to: Player: " .. color .. " | points=" .. tostring(sciencePoints))
-    
+    if showSciencePointsLabel then
+      -- Adult start only: show "Science Points: x"
+      local sciencePoints = points
+      if not sciencePoints or sciencePoints == 0 then
+        sciencePoints = getSciencePointsForColor(color)
+      end
+      UI.setAttribute("selectionSciencePoints", "text", "Science Points: " .. tostring(sciencePoints))
+      UI.setAttribute("selectionSciencePoints", "active", "true")
+      UI.setAttribute("selectionKnowledgeSkillLine", "active", "false")
+      log("DEBUG: Set subtitle to: Player: " .. color .. " | Science Points=" .. tostring(sciencePoints))
+    else
+      -- Youth (round 1 or round 6): show Knowledge • Skill on one line
+      UI.setAttribute("selectionSciencePoints", "active", "false")
+      UI.setAttribute("selectionSciencePoints", "text", "")
+      local k, s = 0, 0
+      if turnCtrl and turnCtrl.call then
+        local ok, ks = pcall(function() return turnCtrl.call("API_GetKnowledgeAndSkills", { color = color }) end)
+        if ok and ks and type(ks) == "table" then
+          k = ks.k or 0
+          s = ks.s or 0
+        end
+      end
+      UI.setAttribute("selectionKnowledgeSkillLine", "text", "Knowledge: " .. tostring(k) .. "  •  Skill: " .. tostring(s))
+      UI.setAttribute("selectionKnowledgeSkillLine", "active", "true")
+      log("DEBUG: Set subtitle to: Player: " .. color .. " | Knowledge=" .. tostring(k) .. " Skill=" .. tostring(s))
+    end
+
     -- Update button states (disable taken vocations)
     for _, voc in ipairs(ALL_VOCATIONS) do
       local isTaken = false
@@ -1478,6 +1532,9 @@ local function showSummaryUI(color, vocation, previewOnly)
       log("WARNING: No image URL for vocation: " .. tostring(vocation))
       UI.setAttribute("summaryVocationImage", "active", "false")
     end
+
+    -- Selection card is shown only after Confirm (see UI_ConfirmVocation)
+    UI.setAttribute("selectionCardPanel", "active", "false")
 
     -- Hide the summary content panel (dark grey box) so the explanation image is visible
     UI.setAttribute("summaryContent", "active", "false")
@@ -2176,7 +2233,8 @@ function VOC_StartSelection(params)
   
   -- Primary: Global UI menu (6 vocation cards) when UI is available
   if UI then
-    local ok = showSelectionUI(color, points)
+    local showSciencePointsLabel = (params and params.showSciencePointsLabel == true)
+    local ok = showSelectionUI(color, points, showSciencePointsLabel)
     if ok then
       state.currentPickerColor = color
       saveState()
@@ -2752,11 +2810,14 @@ function UI_ConfirmVocation(player, value, id)
     color = normalizeColor(player and player.color or nil)
   end
   
+  -- Combined "who is selecting" from all state sources (in case UI click hits different object than VOC_StartSelection)
+  local activeColor = uiState.activeColor or selectionState.activeColor or state.currentPickerColor
+
   -- Special handling for "White" (spectator/host clicks via Global UI):
   -- treat it as the active selecting player so Confirm works in solo testing / hotseat.
   if color == "White" then
     log("WARNING: Confirm click detected from White (spectator). Attempting to use active color instead.")
-    color = uiState.activeColor or selectionState.activeColor or state.currentPickerColor
+    color = activeColor
     if not color then
       log("ERROR: Confirm clicked as White but no active color is set")
       broadcastToAll("⚠ Please sit at a player color seat (Yellow/Blue/Red/Green) to confirm.", {1, 0.5, 0.2})
@@ -2767,9 +2828,14 @@ function UI_ConfirmVocation(player, value, id)
   
   if not color then return end
   
-  -- Verify it's the active player
-  if color ~= uiState.activeColor then
-    log("UI_ConfirmVocation: Wrong player. Active: " .. tostring(uiState.activeColor) .. ", Clicked: " .. color)
+  -- Verify it's the active player (use combined active so 2nd player works when uiState was cleared on another object)
+  if not activeColor then
+    log("UI_ConfirmVocation: No active selection (activeColor=nil). selectionState.activeColor=" .. tostring(selectionState.activeColor) .. " uiState.activeColor=" .. tostring(uiState.activeColor) .. " currentPickerColor=" .. tostring(state.currentPickerColor))
+    broadcastToAll("⚠ Vocation selection is not active. Please start selection first.", {1, 0.5, 0.2})
+    return
+  end
+  if color ~= activeColor then
+    log("UI_ConfirmVocation: Wrong player. Active: " .. tostring(activeColor) .. ", Clicked: " .. tostring(color))
     return
   end
   
@@ -2787,6 +2853,66 @@ function UI_ConfirmVocation(player, value, id)
       return
     end
   end
+
+  -- When Youth (no science-point pool): skip allocation screen and advance to next player or end
+  local turnCtrl = findTurnController()
+  local showAllocation = false
+  if turnCtrl and turnCtrl.call then
+    local ok, v = pcall(function() return turnCtrl.call("API_ShouldShowAllocationAfterVocation", {}) end)
+    if ok and v then showAllocation = v end
+  end
+  if not showAllocation then
+    -- Set vocation, place tile, notify TurnController, then close UI and advance
+    local ok, err = VOC_SetVocation({color = color, vocation = vocation, level = 1})
+    if not ok then
+      safeBroadcastToColor("❌ Failed to set vocation: " .. tostring(err), color, {1, 0.3, 0.3})
+      return
+    end
+    local tile = findTileForVocationAndLevel(vocation, 1)
+    if tile then placeTileOnBoard(tile, color) end
+    if turnCtrl and turnCtrl.call then
+      pcall(function() turnCtrl.call("VOC_OnVocationSelected", {color = color, vocation = vocation}) end)
+      hideSummaryUI()
+      hideSelectionUI()
+      uiState.selectionCardColor = nil
+      pcall(function() turnCtrl.call("API_AllocationConfirmed", {}) end)
+    end
+    safeBroadcastToColor("✅ You chose: " .. (VOCATION_DATA[vocation] and VOCATION_DATA[vocation].name or vocation), color, {0.3, 1, 0.3})
+    uiState.activeColor = nil
+    uiState.currentScreen = nil
+    uiState.previewedVocation = nil
+    return
+  end
+
+  -- Show selection card after Confirm (hide explanation and buttons so only the card is visible)
+  local selectionCardUrl = VOCATION_SELECTION_CARD_IMAGE[vocation]
+  if selectionCardUrl and selectionCardUrl ~= "" then
+    UI.setAttribute("selectionCardImage", "image", selectionCardUrl)
+    UI.setAttribute("selectionCardPanel", "active", "true")
+    UI.setAttribute("summaryVocationImage", "active", "false")
+    UI.setAttribute("actionButtons", "active", "false")
+    uiState.selectionCardColor = color
+    local turnCtrl = findTurnController()
+    local pool, k, s = getSciencePointsForColor(color), 0, 0
+    if turnCtrl and turnCtrl.call then
+      local ok, st = pcall(function() return turnCtrl.call("API_GetAllocState", {color = color}) end)
+      if ok and st and type(st) == "table" then
+        pool = st.pool or pool
+        k = st.k or 0
+        s = st.s or 0
+      end
+    end
+    UI.setAttribute("selectionCardSciencePoints", "text", tostring(pool))
+    UI.setAttribute("selectionCardKnowledgeValue", "text", tostring(k))
+    UI.setAttribute("selectionCardSkillsValue", "text", tostring(s))
+    if turnCtrl then
+      refreshSelectionCardAllocUI(turnCtrl, color)
+    else
+      UI.setAttribute("selectionCardApply", "interactable", (tonumber(pool) or 0) == 0 and "true" or "false")
+      UI.setAttribute("selectionCardApply", "color", (tonumber(pool) or 0) == 0 and "#2d6a4f" or "#333333")
+    end
+    log("UI_ConfirmVocation: Showing selection card for " .. vocation .. ", pool=" .. tostring(pool) .. " K=" .. k .. " S=" .. s)
+  end
   
   -- Set the vocation
   local ok, err = VOC_SetVocation({color = color, vocation = vocation, level = 1})
@@ -2801,10 +2927,6 @@ function UI_ConfirmVocation(player, value, id)
     placeTileOnBoard(tile, color)
   end
   
-  -- Hide all UI
-  hideSummaryUI()
-  hideSelectionUI()
-  
   -- Notify TurnController
   local turnCtrl = findTurnController()
   if turnCtrl and turnCtrl.call then
@@ -2816,10 +2938,97 @@ function UI_ConfirmVocation(player, value, id)
   safeBroadcastToColor("✅ You chose: " .. (VOCATION_DATA[vocation] and VOCATION_DATA[vocation].name or vocation), color, {0.3, 1, 0.3})
   log("Vocation confirmed: " .. color .. " -> " .. vocation)
   
-  -- Reset UI state
+  -- Keep selection UI visible (selection card stays on screen); do not hide overlay/panels
   uiState.activeColor = nil
   uiState.currentScreen = nil
   uiState.previewedVocation = nil
+end
+
+-- UI Callback: Science points allocation (+K, -K, +S, -S) from selection card or science panel
+-- Payload: { color, value, id } from Global (id = selectionCardKPlus, selectionCardKMinus, selectionCardSPlus, selectionCardSMinus, or btnKPlus, btnKMinus, btnSPlus, btnSMinus)
+function UI_AllocScience(payload)
+  local color, id
+  if type(payload) == "table" and (payload.color or payload.id) then
+    color = normalizeColor(payload.color or payload.playerColor or "White")
+    id = payload.id or ""
+  else
+    color = normalizeColor("White")
+    id = ""
+  end
+  if color == "White" and uiState.selectionCardColor then
+    color = uiState.selectionCardColor
+  end
+  if not color or not id or id == "" then return end
+
+  local which, delta
+  local idLower = string.lower(id)
+  if idLower == "selectioncardkplus" or idLower == "btnkplus" then which, delta = "K", 1
+  elseif idLower == "selectioncardkminus" or idLower == "btnkminus" then which, delta = "K", -1
+  elseif idLower == "selectioncardsplus" or idLower == "btnsplus" then which, delta = "S", 1
+  elseif idLower == "selectioncardsminus" or idLower == "btnsminus" then which, delta = "S", -1
+  else return
+  end
+
+  local turnCtrl = findTurnController()
+  if not turnCtrl or not turnCtrl.call then
+    log("UI_AllocScience: TurnController not found")
+    return
+  end
+
+  local ok = pcall(function()
+    return turnCtrl.call("API_AllocScience", { color = color, which = which, delta = delta })
+  end)
+  if not ok then
+    log("UI_AllocScience: API_AllocScience failed for " .. color .. " " .. which .. " " .. tostring(delta))
+    return
+  end
+
+  -- Refresh selection card display if this player is on the selection card
+  if uiState.selectionCardColor == color then
+    refreshSelectionCardAllocUI(turnCtrl, color)
+  end
+end
+
+-- UI Callback: Apply allocated K/S to player board (selection card Apply button)
+function UI_ApplyAllocScience(payload)
+  local color
+  if type(payload) == "table" and (payload.color or payload.playerColor) then
+    color = normalizeColor(payload.color or payload.playerColor or "White")
+  else
+    color = "White"
+  end
+  if color == "White" and uiState.selectionCardColor then
+    color = uiState.selectionCardColor
+  end
+  if not color then return end
+
+  local turnCtrl = findTurnController()
+  if not turnCtrl or not turnCtrl.call then
+    log("UI_ApplyAllocScience: TurnController not found")
+    return
+  end
+
+  pcall(function()
+    turnCtrl.call("API_ApplyAlloc", { color = color })
+  end)
+  refreshSelectionCardAllocUI(turnCtrl, color)
+
+  -- Close vocation selection UI and advance: next player gets vocation selection, or game continues if last
+  hideSummaryUI()
+  hideSelectionUI()
+  uiState.selectionCardColor = nil
+  -- Short delay so UI fully closes before we show the next player's selection (avoids UI not appearing for 2nd player)
+  if Wait and Wait.time then
+    Wait.time(function()
+      pcall(function()
+        turnCtrl.call("API_AllocationConfirmed", {})
+      end)
+    end, 0.5)
+  else
+    pcall(function()
+      turnCtrl.call("API_AllocationConfirmed", {})
+    end)
+  end
 end
 
 -- UI Callback wrapper: Back to selection screen (from Global router)

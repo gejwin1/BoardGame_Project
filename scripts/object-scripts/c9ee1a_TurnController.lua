@@ -79,6 +79,20 @@ local TAG_STATUS_SICK      = "WLB_STATUS_SICK"
 local TAG_STATUS_WOUNDED   = "WLB_STATUS_WOUNDED"
 local TAG_STATUS_ADDICTION = "WLB_STATUS_ADDICTION"
 
+-- SAT token GUIDs (must match EventEngine / SatisfactionToken setup)
+local SAT_TOKEN_GUIDS = {
+  Yellow = "d33a15",
+  Red    = "6fe69b",
+  Blue   = "b2b5e3",
+  Green  = "e8834c",
+}
+
+-- Apartment capacity (people) and base satisfaction per turn (L0 = none; owned = double)
+local APARTMENT_CAPACITY   = { L0 = 1, L1 = 2, L2 = 3, L3 = 5, L4 = 6 }
+local APARTMENT_SAT_BASE   = { L0 = 0, L1 = 1, L2 = 2, L3 = 3, L4 = 5 }
+local SAT_PER_KID          = 2
+local SAT_PER_MARRIAGE     = 0  -- marriage token does not give automatic satisfaction per turn
+
 local EVT_DEFAULT_MODE = "AUTO"
 local DEFAULT_COLORS = {"Yellow","Blue","Red","Green"}
 
@@ -252,6 +266,22 @@ local function tokenCall(fnName, params)
   local t = getTokenEngine()
   if not t then return false, nil end
   return pcallCall(t, fnName, params)
+end
+
+local function getSatToken(color)
+  local guid = SAT_TOKEN_GUIDS[tostring(color or "")]
+  if not guid then return nil end
+  return getObjectFromGUID(guid)
+end
+
+local function satAddForColor(color, amount, reason)
+  local satObj = getSatToken(color)
+  if not satObj or not satObj.call then return false end
+  local ok = pcall(function() satObj.call("addSat", { delta = amount }) end)
+  if ok and reason then
+    log("SAT: "..tostring(color).." +"..tostring(amount).." ("..tostring(reason)..")")
+  end
+  return ok
 end
 
 local function getShopEngine()
@@ -500,6 +530,79 @@ local function onTurnStart_AddRentalCosts(color)
   end
 end
 
+-- True if player has an estate card that is OWNED (bought), not rented (used for double apartment SAT)
+local function isEstateOwned(color)
+  if not color or color == "" then return false end
+  local TAG_ESTATE_CARD = "WLB_ESTATE_CARD"
+  local TAG_ESTATE_OWNED = "WLB_ESTATE_OWNED"
+  local TAG_ESTATE_MODE_RENT = "WLB_ESTATE_MODE_RENT"
+  local colorTagStr = COLOR_TAG_PREFIX .. tostring(color)
+  for _, o in ipairs(getAllObjects()) do
+    if o and o.tag == "Card" and o.hasTag and
+       o.hasTag(TAG_ESTATE_CARD) and o.hasTag(TAG_ESTATE_OWNED) and o.hasTag(colorTagStr) then
+      if not o.hasTag(TAG_ESTATE_MODE_RENT) then
+        return true
+      end
+      break
+    end
+  end
+  return false
+end
+
+local function onTurnStart_ApplyHousingAndFamilySatisfaction(color)
+  if not color or color == "" then return end
+
+  local ok, info = tokenCall("TE_GetFamilyInfo_ARGS", { color = color })
+  if not ok or type(info) ~= "table" then
+    log("Housing/Family SAT: could not get family info for "..tostring(color))
+    return
+  end
+
+  local level = info.housingLevel or "L0"
+  local hasMarriage = not not info.hasMarriage
+  local kidsCount = math.max(0, math.floor(tonumber(info.kidsCount) or 0))
+
+  local familySize = 1 + (hasMarriage and 1 or 0) + kidsCount
+  local capacity = APARTMENT_CAPACITY[level] or 1
+  if familySize > capacity then
+    if familySize > 1 or kidsCount > 0 or hasMarriage then
+      broadcastToAll("⚠️ "..tostring(color)..": Family ("..tostring(familySize)..") does not fit in apartment (capacity "..tostring(capacity).."). No housing/family satisfaction this turn.", {1,0.7,0.3})
+    end
+    return
+  end
+
+  local totalSat = 0
+  local parts = {}
+
+  local apartmentBase = APARTMENT_SAT_BASE[level] or 0
+  if apartmentBase > 0 then
+    local owned = isEstateOwned(color)
+    local apartmentSat = owned and (apartmentBase * 2) or apartmentBase
+    totalSat = totalSat + apartmentSat
+    if owned then
+      table.insert(parts, "apartment (owned): +"..tostring(apartmentSat))
+    else
+      table.insert(parts, "apartment (rented): +"..tostring(apartmentSat))
+    end
+  end
+
+  if hasMarriage and SAT_PER_MARRIAGE > 0 then
+    totalSat = totalSat + SAT_PER_MARRIAGE
+    table.insert(parts, "marriage: +"..tostring(SAT_PER_MARRIAGE))
+  end
+
+  if kidsCount > 0 then
+    local kidSat = SAT_PER_KID * kidsCount
+    totalSat = totalSat + kidSat
+    table.insert(parts, "kids ("..tostring(kidsCount).."): +"..tostring(kidSat))
+  end
+
+  if totalSat > 0 then
+    satAddForColor(color, totalSat, "housing/family")
+    broadcastToAll("🏠 "..tostring(color).." housing & family: +"..tostring(totalSat).." SAT ("..table.concat(parts, ", ")..")", {0.7,1,0.7})
+  end
+end
+
 local function onTurnStart_ApplySmartwatch(color)
   if not color or color == "" then return end
 
@@ -596,6 +699,14 @@ local function evtAPI_newGamePrep(kind)
   return ok == true
 end
 
+-- Youth→Adult (round 6): switch event deck to Adult only (no full reset, no collect/park). Player state unchanged.
+local function evtAPI_switchToAdult()
+  local ok = select(1, evtCall("WLB_EVT_SWITCH_TO_ADULT", {}))
+  if ok then return true end
+  ok = select(1, evtCall("EVT_SWITCH_TO_ADULT", {}))
+  return ok == true
+end
+
 local function evtAPI_autoNextTurn()
   local ok, ret = evtCall("EVT_AUTO_NEXT_TURN", {})
   if ok then return ret end
@@ -614,10 +725,21 @@ local function tintForColor(color)
   return {1,1,1}
 end
 
+-- Notify all player boards to refresh UI (e.g. school buttons when round 5→6). Event-driven: no polling.
+local function notifyPlayerBoardsRoundChanged()
+  local list = getObjectsWithTag(TAG_BOARD) or {}
+  for _, obj in ipairs(list) do
+    if obj and obj.call then
+      pcall(function() obj.call("rebuildUI") end)
+    end
+  end
+end
+
 local function tokenYearSetRound(r)
   local ty = getTokenYear()
   if not ty then warn("TokenYear not found "..tostring(TOKENYEAR_GUID)); return end
   pcall(function() ty.call("setRound", {round = r}) end)
+  notifyPlayerBoardsRoundChanged()
 end
 
 local function tokenYearSetColor(color)
@@ -927,6 +1049,7 @@ local function setActiveByTurnIndex()
   onTurnStart_ApplySmartwatch(c)
   onTurnStart_ProcessInvestments(c)
   onTurnStart_AddRentalCosts(c)
+  onTurnStart_ApplyHousingAndFamilySatisfaction(c)
 end
 
 local function advanceTurn()
@@ -974,6 +1097,7 @@ local function resetWizard()
   W.adult = {stage="IDLE", per={}}
   W.endConfirm = nil
   W.triggerVocationSelectionAtRound6 = false
+  W.vocationSelection = nil
 
   -- FIX: reset the real startBusy (single-scope)
   startBusy = false
@@ -1129,6 +1253,15 @@ local vocationSelectionState = {
   currentIndex = 1,
 }
 
+-- Persist vocation selection state to W so it survives save/load (used by VocationsController + allocation flow)
+local function saveVocationSelectionState()
+  W.vocationSelection = {
+    active = vocationSelectionState.active,
+    selectionOrder = vocationSelectionState.selectionOrder,
+    currentIndex = vocationSelectionState.currentIndex,
+  }
+end
+
 local function getSciencePoints(color)
   -- Science Points = Knowledge + Skills
   local statsObj = findOneByTags(TAG_STATS, colorTag(color))
@@ -1167,6 +1300,29 @@ function API_GetSciencePoints(params)
   return getSciencePoints(color)
 end
 
+-- True only when game started as Adult: show allocation screen after vocation confirm. When false (Youth, round 1 or 6), skip allocation UI.
+function API_ShouldShowAllocationAfterVocation(params)
+  if not W then return false end
+  return W.startMode == "ADULT"
+end
+
+-- True only when game started in Adult mode (round 6). Used for selection screen label: Adult = "Science Points", Youth = "Knowledge / Skill".
+function API_ShouldShowSciencePointsOnSelectionScreen(params)
+  if not W then return false end
+  return W.startMode == "ADULT"
+end
+
+-- Get current Knowledge and Skills for a color from Stats (for Youth vocation selection display when no pool).
+function API_GetKnowledgeAndSkills(params)
+  local color = params and params.color or nil
+  if not color then return { k = 0, s = 0 } end
+  local statsObj = findOneByTags(TAG_STATS, colorTag(color))
+  if not statsObj then return { k = 0, s = 0 } end
+  local ok, stats = pcall(function() return statsObj.call("getState") end)
+  if not ok or not stats then return { k = 0, s = 0 } end
+  return { k = tonumber(stats.k) or 0, s = tonumber(stats.s) or 0 }
+end
+
 local function calculateVocationSelectionOrder()
   -- Calculate Science Points for each player
   local playerScores = {}
@@ -1197,15 +1353,23 @@ local function calculateVocationSelectionOrder()
 end
 
 local function processNextVocationSelection()
+  -- Sync from persisted state so we work across save/load and script chunks
+  if W.vocationSelection and type(W.vocationSelection) == "table" and W.vocationSelection.selectionOrder and type(W.vocationSelection.selectionOrder) == "table" and #W.vocationSelection.selectionOrder > 0 then
+    vocationSelectionState.active = W.vocationSelection.active and true or false
+    vocationSelectionState.selectionOrder = W.vocationSelection.selectionOrder
+    vocationSelectionState.currentIndex = math.max(1, tonumber(W.vocationSelection.currentIndex) or 1)
+  end
+
   if not vocationSelectionState.active then return end
   
   if vocationSelectionState.currentIndex > #vocationSelectionState.selectionOrder then
     -- All players have chosen
     vocationSelectionState.active = false
+    saveVocationSelectionState()
     broadcastToAll("✅ All players have chosen their vocations!", {0.7, 1, 0.7})
     
-    -- After all vocations are selected, start Science Points allocation (Adult start or Youth→Adult round 6)
-    if (W.startMode == "ADULT" or W.currentRound >= 6) and W.adult and W.adult.stage == "ALLOC" then
+    -- After all vocations are selected: Science Points allocation only when starting game in ADULT mode (not Youth→Adult round 6)
+    if W.startMode == "ADULT" and W.adult and W.adult.stage == "ALLOC" then
       Wait.time(function()
         broadcastToAll("📊 Now allocate your Science Points (K/S bonuses).", {0.7, 1, 0.7})
         -- Science Points allocation UI is already active (W.adult.stage = "ALLOC")
@@ -1238,7 +1402,8 @@ local function processNextVocationSelection()
   end
   
   local pts = getSciencePoints(currentColor)
-  local ok, err = vocationsCall("VOC_StartSelection", {color = currentColor, points = pts})
+  local showSciencePointsOnSelection = (W.startMode == "ADULT")
+  local ok, err = vocationsCall("VOC_StartSelection", {color = currentColor, points = pts, showSciencePointsLabel = showSciencePointsOnSelection})
   if not ok then
     broadcastToAll("❌ Failed to start vocation selection for " .. currentColor .. ": " .. tostring(err), {1, 0.3, 0.3})
     log("ERROR: VOC_StartSelection failed for " .. currentColor .. ": " .. tostring(err))
@@ -1251,6 +1416,11 @@ local function processNextVocationSelection()
 end
 
 local function startVocationSelection()
+  if not W.vocationSelection or not W.vocationSelection.selectionOrder or #(W.vocationSelection.selectionOrder or {}) == 0 then
+    vocationSelectionState.active = false
+    vocationSelectionState.selectionOrder = {}
+    vocationSelectionState.currentIndex = 1
+  end
   if vocationSelectionState.active then
     log("Vocation selection already active")
     return
@@ -1282,15 +1452,19 @@ local function startVocationSelection()
   vocationSelectionState.active = true
   vocationSelectionState.selectionOrder = selectionOrder
   vocationSelectionState.currentIndex = 1
+  saveVocationSelectionState()
   
   -- Start with first player
   processNextVocationSelection()
 end
 
 -- Global (object) function so setActiveByTurnIndex can invoke it via self.call when script is split into chunks (adultInitFromOrderRolls/startVocationSelection are in this chunk)
+-- Youth→Adult (round 5→6): do NOT reset player state. Reset event decks the same way as at game start: face down → parking → merge/shuffle both → adult deck to position → refill seven slots.
+-- Player state (health, knowledge, skills, AP, satisfaction, money) stays as at end of turn 5.
 function TriggerYouthToAdultVocationSelection()
   if not W or W.currentRound ~= 6 or W.startMode ~= "YOUTH" then return end
-  adultInitFromOrderRolls()
+  -- Same sequence as start of game: collect, face down, park, merge & shuffle both decks, then place adult deck and refill (avoids merge/corruption issues)
+  evtAPI_newGamePrep("ADULT")
   startVocationSelection()
 end
 
@@ -1334,6 +1508,62 @@ local function adultApply(color)
   drawUI()
 end
 
+-- Allocate Science: delta 1 = take from pool add to K/S; delta -1 = take from K/S add back to pool (for selection card UI)
+function API_AllocScience(params)
+  local color = params and params.color or nil
+  local which = params and (params.which == "K" or params.which == "S") and params.which or nil
+  local delta = params and (params.delta == 1 or params.delta == -1) and params.delta or nil
+  if not color or not which or not delta then return false end
+  if W.adult.stage ~= "ALLOC" then return false end
+  local st = W.adult.per and W.adult.per[color]
+  if not st or not st.active then return false end
+  if delta == 1 then
+    if st.pool <= 0 then return false end
+    adultAlloc(color, which)
+    return true
+  else
+    if which == "K" then
+      if st.k <= 0 then return false end
+      st.k = st.k - 1
+      st.pool = st.pool + 1
+    else
+      if st.s <= 0 then return false end
+      st.s = st.s - 1
+      st.pool = st.pool + 1
+    end
+    drawUI()
+    return true
+  end
+end
+
+-- Get current allocation state for a color (pool, k, s) for UI display
+function API_GetAllocState(params)
+  local color = params and params.color or nil
+  if not color then return nil end
+  if W.adult.stage ~= "ALLOC" then return nil end
+  local st = W.adult.per and W.adult.per[color]
+  if not st or not st.active then return nil end
+  return { pool = st.pool, k = st.k, s = st.s }
+end
+
+-- Apply allocated K/S to player board (Stats controller); call when pool is 0 (selection card Apply button)
+function API_ApplyAlloc(params)
+  local color = params and params.color or nil
+  if not color then return false end
+  adultApply(color)
+  return true
+end
+
+-- Called when a player has finished (Confirm without allocation, or Apply after allocation). Advances to next player or end of phase.
+function API_AllocationConfirmed(params)
+  if W.vocationSelection and type(W.vocationSelection.selectionOrder) == "table" and #W.vocationSelection.selectionOrder > 0 then
+    vocationSelectionState.active = W.vocationSelection.active and true or false
+    vocationSelectionState.selectionOrder = W.vocationSelection.selectionOrder
+    vocationSelectionState.currentIndex = math.max(1, tonumber(W.vocationSelection.currentIndex) or 1)
+  end
+  processNextVocationSelection()
+end
+
 -- =========================================================
 -- [S10] VOCATION SELECTION
 -- =========================================================
@@ -1364,14 +1594,9 @@ function VOC_OnVocationSelected(params)
     return
   end
   
-  -- Move to next player
+  -- Move to next player (advance happens when they Confirm/Apply and VocationsController calls API_AllocationConfirmed)
   vocationSelectionState.currentIndex = vocationSelectionState.currentIndex + 1
-  
-  -- Clean up selection UI
-  vocationsCall("VOC_CleanupSelection", {color = color})
-  
-  -- Process next player
-  Wait.time(processNextVocationSelection, 1.0)
+  saveVocationSelectionState()
 end
 
 -- =========================================================
