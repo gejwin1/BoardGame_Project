@@ -102,26 +102,26 @@
         <!-- Knowledge + (red); adjust position as needed -->
         <Button id="selectionCardKPlus" text="+" fontSize="70" 
                 position="-635,-300" width="95" height="65" 
-                onClick="UI_AllocScience" color="#cc2222" fontColor="#ffffff" />
+                onClick="UI_AllocScience" color="#00000000" fontColor="#00000000" />
         <!-- Knowledge - (blue); adjust position as needed -->
         <Button id="selectionCardKMinus" text="-" fontSize="70" 
                 position="-390,-300" width="95" height="65" 
-                onClick="UI_AllocScience" color="#2222cc" fontColor="#ffffff" />
+                onClick="UI_AllocScience" color="#00000000" fontColor="#00000000" />
         <!-- Allocated Skills (number only); adjust position as needed -->
         <Text id="selectionCardSkillsValue" text="0" fontSize="50" color="#ffffff" 
               position="487,-375" width="120" height="70" alignment="MiddleCenter" />
         <!-- Skills + (red); adjust position as needed -->
         <Button id="selectionCardSPlus" text="+" fontSize="70" 
                 position="360,-300" width="95" height="65" 
-                onClick="UI_AllocScience" color="#cc2222" fontColor="#ffffff" />
+                onClick="UI_AllocScience" color="#00000000" fontColor="#00000000" />
         <!-- Skills - (blue); adjust position as needed -->
         <Button id="selectionCardSMinus" text="-" fontSize="70" 
                 position="605,-300" width="95" height="65" 
-                onClick="UI_AllocScience" color="#2222cc" fontColor="#ffffff" />
+                onClick="UI_AllocScience" color="#00000000" fontColor="#00000000" />
         <!-- Apply K/S to player board (enabled when pool is 0); adjust position as needed -->
-        <Button id="selectionCardApply" text="Confirm" fontSize="44" 
+        <Button id="selectionCardApply" text="" fontSize="44" 
                 position="0,-320" width="300" height="75" 
-                onClick="UI_ApplyAllocScience" color="#2d6a4f" fontColor="#ffffff" />
+                onClick="UI_ApplyAllocScience" color="#00000000" fontColor="#00000000" textColor="#00000000" />
       </Panel>
       
       <!-- Summary Content Area -->
@@ -223,6 +223,94 @@
               position="0,250" width="400" height="120" 
               onClick="UI_ContinueToVocation" color="#4a90e2" 
               interactable="false" />
+    </Panel>
+  </Panel>
+
+  <!-- ========================================================= -->
+  <!-- PLAYER INTERACTION OVERLAY (multi-player vocation events) -->
+  <!-- Central tile where all players can JOIN / IGNORE events   -->
+  <!-- ========================================================= -->
+
+  <!-- Hidden by default; shown when a vocation action starts an interaction -->
+  <Panel id="interactionOverlay" width="1800" height="1100" color="#00000088"
+         position="0,0" rectAlignment="MiddleCenter" active="false">
+
+    <!-- Central interaction tile -->
+    <Panel id="interactionPanel" width="1400" height="800" color="#2a2a2aff"
+           position="0,0" rectAlignment="MiddleCenter">
+
+      <!-- Title: event name (e.g., Practical workshop / Live Street Performance) -->
+      <Text id="interactionTitle" text="[EVENT_NAME]" fontSize="64" color="#ffffff"
+            position="0,-310" width="1200" height="90" alignment="MiddleCenter" />
+
+      <!-- Subtitle: vocation + AP cost for initiator -->
+      <Text id="interactionSubtitle" text="[VOCATION] – Cost for you: [COST_TEXT]" fontSize="34" color="#dddddd"
+            position="0,-250" width="1200" height="70" alignment="MiddleCenter" />
+
+      <!-- Cost & effect description visible to everyone -->
+      <Text id="interactionCost" text="Cost for other players: [JOIN_COST_TEXT]" fontSize="32" color="#ffffaa"
+            position="0,-185" width="1200" height="70" alignment="MiddleCenter" />
+
+      <Text id="interactionEffect" text="Effect: [EFFECT_TEXT]" fontSize="30" color="#ffffff"
+            position="0,-95" width="1200" height="220" alignment="UpperCenter" />
+
+      <!-- Corner groups: one per player color -->
+
+      <!-- Yellow player (top left) -->
+      <Panel id="interactionYellowPanel" width="320" height="180" position="-520,-80">
+        <Text id="interactionYellowLabel" text="Yellow" fontSize="40" color="#fff4b0"
+              position="0,-50" width="320" height="60" alignment="MiddleCenter" />
+        <Button id="interactionYellowJoin" text="JOIN" fontSize="38"
+                position="-80,40" width="140" height="80"
+                onClick="UI_Interaction_YellowJoin" color="#d4af37" fontColor="#000000" />
+        <Button id="interactionYellowIgnore" text="IGNORE" fontSize="34"
+                position="80,40" width="140" height="80"
+                onClick="UI_Interaction_YellowIgnore" color="#555555" fontColor="#ffffff" />
+      </Panel>
+
+      <!-- Blue player (top right) -->
+      <Panel id="interactionBluePanel" width="320" height="180" position="520,-80">
+        <Text id="interactionBlueLabel" text="Blue" fontSize="40" color="#b0d8ff"
+              position="0,-50" width="320" height="60" alignment="MiddleCenter" />
+        <Button id="interactionBlueJoin" text="JOIN" fontSize="38"
+                position="-80,40" width="140" height="80"
+                onClick="UI_Interaction_BlueJoin" color="#4a90e2" fontColor="#000000" />
+        <Button id="interactionBlueIgnore" text="IGNORE" fontSize="34"
+                position="80,40" width="140" height="80"
+                onClick="UI_Interaction_BlueIgnore" color="#555555" fontColor="#ffffff" />
+      </Panel>
+
+      <!-- Red player (bottom left) -->
+      <Panel id="interactionRedPanel" width="320" height="180" position="-520,200">
+        <Text id="interactionRedLabel" text="Red" fontSize="40" color="#ffb0b0"
+              position="0,-50" width="320" height="60" alignment="MiddleCenter" />
+        <Button id="interactionRedJoin" text="JOIN" fontSize="38"
+                position="-80,40" width="140" height="80"
+                onClick="UI_Interaction_RedJoin" color="#e24a4a" fontColor="#000000" />
+        <Button id="interactionRedIgnore" text="IGNORE" fontSize="34"
+                position="80,40" width="140" height="80"
+                onClick="UI_Interaction_RedIgnore" color="#555555" fontColor="#ffffff" />
+      </Panel>
+
+      <!-- Green player (bottom right) -->
+      <Panel id="interactionGreenPanel" width="320" height="180" position="520,200">
+        <Text id="interactionGreenLabel" text="Green" fontSize="40" color="#b0ffb0"
+              position="0,-50" width="320" height="60" alignment="MiddleCenter" />
+        <Button id="interactionGreenJoin" text="JOIN" fontSize="38"
+                position="-80,40" width="140" height="80"
+                onClick="UI_Interaction_GreenJoin" color="#2d6a4f" fontColor="#000000" />
+        <Button id="interactionGreenIgnore" text="IGNORE" fontSize="34"
+                position="80,40" width="140" height="80"
+                onClick="UI_Interaction_GreenIgnore" color="#555555" fontColor="#ffffff" />
+      </Panel>
+
+      <!-- Status + timer -->
+      <Text id="interactionStatus" text="Waiting for: [Blue, Red]" fontSize="32" color="#ffffff"
+            position="0,300" width="900" height="50" alignment="MiddleCenter" />
+
+      <Text id="interactionTimer" text="Time left: 30s" fontSize="32" color="#ffffaa"
+            position="520,300" width="260" height="50" alignment="MiddleRight" />
+
     </Panel>
   </Panel>
 </Panel>
