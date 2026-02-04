@@ -1782,6 +1782,11 @@ function onLoad(saved)
   print("[WLB TURN] loaded | step="..tostring(W.step).." mode="..tostring(W.startMode))
 end
 
+-- Public API for other systems (e.g. VocationsController)
+function API_GetPlayerColors(params)
+  return shallowCopy(W.colors or {})
+end
+
 -- =========================================================
 -- [S13] UI CORE
 -- =========================================================

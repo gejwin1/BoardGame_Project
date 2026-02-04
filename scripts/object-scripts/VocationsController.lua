@@ -15,6 +15,9 @@ local TAG_BOARD = "WLB_BOARD"
 local TAG_VOCATION_TILE = "WLB_VOCATION_TILE"
 local COLOR_TAG_PREFIX = "WLB_COLOR_"
 local TAG_TURN_CTRL = "WLB_TURN_CTRL"
+local TAG_STATS_CTRL = "WLB_STATS_CTRL"
+local TAG_AP_CTRL = "WLB_AP_CTRL"
+local TAG_MONEY = "WLB_MONEY"
 
 local COLORS = {"Yellow", "Blue", "Red", "Green"}
 
@@ -477,6 +480,14 @@ local function log(msg)
   if DEBUG then print("[VOC_CTRL] " .. tostring(msg)) end
 end
 
+local function warn(msg)
+  print("[VOC_CTRL][WARN] " .. tostring(msg))
+end
+
+local function safeBroadcastAll(msg, rgb)
+  pcall(function() broadcastToAll(tostring(msg), rgb or {1,1,1}) end)
+end
+
 -- Safe broadcast function: checks if player exists before broadcasting
 local function safeBroadcastToColor(msg, color, rgb)
   if not color or color == "" then
@@ -521,6 +532,157 @@ end
 
 local function colorTag(color)
   return COLOR_TAG_PREFIX .. tostring(color)
+end
+
+-- Generic helper: find first object with all given tags
+local function findByTags(tags)
+  local all = getAllObjects()
+  for _, o in ipairs(all) do
+    local ok = true
+    for _, t in ipairs(tags) do
+      if not (o and o.hasTag and o.hasTag(t)) then
+        ok = false
+        break
+      end
+    end
+    if ok then return o end
+  end
+  return nil
+end
+
+-- AP helpers (EVENT/Events area = "E")
+local function findApCtrlForColor(color)
+  color = normalizeColor(color)
+  if not color then return nil end
+  return findByTags({ TAG_AP_CTRL, colorTag(color) })
+end
+
+local function getApUnspentCount(color)
+  local ap = findApCtrlForColor(color)
+  if not ap or not ap.call then return 0 end
+
+  local candidates = {
+    function() return ap.call("getUnspentCount") end,
+    function() return ap.call("getUnspentAP") end,
+    function() return ap.call("countUnspent") end,
+  }
+
+  for _, fn in ipairs(candidates) do
+    local ok, res = pcall(fn)
+    if ok and type(res) == "number" then
+      return math.max(0, math.floor(res))
+    end
+  end
+
+  warn("AP_CTRL for "..tostring(color).." has no unspent getter.")
+  return 0
+end
+
+local function canSpendAP(color, amount)
+  local ap = findApCtrlForColor(color)
+  if not ap or not ap.call then
+    warn("AP controller not found for "..tostring(color))
+    return false
+  end
+  local ok, can = pcall(function()
+    return ap.call("canSpendAP", { to = "E", amount = amount })
+  end)
+  return ok and (can == true or can == "true")
+end
+
+local function spendAP(color, amount, reason)
+  amount = tonumber(amount) or 0
+  if amount <= 0 then return true end
+  local ap = findApCtrlForColor(color)
+  if not ap or not ap.call then
+    warn("AP controller not found for "..tostring(color))
+    safeBroadcastToColor("⚠️ No AP controller — cannot deduct "..tostring(amount).." AP ("..tostring(reason)..").", color, {1,0.7,0.2})
+    return false
+  end
+  local ok, paid = pcall(function()
+    return ap.call("spendAP", { to = "E", amount = amount })
+  end)
+  return ok and (paid == true or paid == "true")
+end
+
+-- Satisfaction helpers (copied from ShopEngine)
+local SAT_TOKEN_GUIDS = {
+  Yellow = "d33a15",
+  Red    = "6fe69b",
+  Blue   = "b2b5e3",
+  Green  = "e8834c",
+}
+
+local function getSatToken(color)
+  local guid = SAT_TOKEN_GUIDS[tostring(color or "")]
+  if not guid then
+    warn("SAT GUID missing for color="..tostring(color))
+    return nil
+  end
+  local obj = getObjectFromGUID(guid)
+  if not obj then
+    warn("SAT token GUID not found: "..tostring(color).." guid="..tostring(guid))
+    return nil
+  end
+  return obj
+end
+
+local function satAdd(color, amount)
+  amount = tonumber(amount) or 0
+  if amount == 0 then return true end
+
+  local satObj = getSatToken(color)
+  if not satObj then
+    safeBroadcastAll("⚠️ SAT +"..tostring(amount).." for "..tostring(color).." (SAT token not found)", {1,0.7,0.2})
+    return false
+  end
+
+  pcall(function()
+    if satObj.setLock then satObj.setLock(false) end
+  end)
+
+  local ok = false
+  if satObj.call then
+    ok = pcall(function() satObj.call("addSat", { delta = amount }) end)
+  end
+
+  if not ok and satObj.call then
+    local stepFn = (amount >= 0) and "p1" or "m1"
+    local n = math.abs(amount)
+    for _=1,n do
+      local ok2 = pcall(function() satObj.call(stepFn) end)
+      if not ok2 then
+        warn("SAT CALL FAILED: "..tostring(stepFn))
+        safeBroadcastAll("⚠️ SAT +"..tostring(amount).." for "..tostring(color).." (SAT API call failed)", {1,0.7,0.2})
+        return false
+      end
+    end
+    ok = true
+  end
+
+  if not ok then
+    safeBroadcastAll("⚠️ SAT +"..tostring(amount).." for "..tostring(color).." (SAT API not working)", {1,0.7,0.2})
+  end
+
+  return ok
+end
+
+-- Turn helpers (active player)
+local function getActiveTurnColor()
+  if not (Turns and Turns.turn_color and Turns.turn_color ~= "") then
+    return nil
+  end
+  return normalizeColor(Turns.turn_color)
+end
+
+local function getActorColor()
+  local c = getActiveTurnColor()
+  if not c then
+    warn("No active player from Turns.turn_color. Action blocked.")
+    broadcastToAll("[VOC] ⛔ No active player with Turns.turn_color. Enable Turns and set turn.", {1,0.6,0.2})
+    return nil
+  end
+  return c
 end
 
 local function findPlayerBoard(color)
@@ -613,6 +775,292 @@ local function getSciencePointsForColor(color)
   
   log("getSciencePointsForColor: Failed to get science points for " .. color)
   return 0
+end
+
+-- =========================================================
+-- INTERACTION STATE (multi-player vocation events)
+-- =========================================================
+local interaction = {
+  active = false,
+  id = nil,
+  initiator = nil,
+  responses = {},  -- [color] = "JOIN"/"IGNORE"/...
+  targets = {},    -- [color] = true if should respond
+  joinCostAP = 0,
+  timer = 0,
+}
+
+local function updateInteractionTimerText()
+  if not UI then return end
+  if not interaction.active or (interaction.timer or 0) <= 0 then
+    UI.setAttribute("interactionTimer", "text", "")
+  else
+    UI.setAttribute("interactionTimer", "text", "Time left: "..tostring(interaction.timer).."s")
+  end
+end
+
+local function clearInteraction()
+  interaction.active = false
+  interaction.id = nil
+  interaction.initiator = nil
+  interaction.responses = {}
+  interaction.targets = {}
+  interaction.joinCostAP = 0
+  interaction.timer = 0
+  if UI then
+    UI.setAttribute("interactionOverlay", "active", "false")
+  end
+  updateInteractionTimerText()
+end
+
+local function updateInteractionStatusText()
+  if not UI then return end
+  if not interaction.active then
+    UI.setAttribute("interactionStatus", "text", "")
+    return
+  end
+  local waiting = {}
+  for _, c in ipairs(COLORS) do
+    if interaction.targets[c] and not interaction.responses[c] then
+      table.insert(waiting, c)
+    end
+  end
+  local text
+  if #waiting == 0 then
+    text = "Waiting for: [none]"
+  else
+    text = "Waiting for: ["..table.concat(waiting, ", ").."]"
+  end
+  UI.setAttribute("interactionStatus", "text", text)
+end
+
+local function isPlayableColor(c)
+  c = normalizeColor(c)
+  if not c then return false end
+
+  -- Primary source: TurnController's configured player colors (W.colors)
+  local turnCtrl = findTurnController()
+  if turnCtrl and turnCtrl.call then
+    local ok, data = pcall(function() return turnCtrl.call("API_GetPlayerColors", {}) end)
+    if ok and type(data) == "table" then
+      for _, col in ipairs(data) do
+        if normalizeColor(col) == c then
+          return true
+        end
+      end
+      -- If TurnController responded but this color is not listed, treat as non-playable.
+      return false
+    end
+  end
+
+  -- Fallback: no TurnController info – be conservative and only allow standard seated players.
+  local ok, p = pcall(function() return Player[c] end)
+  if ok and p and p.seated then
+    return true
+  end
+
+  return false
+end
+
+local function resetInteractionButtonsForColor(color, active)
+  if not UI then return end
+  local idPrefix = "interaction"..color
+  local joinId = idPrefix.."Join"
+  local ignoreId = idPrefix.."Ignore"
+  local val = active and "true" or "false"
+  UI.setAttribute(joinId, "active", val)
+  UI.setAttribute(ignoreId, "active", val)
+  UI.setAttribute(joinId, "interactable", val)
+  UI.setAttribute(ignoreId, "interactable", val)
+end
+
+local function setInteractionPanelVisibility()
+  if not UI then return end
+
+  local function activeFor(c)
+    return interaction.targets[c] and "true" or "false"
+  end
+
+  UI.setAttribute("interactionYellowPanel", "active", activeFor("Yellow"))
+  UI.setAttribute("interactionBluePanel",   "active", activeFor("Blue"))
+  UI.setAttribute("interactionRedPanel",    "active", activeFor("Red"))
+  UI.setAttribute("interactionGreenPanel",  "active", activeFor("Green"))
+
+  resetInteractionButtonsForColor("Yellow", interaction.targets["Yellow"] == true)
+  resetInteractionButtonsForColor("Blue",   interaction.targets["Blue"]   == true)
+  resetInteractionButtonsForColor("Red",    interaction.targets["Red"]    == true)
+  resetInteractionButtonsForColor("Green",  interaction.targets["Green"]  == true)
+end
+
+local function disableInteractionButtonsForColor(color)
+  if not UI then return end
+  local idPrefix = "interaction"..color
+  local joinId = idPrefix.."Join"
+  local ignoreId = idPrefix.."Ignore"
+  -- Hide buttons completely after the player has made a choice
+  UI.setAttribute(joinId, "active", "false")
+  UI.setAttribute(ignoreId, "active", "false")
+end
+
+-- Forward declaration: implementation is assigned later
+local resolveInteractionEffects_impl
+
+local function tickInteractionTimer(expectedId)
+  if not interaction.active then return end
+  if interaction.id ~= expectedId then return end
+
+  interaction.timer = (interaction.timer or 0) - 1
+  if interaction.timer <= 0 then
+    -- Auto-ignore for all players who did not respond
+    for c, needed in pairs(interaction.targets) do
+      if needed and not interaction.responses[c] then
+        interaction.responses[c] = "IGNORE"
+        disableInteractionButtonsForColor(c)
+      end
+    end
+    updateInteractionStatusText()
+    if resolveInteractionEffects_impl then
+      resolveInteractionEffects_impl()
+    end
+  else
+    updateInteractionTimerText()
+    if Wait and Wait.time then
+      local id = interaction.id
+      Wait.time(function() tickInteractionTimer(id) end, 1)
+    end
+  end
+end
+
+local function startInteraction(params)
+  -- params: id, initiator, title, subtitle, joinCostText, effectText, joinCostAP, duration
+  if not UI then
+    log("startInteraction: UI is nil")
+    return
+  end
+
+  local initiator = normalizeColor(params.initiator)
+  if not initiator then return end
+
+  clearInteraction()
+  interaction.active = true
+  interaction.id = params.id
+  interaction.initiator = initiator
+  interaction.joinCostAP = tonumber(params.joinCostAP or 0) or 0
+  interaction.responses = {}
+  interaction.targets = {}
+  interaction.timer = tonumber(params.duration or 30) or 30
+
+  for _, c in ipairs(COLORS) do
+    if c ~= initiator and isPlayableColor(c) then
+      interaction.targets[c] = true
+    end
+  end
+
+  UI.setAttribute("interactionTitle", "text", params.title or "[EVENT]")
+  UI.setAttribute("interactionSubtitle", "text", params.subtitle or "")
+  UI.setAttribute("interactionCost", "text", params.joinCostText or "")
+  UI.setAttribute("interactionEffect", "text", params.effectText or "")
+  setInteractionPanelVisibility()
+  updateInteractionStatusText()
+  updateInteractionTimerText()
+  UI.setAttribute("interactionOverlay", "active", "true")
+
+  if Wait and Wait.time then
+    local id = interaction.id
+    Wait.time(function() tickInteractionTimer(id) end, 1)
+  end
+end
+
+local function allInteractionResponsesCollected()
+  for c, needed in pairs(interaction.targets) do
+    if needed and not interaction.responses[c] then
+      return false
+    end
+  end
+  return true
+end
+
+resolveInteractionEffects_impl = function()
+  if not interaction.active then return end
+
+  local id = interaction.id
+  local initiator = interaction.initiator
+
+  -- Social Worker Level 2 – Community wellbeing session
+  if id == "SW_L2_COMMUNITY_WELLBEING" then
+    local participants = {}
+    for c, choice in pairs(interaction.responses) do
+      if choice == "JOIN" then
+        table.insert(participants, c)
+      end
+    end
+
+    if #participants == 0 then
+      safeBroadcastToColor("Community wellbeing session: no one joined → no effect.", initiator, {0.9,0.9,0.9})
+    else
+      -- Each participant gains +2 Satisfaction
+      for _, c in ipairs(participants) do
+        satAdd(c, 2)
+      end
+      -- Initiator: +1 SAT per participant +2 additional SAT (if anyone joined)
+      local totalSatForInitiator = #participants + 2
+      satAdd(initiator, totalSatForInitiator)
+
+      local msg = "Community wellbeing session: "..initiator.." ran the event. Participants: "..table.concat(participants, ", ")
+      safeBroadcastAll(msg, {0.7,1,0.7})
+    end
+  end
+
+  clearInteraction()
+end
+
+local function handleInteractionResponse(color, choice, actorColor)
+  if not interaction.active then return end
+  color = normalizeColor(color)
+  if not color or not interaction.targets[color] then return end
+  actorColor = normalizeColor(actorColor)
+
+  -- Only the matching player (or White spectator) can click their own color's buttons
+  if actorColor and actorColor ~= "White" and actorColor ~= color then
+    safeBroadcastToColor("⛔ You can only choose for your own color ("..tostring(actorColor)..").", actorColor, {1,0.6,0.2})
+    return
+  end
+
+  if interaction.responses[color] then return end
+
+  if choice == "JOIN" and interaction.joinCostAP > 0 then
+    -- Optional JOIN: must have enough free AP, and the cost carries into next turn.
+    local free = getApUnspentCount(color)
+    if free < interaction.joinCostAP then
+      safeBroadcastToColor("⛔ You don't have enough free AP to join this event (need "..tostring(interaction.joinCostAP)..", have "..tostring(free)..").", color, {1,0.6,0.2})
+      return
+    end
+
+    local ap = findApCtrlForColor(color)
+    if not ap or not ap.call then
+      safeBroadcastToColor("⚠️ AP controller not found – cannot join this event.", color, {1,0.7,0.2})
+      return
+    end
+
+    -- Move AP to INACTIVE with duration=1 so it is blocked for the next turn (same pattern as Birthday/Marriage events).
+    local okMove = pcall(function()
+      return ap.call("moveAP", { to = "INACTIVE", amount = interaction.joinCostAP, duration = 1 })
+    end)
+    if not okMove then
+      safeBroadcastToColor("⚠️ Failed to deduct AP to join this event.", color, {1,0.7,0.2})
+      return
+    end
+  end
+
+  interaction.responses[color] = choice
+  disableInteractionButtonsForColor(color)
+  updateInteractionStatusText()
+
+  if allInteractionResponsesCollected() then
+    if resolveInteractionEffects_impl then
+      resolveInteractionEffects_impl()
+    end
+  end
 end
 
 -- =========================================================
@@ -1038,6 +1486,59 @@ function VOC_GetVocationData(params)
   return VOCATION_DATA[vocation]
 end
 
+-- Start Social Worker Level 2 community event: "Community wellbeing session"
+-- Flow:
+--  - Active Social Worker (level 2+) spends 2 AP
+--  - Other players may JOIN by spending 1 AP
+--  - If no one joins → no effect
+--  - Each participant gains +2 SAT
+--  - Initiator gains +1 SAT per participant, plus +2 SAT if anyone joined
+function VOC_StartSocialWorkerCommunitySession(params)
+  params = params or {}
+  local color = normalizeColor(params.color)
+  if not color then
+    color = getActorColor()
+  end
+  if not color then
+    return false, "Invalid color"
+  end
+
+  local vocation = state.vocations[color]
+  if vocation ~= VOC_SOCIAL_WORKER then
+    safeBroadcastToColor("Only Social Worker can use this community event.", color, {1,0.7,0.2})
+    return false, "Wrong vocation"
+  end
+
+  local level = state.levels[color] or 1
+  if level < 2 then
+    safeBroadcastToColor("Community wellbeing session requires Social Worker Level 2.", color, {1,0.7,0.2})
+    return false, "Wrong level"
+  end
+
+  -- Spend 2 AP from initiator
+  if not canSpendAP(color, 2) then
+    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) to start Community wellbeing session.", color, {1,0.6,0.2})
+    return false, "Not enough AP"
+  end
+  local ok = spendAP(color, 2, "SW_L2_COMMUNITY_WELLBEING")
+  if not ok then
+    safeBroadcastToColor("⛔ Failed to deduct 2 AP for Community wellbeing session.", color, {1,0.6,0.2})
+    return false, "AP deduction failed"
+  end
+
+  startInteraction({
+    id = "SW_L2_COMMUNITY_WELLBEING",
+    initiator = color,
+    title = "COMMUNITY EVENT – Community wellbeing session",
+    subtitle = "Social Worker – Cost for you: Spend 2 AP",
+    joinCostText = "Others may join by spending 1 AP.",
+    effectText = "Each participant gains +2 Satisfaction. You gain +1 Satisfaction per participant, plus +2 extra Satisfaction if anyone joins.",
+    joinCostAP = 1,
+  })
+
+  return true
+end
+
 function VOC_CanPromote(params)
   local color = normalizeColor(params.color)
   if not color then return false, "Invalid color" end
@@ -1279,7 +1780,9 @@ function refreshSelectionCardAllocUI(turnCtrl, color)
     UI.setAttribute("selectionCardSkillsValue", "text", tostring(st.s or 0))
     local pool = tonumber(st.pool) or 0
     UI.setAttribute("selectionCardApply", "interactable", pool == 0 and "true" or "false")
-    UI.setAttribute("selectionCardApply", "color", pool == 0 and "#2d6a4f" or "#333333")
+    -- Keep apply button invisible even when enabled
+    UI.setAttribute("selectionCardApply", "color", "#00000000")
+    UI.setAttribute("selectionCardApply", "fontColor", "#00000000")
   end
 end
 
@@ -1766,10 +2269,6 @@ function VOC_ShowSelectionUI(color)
   -- Return any Level 1 cards from a previous selection (cleanup)
   VOC_ReturnLevel1Cards()
 
-  if self.clearButtons then
-    self.clearButtons()
-  end
-
   selectionState.activeColor = color
   selectionState.shownVocation = nil
   selectionState.shownSummary = nil
@@ -1905,9 +2404,6 @@ function VOC_ShowExplanationCard(vocation)
   end
 
   -- Controller: only Confirm and Go Back (no text panel)
-  if self and self.clearButtons then
-    self.clearButtons()
-  end
   local vocationName = VOCATION_DATA[vocation] and VOCATION_DATA[vocation].name or vocation
 
   self.createButton({
@@ -2043,7 +2539,7 @@ end
 -- PERKS VIEW ON CONTROLLER (show details, then Confirm / Go Back)
 -- =========================================================
 function VOC_ShowPerksOnController(vocation)
-  if not self or not self.clearButtons then return false end
+  if not self then return false end
   local color = selectionState.activeColor
   if not color then return false end
 
@@ -2051,8 +2547,6 @@ function VOC_ShowPerksOnController(vocation)
   local vocationName = data and data.name or vocation
   selectionState.shownVocation = vocation
   selectionState.shownSummary = nil  -- No physical tile
-
-  self.clearButtons()
 
   -- Title
   self.createButton({
@@ -2528,11 +3022,6 @@ function VOC_CleanupSelection(params)
     VOC_HideSummary({color=color})
   end
   
-  if self and self.clearButtons then
-    pcall(function() self.clearButtons() end)
-    log("Cleared selection buttons from controller")
-  end
-  
   -- Remove buttons from selection tiles (if any were used)
   if selectionState.selectionTiles then
     for _, tile in ipairs(selectionState.selectionTiles) do
@@ -2909,7 +3398,9 @@ function UI_ConfirmVocation(player, value, id)
       refreshSelectionCardAllocUI(turnCtrl, color)
     else
       UI.setAttribute("selectionCardApply", "interactable", (tonumber(pool) or 0) == 0 and "true" or "false")
-      UI.setAttribute("selectionCardApply", "color", (tonumber(pool) or 0) == 0 and "#2d6a4f" or "#333333")
+      -- Keep apply button invisible even when enabled
+      UI.setAttribute("selectionCardApply", "color", "#00000000")
+      UI.setAttribute("selectionCardApply", "fontColor", "#00000000")
     end
     log("UI_ConfirmVocation: Showing selection card for " .. vocation .. ", pool=" .. tostring(pool) .. " K=" .. k .. " S=" .. s)
   end
@@ -3211,17 +3702,56 @@ function VOC_StartSelection_UI(params)
 end
 
 -- =========================================================
+-- INTERACTION UI CALLBACKS (JOIN / IGNORE)
+-- =========================================================
+
+function UI_Interaction_YellowJoin(params)
+  local actor = params and params.playerColor
+  handleInteractionResponse("Yellow", "JOIN", actor)
+end
+
+function UI_Interaction_YellowIgnore(params)
+  local actor = params and params.playerColor
+  handleInteractionResponse("Yellow", "IGNORE", actor)
+end
+
+function UI_Interaction_BlueJoin(params)
+  local actor = params and params.playerColor
+  handleInteractionResponse("Blue", "JOIN", actor)
+end
+
+function UI_Interaction_BlueIgnore(params)
+  local actor = params and params.playerColor
+  handleInteractionResponse("Blue", "IGNORE", actor)
+end
+
+function UI_Interaction_RedJoin(params)
+  local actor = params and params.playerColor
+  handleInteractionResponse("Red", "JOIN", actor)
+end
+
+function UI_Interaction_RedIgnore(params)
+  local actor = params and params.playerColor
+  handleInteractionResponse("Red", "IGNORE", actor)
+end
+
+function UI_Interaction_GreenJoin(params)
+  local actor = params and params.playerColor
+  handleInteractionResponse("Green", "JOIN", actor)
+end
+
+function UI_Interaction_GreenIgnore(params)
+  local actor = params and params.playerColor
+  handleInteractionResponse("Green", "IGNORE", actor)
+end
+
+-- =========================================================
 -- TEST BUTTON (for UI debugging) - Must be defined before onLoad
 -- =========================================================
 local function createTestButton()
   if not self or not self.createButton then
     log("WARNING: Cannot create test button - self.createButton not available")
     return
-  end
-  
-  -- Clear any existing buttons first
-  if self.clearButtons then
-    pcall(function() self.clearButtons() end)
   end
   
   -- Create test button
@@ -3375,14 +3905,15 @@ local function createDebugButtons()
   --   pcall(function() self.clearButtons() end)
   -- end
   
-  -- Create debug buttons: 2 above, 2 below (to avoid covering test button and overlapping)
+  -- Create debug buttons: 2 above, 3 below (to avoid covering test button and overlapping)
   local buttons = {
     -- Top row (above)
     { label = "TEST\nSELECTION", fn = "btnDebugStartSelection", pos = {-0.75, 0.6, 0}, color = {0.2, 0.6, 1.0} },
     { label = "TEST\nSUMMARY", fn = "btnDebugShowSummary", pos = {0.75, 0.6, 0}, color = {0.2, 1.0, 0.6} },
     -- Bottom row (below)
     { label = "TEST\nCALLBACK", fn = "btnDebugTestCallback", pos = {-0.75, 0.0, 0}, color = {1.0, 0.6, 0.2} },
-    { label = "FULL\nTEST", fn = "btnDebugFullTest", pos = {0.75, 0.0, 0}, color = {0.8, 0.2, 0.8} },
+    { label = "FULL\nTEST", fn = "btnDebugFullTest", pos = {0.0, 0.0, 0}, color = {0.8, 0.2, 0.8} },
+    { label = "TEST\nSW L2 EVT", fn = "btnDebug_TestSWEvent", pos = {0.75, 0.0, 0}, color = {0.9, 0.3, 0.3} },
   }
   
   for _, btn in ipairs(buttons) do
@@ -3416,9 +3947,6 @@ function onLoad()
   createDebugButtons()
   if Wait and Wait.time then
     Wait.time(function()
-      if self and self.clearButtons then
-        pcall(function() self.clearButtons() end)
-      end
       if self and self.createButton and createDebugButtons then
         createDebugButtons()
         log("VocationsController: debug buttons created (delayed)")
@@ -3491,9 +4019,7 @@ function onLoad()
     broadcastToAll("⚠️ VocationsController: UI system not available (Global UI is nil)", {1, 0.5, 0.2})
   end
   
-  -- NOTE: createTestButton() removed - it was clearing debug buttons!
   -- Debug buttons are created above in createDebugButtons()
-  -- If you need the old test button, use the debug buttons instead
 end
 
 -- Test function to verify controller is accessible
@@ -3681,4 +4207,43 @@ function btnDebugFullTest(obj, player)
       end
     end, 0.5)
   end, 0.5)
+end
+
+-- Debug button: Test Social Worker L2 community wellbeing session interaction
+function btnDebug_TestSWEvent(obj, player)
+  log("=== DEBUG: Testing Social Worker L2 community wellbeing session ===")
+  
+  -- Prefer the clicking player's color if seated; otherwise pick the first seated color as initiator.
+  local color = nil
+  if player and player.color and player.color ~= "" and player.color ~= "White" then
+    local pc = normalizeColor(player.color)
+    if pc and isPlayableColor(pc) then
+      color = pc
+    end
+  end
+
+  if not color then
+    for _, c in ipairs(COLORS) do
+      if isPlayableColor(c) then
+        color = c
+        break
+      end
+    end
+  end
+
+  if not color then
+    color = "Green" -- fallback for edge cases
+  end
+
+  -- Force vocation and level for test
+  state.vocations[color] = VOC_SOCIAL_WORKER
+  state.levels[color] = 2
+  saveState()
+
+  local ok, reason = VOC_StartSocialWorkerCommunitySession({ color = color })
+  if ok == false then
+    broadcastToAll("❌ SW L2 event test failed: " .. tostring(reason), {1, 0.3, 0.3})
+  else
+    broadcastToAll("✅ SW L2 event started for " .. tostring(color) .. ". Other players can now JOIN / IGNORE on the interaction UI.", {0.3, 1, 0.3})
+  end
 end

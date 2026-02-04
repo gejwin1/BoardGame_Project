@@ -462,6 +462,61 @@ function UI_ContinueToVocation(player, value, id)
   end
 end
 
+-- =========================
+-- [SECTION 6C] INTERACTION UI CALLBACKS (JOIN / IGNORE)
+-- =========================
+
+local function routeInteractionCallback(fnName, player)
+  local pc = player and player.color or "White"
+  UILog("CLICK "..tostring(fnName).." pc="..tostring(pc))
+  local voc = GetVocCtrl()
+  if not voc then
+    UILog("ERR "..tostring(fnName).." no VocCtrl by GUID="..tostring(VOC_CTRL_GUID))
+    warn(tostring(fnName)..": VocationsController not found!")
+    return
+  end
+  UILog("ROUTE -> VocCtrl GUID="..voc.getGUID())
+  local ok, err = pcall(function()
+    return voc.call(fnName, { playerColor = pc })
+  end)
+  if not ok then
+    UILog("ERR "..tostring(fnName).." "..tostring(err))
+    warn(tostring(fnName)..": Error calling VocationsController: "..tostring(err))
+  end
+end
+
+function UI_Interaction_YellowJoin(player, value, id)
+  routeInteractionCallback("UI_Interaction_YellowJoin", player)
+end
+
+function UI_Interaction_YellowIgnore(player, value, id)
+  routeInteractionCallback("UI_Interaction_YellowIgnore", player)
+end
+
+function UI_Interaction_BlueJoin(player, value, id)
+  routeInteractionCallback("UI_Interaction_BlueJoin", player)
+end
+
+function UI_Interaction_BlueIgnore(player, value, id)
+  routeInteractionCallback("UI_Interaction_BlueIgnore", player)
+end
+
+function UI_Interaction_RedJoin(player, value, id)
+  routeInteractionCallback("UI_Interaction_RedJoin", player)
+end
+
+function UI_Interaction_RedIgnore(player, value, id)
+  routeInteractionCallback("UI_Interaction_RedIgnore", player)
+end
+
+function UI_Interaction_GreenJoin(player, value, id)
+  routeInteractionCallback("UI_Interaction_GreenJoin", player)
+end
+
+function UI_Interaction_GreenIgnore(player, value, id)
+  routeInteractionCallback("UI_Interaction_GreenIgnore", player)
+end
+
 -- UI Callback: Cancel selection (close UI) - KILL SWITCH
 -- This is a direct kill switch that closes all UI panels immediately
 -- Works even if VocationsController is not found (emergency fallback)
