@@ -327,6 +327,21 @@ end
 
 -- Helper function to find VocationsController (by GUID - preferred)
 local function GetVocCtrl()
+  if not VOC_CTRL_GUID or VOC_CTRL_GUID == "" then
+    warn("[VOC][ERR] VOC_CTRL_GUID is not set!")
+    -- Fallback to tag-based lookup
+    local allObjects = getAllObjects()
+    for _, obj in ipairs(allObjects) do
+      if obj and obj.hasTag and obj.hasTag(TAG_VOCATIONS_CTRL) then
+        if obj and obj.call then
+          warn("[VOC][FALLBACK] Found VocationsController by tag. Set VOC_CTRL_GUID!")
+          return obj
+        end
+      end
+    end
+    return nil
+  end
+  
   local o = getObjectFromGUID(VOC_CTRL_GUID)
   if not o then
     print("[VOC][ERR] VocationsController not found by GUID="..tostring(VOC_CTRL_GUID))
@@ -335,11 +350,20 @@ local function GetVocCtrl()
     for _, obj in ipairs(allObjects) do
       if obj and obj.hasTag and obj.hasTag(TAG_VOCATIONS_CTRL) then
         warn("[VOC][FALLBACK] Found VocationsController by tag, but GUID lookup failed. Update VOC_CTRL_GUID!")
-        return obj
+        if obj and obj.call then
+          return obj
+        end
       end
     end
+    return nil
   end
-  return o
+  -- Verify the object has a call method before returning
+  if o and o.call then
+    return o
+  else
+    warn("[VOC][ERR] VocationsController found but missing call method! Object type: "..type(o))
+    return nil
+  end
 end
 
 -- Legacy function name (for backward compatibility)
@@ -515,6 +539,211 @@ end
 
 function UI_Interaction_GreenIgnore(player, value, id)
   routeInteractionCallback("UI_Interaction_GreenIgnore", player)
+end
+
+-- =========================
+-- [SECTION 6E] TARGET SELECTION CALLBACKS
+-- =========================
+
+function UI_SelectTarget_Yellow(player, value, id)
+  local voc = GetVocCtrl()
+  if not voc or not voc.call then return end
+  local ok, err = pcall(function() voc.call("handleTargetSelection", "Yellow") end)
+  if not ok then warn("Error calling handleTargetSelection for Yellow: "..tostring(err)) end
+end
+
+function UI_SelectTarget_Blue(player, value, id)
+  local voc = GetVocCtrl()
+  if not voc or not voc.call then return end
+  local ok, err = pcall(function() voc.call("handleTargetSelection", "Blue") end)
+  if not ok then warn("Error calling handleTargetSelection for Blue: "..tostring(err)) end
+end
+
+function UI_SelectTarget_Red(player, value, id)
+  local voc = GetVocCtrl()
+  if not voc or not voc.call then return end
+  local ok, err = pcall(function() voc.call("handleTargetSelection", "Red") end)
+  if not ok then warn("Error calling handleTargetSelection for Red: "..tostring(err)) end
+end
+
+function UI_SelectTarget_Green(player, value, id)
+  local voc = GetVocCtrl()
+  if not voc or not voc.call then return end
+  local ok, err = pcall(function() voc.call("handleTargetSelection", "Green") end)
+  if not ok then warn("Error calling handleTargetSelection for Green: "..tostring(err)) end
+end
+
+function UI_CancelTargetSelection(player, value, id)
+  local voc = GetVocCtrl()
+  if not voc or not voc.call then return end
+  -- Pass true to indicate this IS a cancel - should refund AP
+  local ok, err = pcall(function() voc.call("hideTargetSelection", true) end)
+  if not ok then warn("Error calling hideTargetSelection: "..tostring(err)) end
+end
+
+-- =========================
+-- [SECTION 6D] VOCATION ACTION BUTTONS (5 buttons for vocation actions)
+-- =========================
+
+function UI_VocationAction1(player, value, id)
+  UILog("CLICK UI_VocationAction1 - START")
+  
+  -- Defensive: check player
+  local pc = "White"
+  if player and type(player) == "table" and player.color then
+    pc = player.color
+  end
+  UILog("CLICK UI_VocationAction1 pc="..tostring(pc))
+  
+  local voc = GetVocCtrl()
+  if not voc then
+    warn("UI_VocationAction1: VocationsController not found!")
+    broadcastToAll("⚠️ VocationsController not found!", {1,0.6,0.2})
+    return
+  end
+  if not voc.call then
+    warn("UI_VocationAction1: VocationsController missing call method!")
+    broadcastToAll("⚠️ VocationsController missing call method!", {1,0.6,0.2})
+    return
+  end
+  
+  -- Capture voc explicitly in closure to avoid scoping issues
+  local vocObj = voc
+  local ok, err = pcall(function()
+    if not vocObj then
+      warn("UI_VocationAction1: VocationsController became nil during call!")
+      return
+    end
+    if not vocObj.call then
+      warn("UI_VocationAction1: VocationsController lost call method during call!")
+      return
+    end
+    UILog("UI_VocationAction1: About to call UI_VocationAction with pc="..tostring(pc))
+    local result = vocObj.call("UI_VocationAction", {playerColor=pc, buttonIndex=1})
+    UILog("UI_VocationAction1: Call completed, result="..tostring(result))
+  end)
+  if not ok then
+    warn("UI_VocationAction1 error: "..tostring(err))
+    broadcastToAll("⚠️ Action button error: "..tostring(err), {1,0.6,0.2})
+  else
+    UILog("UI_VocationAction1: Success")
+  end
+end
+
+function UI_VocationAction2(player, value, id)
+  local pc = player and player.color or "White"
+  UILog("CLICK UI_VocationAction2 pc="..tostring(pc))
+  local voc = GetVocCtrl()
+  if not voc then
+    warn("UI_VocationAction2: VocationsController not found!")
+    return
+  end
+  if not voc.call then
+    warn("UI_VocationAction2: VocationsController missing call method!")
+    return
+  end
+  local vocObj = voc
+  local ok, err = pcall(function()
+    if not vocObj then
+      warn("UI_VocationAction2: VocationsController became nil during call!")
+      return
+    end
+    if not vocObj.call then
+      warn("UI_VocationAction2: VocationsController lost call method during call!")
+      return
+    end
+    vocObj.call("UI_VocationAction", {playerColor=pc, buttonIndex=2})
+  end)
+  if not ok then
+    warn("UI_VocationAction2 error: "..tostring(err))
+  end
+end
+
+function UI_VocationAction3(player, value, id)
+  local pc = player and player.color or "White"
+  UILog("CLICK UI_VocationAction3 pc="..tostring(pc))
+  local voc = GetVocCtrl()
+  if not voc then
+    warn("UI_VocationAction3: VocationsController not found!")
+    return
+  end
+  if not voc.call then
+    warn("UI_VocationAction3: VocationsController missing call method!")
+    return
+  end
+  local vocObj = voc
+  local ok, err = pcall(function()
+    if not vocObj then
+      warn("UI_VocationAction3: VocationsController became nil during call!")
+      return
+    end
+    if not vocObj.call then
+      warn("UI_VocationAction3: VocationsController lost call method during call!")
+      return
+    end
+    vocObj.call("UI_VocationAction", {playerColor=pc, buttonIndex=3})
+  end)
+  if not ok then
+    warn("UI_VocationAction3 error: "..tostring(err))
+  end
+end
+
+function UI_VocationAction4(player, value, id)
+  local pc = player and player.color or "White"
+  UILog("CLICK UI_VocationAction4 pc="..tostring(pc))
+  local voc = GetVocCtrl()
+  if not voc then
+    warn("UI_VocationAction4: VocationsController not found!")
+    return
+  end
+  if not voc.call then
+    warn("UI_VocationAction4: VocationsController missing call method!")
+    return
+  end
+  local vocObj = voc
+  local ok, err = pcall(function()
+    if not vocObj then
+      warn("UI_VocationAction4: VocationsController became nil during call!")
+      return
+    end
+    if not vocObj.call then
+      warn("UI_VocationAction4: VocationsController lost call method during call!")
+      return
+    end
+    vocObj.call("UI_VocationAction", {playerColor=pc, buttonIndex=4})
+  end)
+  if not ok then
+    warn("UI_VocationAction4 error: "..tostring(err))
+  end
+end
+
+function UI_VocationAction5(player, value, id)
+  local pc = player and player.color or "White"
+  UILog("CLICK UI_VocationAction5 pc="..tostring(pc))
+  local voc = GetVocCtrl()
+  if not voc then
+    warn("UI_VocationAction5: VocationsController not found!")
+    return
+  end
+  if not voc.call then
+    warn("UI_VocationAction5: VocationsController missing call method!")
+    return
+  end
+  local vocObj = voc
+  local ok, err = pcall(function()
+    if not vocObj then
+      warn("UI_VocationAction5: VocationsController became nil during call!")
+      return
+    end
+    if not vocObj.call then
+      warn("UI_VocationAction5: VocationsController lost call method during call!")
+      return
+    end
+    vocObj.call("UI_VocationAction", {playerColor=pc, buttonIndex=5})
+  end)
+  if not ok then
+    warn("UI_VocationAction5 error: "..tostring(err))
+  end
 end
 
 -- UI Callback: Cancel selection (close UI) - KILL SWITCH

@@ -682,6 +682,15 @@ local ENGINE_MODAL_FNS = {
   evt_choicePay = true,
   evt_choiceSat = true,
   evt_onUseKarma = true,  -- Add our new handler
+  -- Vocation Event card buttons
+  evt_veCrime = true,
+  evt_veChoiceA = true,
+  evt_veChoiceB = true,
+  evt_veTargetYellow = true,
+  evt_veTargetBlue = true,
+  evt_veTargetRed = true,
+  evt_veTargetGreen = true,
+  evt_veCrimeRoll = true,
 }
 
 local function cardHasEngineModalUI(card)
@@ -864,6 +873,21 @@ end
 
 function refreshEventSlotUI_later(delaySec)
   Wait.time(function() refreshEventSlotUI() end, delaySec or 0.25)
+end
+
+-- Called by Event Engine when player cancels a card choice (e.g. VE Cancel). Closes modal and re-adds YES/click catcher so the card is interactable again.
+function onCardCancelled(params)
+  if type(params) ~= "table" then return end
+  local g = params.card_guid or params.cardGuid or params.guid
+  if not g or g == "" then return end
+  local card = getObjectFromGUID(g)
+  if card and isCard(card) then
+    -- Ensure buttons are cleared (engine clears them, but ensure it's done before refresh)
+    if uiClearButtons then uiClearButtons(card) end
+    if uiCloseModal then uiCloseModal(card) end
+  end
+  -- Use a slightly longer delay to ensure all state is cleared before refresh
+  refreshEventSlotUI_later(0.4)
 end
 
 -- === SECTION 7: TRACK + MOVE =================================================

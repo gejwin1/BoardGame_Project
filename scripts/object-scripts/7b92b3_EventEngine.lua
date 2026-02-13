@@ -49,6 +49,9 @@ local TAG_DISCARD_ZONE_ALT  = "WLB_EVT_USED_ZONE"      -- new used zone
 local TAG_COSTS_CALC        = "WLB_COSTS_CALC"
 local TAG_BOARD             = "WLB_BOARD"              -- Player board tag
 
+-- Events Controller (notify on cancel so card becomes interactable again)
+local EVENTS_CONTROLLER_GUID = "1339d3"
+
 -- Status token tags (TokenEngine expects these tags)
 local STATUS_TAG = {
   GOODKARMA = "WLB_STATUS_GOOD_KARMA",
@@ -98,9 +101,11 @@ local LOCK_SEC = 8.0
 
 local pendingDice   = {}      -- [cardGuid] = { color, kind, diceKey, cardId }
 local pendingChoice = {}      -- [cardGuid] = { color, kind, choiceKey, cardId, meta }
+local pendingVECrime = {}     -- [cardGuid] = { color, cardId, targetColor? } for VE crime flow
 
 -- Store slot extra AP for CAR coordination (set by playCardFromUI, used by playCardById)
 local slotExtraAPForCard = {}  -- [cardGuid] = extra AP amount
+local veSlotExtraCharged = {}  -- [cardGuid] = slotExtra AP amount that was charged by Events Controller (for refund on cancel)
 
 -- adult state
 local married = { Yellow=false, Blue=false, Red=false, Green=false }
@@ -730,6 +735,12 @@ end
 
 local function finalizeCard(cardObj, kind, color)
   if not cardObj then return end
+  local g = cardObj.getGUID()
+  -- Don't finalize if there's a pending crime flow
+  if pendingVECrime and pendingVECrime[g] then
+    if DEBUG then log("finalizeCard: blocked - pendingVECrime exists for "..tostring(g)) end
+    return
+  end
   pcall(function() cardObj.clearButtons() end)
 
   kind = kind or "instant"
@@ -771,7 +782,7 @@ local function cardUI_title(cardObj, text)
     position = {0, 0.65, 0},
     rotation = {0, 0, 0},
     width = 0, height = 0,
-    font_size = 160,
+    font_size = 100,
     tooltip = ""
   })
 end
@@ -784,8 +795,37 @@ local function cardUI_btn(cardObj, label, fn, posZ)
     label = label,
     position = {0, 0.65, posZ or 0},
     rotation = {0, 0, 0},
-    width = 2100, height = 420,
-    font_size = 240,
+    width = 650, height = 200,
+    font_size = 120,
+    tooltip = ""
+  })
+end
+
+local function cardUI_btnBottom(cardObj, label, fn, posZ)
+  if not cardObj then return end
+  cardObj.createButton({
+    click_function = fn,
+    function_owner = self,
+    label = label,
+    position = {0, 0.15, posZ or 0},
+    rotation = {0, 0, 0},
+    width = 650, height = 200,
+    font_size = 120,
+    tooltip = ""
+  })
+end
+
+-- Button at explicit (posX, posY, posZ) for four-corner layouts
+local function cardUI_btnAt(cardObj, label, fn, posX, posY, posZ)
+  if not cardObj then return end
+  cardObj.createButton({
+    click_function = fn,
+    function_owner = self,
+    label = label,
+    position = {posX or 0, posY or 0.65, posZ or 0},
+    rotation = {0, 0, 0},
+    width = 650, height = 200,
+    font_size = 120,
     tooltip = ""
   })
 end
@@ -820,12 +860,882 @@ end
 function evt_cancelPending(cardObj, player_color, alt_click)
   if not cardObj then return end
   local g = cardObj.getGUID()
+  
+  -- Refund slotExtra AP if it was charged for VE card
+  -- Events Controller charges the adjusted slotExtra AP (after CAR reduction), so we need to refund the same amount
+  if veSlotExtraCharged[g] then
+    -- Use the stored slotExtra value (the amount that Events Controller actually charged)
+    -- veSlotExtraCharged[g] stores the actual amount charged (set when VE UI was shown)
+    local slotExtra = tonumber(veSlotExtraCharged[g]) or 0
+    if slotExtra > 0 then
+      local pc = pendingChoice[g]
+      local color = pc and pc.color or player_color
+      local apCtrl = getApCtrl(color)
+      if apCtrl and apCtrl.call then
+        -- Use a shared tracker for async callbacks
+        local refundTracker = { total = 0 }
+        -- Refund AP one at a time using sequential Wait.time callbacks
+        -- Use longer delay (0.4s) to ensure each token fully settles before next one moves
+        for i = 1, slotExtra do
+          Wait.time(function()
+            if apCtrl and apCtrl.call then
+              local okRefund, result = pcall(function() 
+                return apCtrl.call("moveAP", { to = "E", amount = -1 })
+              end)
+              if okRefund and result and type(result) == "table" and result.ok == true then
+                local moved = tonumber(result.moved or 0) or 0
+                if moved > 0 then
+                  refundTracker.total = refundTracker.total + moved
+                  if DEBUG then log("VE card cancelled: refunded slotExtra AP chunk "..tostring(i)..": moved="..tostring(moved)) end
+                else
+                  if DEBUG then log("VE card cancelled: WARNING slotExtra refund chunk "..tostring(i).." succeeded but moved=0") end
+                end
+              else
+                if DEBUG then log("VE card cancelled: FAILED slotExtra refund chunk "..tostring(i).." okRefund="..tostring(okRefund).." result="..tostring(result)) end
+              end
+              -- After last refund, clear state and send message
+              if i == slotExtra then
+                if DEBUG then log("VE card cancelled: Total slotExtra refunded="..tostring(refundTracker.total).." (requested "..tostring(slotExtra)..") for card "..tostring(g)) end
+                -- Add small delay to let tokens settle before clearing state
+                Wait.time(function()
+                  -- Clear state after all refunds complete and tokens settle
+                  veSlotExtraCharged[g] = nil -- Clear after all refunds complete
+                  pendingDice[g] = nil
+                  pendingChoice[g] = nil
+                  pendingVECrime[g] = nil
+                  cardUI_clear(cardObj)
+                  if lockUntil then lockUntil[g] = nil end
+                  clearDebounce(g)
+                  -- Notify Events Controller
+                  pcall(function()
+                    local ctrl = getObjectFromGUID(EVENTS_CONTROLLER_GUID)
+                    if ctrl and ctrl.call then
+                      ctrl.call("onCardCancelled", { card_guid = g })
+                    end
+                  end)
+                  -- Send refund message
+                  if refundTracker.total > 0 then
+                    safeBroadcastTo(color, "Cancelled. Refunded "..tostring(refundTracker.total).." AP.", {0.7,1,0.7})
+                  end
+                end, 0.2) -- Small delay to let tokens settle
+              end
+            end
+          end, 0.4 * i) -- Increased delay to 0.4s per token to ensure full settlement
+      end
+      -- Don't clear veSlotExtraCharged until refunds complete - cleared in final callback
+      -- Return early - state clearing and message will happen in the last callback
+      return
+    end
+    end
+  end
+  
+  -- No refund needed, clear state immediately
   pendingDice[g] = nil
   pendingChoice[g] = nil
+  pendingVECrime[g] = nil
   cardUI_clear(cardObj)
-  lockCard(g, LOCK_SEC)
+  -- Unlock the card immediately so YES can be clicked again
+  if lockUntil then lockUntil[g] = nil end
   clearDebounce(g)
-  safeBroadcastTo(player_color, "Cancelled. You can click YES again if needed.", {1,0.8,0.3})
+  -- Notify Events Controller so it closes modal and re-adds YES/click catcher (card becomes interactable again)
+  pcall(function()
+    local ctrl = getObjectFromGUID(EVENTS_CONTROLLER_GUID)
+    if ctrl and ctrl.call then
+      ctrl.call("onCardCancelled", { card_guid = g })
+    end
+  end)
+end
+
+-- Vocation Event: Crime flow (charge AP, choose target, roll 1d6, apply table)
+function evt_veCrime(cardObj, player_color, alt_click)
+  if not cardObj then return end
+  if type(pendingChoice) ~= "table" then return end
+  local g = cardObj.getGUID()
+  local pc = pendingChoice[g]
+  if not pc or pc.choiceKey ~= "VE_PICK_SIDE" then return end
+  if player_color and player_color ~= pc.color then return end
+  lockCard(g, LOCK_SEC)
+  local cardId = pc.cardId
+  -- Convert cardId to typeKey for VE_CRIME_TABLE lookup
+  local typeKey = nil
+  if CARD_TYPE and type(CARD_TYPE) == "table" then
+    typeKey = CARD_TYPE[cardId]
+  end
+  if not typeKey then
+    if DEBUG then log("evt_veCrime: typeKey not found for cardId="..tostring(cardId).." CARD_TYPE="..tostring(CARD_TYPE)) end
+    -- Try to extract typeKey from cardId pattern (e.g., AD_59_VE-NGO2-SOC1 -> AD_VE_NGO2_SOC1)
+    if cardId and type(cardId) == "string" then
+      -- Pattern: AD_XX_VE-XXX-YYY -> AD_VE_XXX_YYY
+      local pattern = cardId:match("^(AD_%d+_VE%-)(.+)")
+      if pattern then
+        local rest = cardId:match("^AD_%d+_VE%-(.+)$")
+        if rest then
+          -- Replace hyphens with underscores
+          typeKey = "AD_VE_" .. rest:gsub("-", "_")
+          if DEBUG then log("evt_veCrime: extracted typeKey="..tostring(typeKey).." from cardId="..tostring(cardId)) end
+        end
+      end
+    end
+    if not typeKey then
+      safeBroadcastTo(pc.color, "Crime: Card type not found. Cannot commit crime.", {1,0.6,0.2})
+      return
+    end
+  end
+  local crimeTable = VE_CRIME_TABLE
+  if not crimeTable or type(crimeTable) ~= "table" then
+    if DEBUG then log("evt_veCrime: VE_CRIME_TABLE is nil, using fallback table") end
+    -- Fallback crime table if VE_CRIME_TABLE is not accessible
+    crimeTable = {
+      AD_VE_NGO1_ENT1 = { ap = 1, [1] = "nothing", [2] = "wounded", [3] = "wounded_steal", steal = 1000 },
+      AD_VE_NGO1_GAN1 = { ap = 1, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 250, steal3 = 600 },
+      AD_VE_NGO2_SOC1 = { ap = 2, [1] = "nothing", [2] = "wounded", [3] = "wounded_steal", steal = 1000 },
+      AD_VE_NGO2_CEL1 = { ap = 2, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 800 },
+      AD_VE_ENT1_PUB1 = { ap = 1, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+      AD_VE_ENT2_GAN2 = { ap = 1, [1] = "nothing", [2] = "wounded", [3] = "wounded_steal", steal = 1000 },
+      AD_VE_ENT2_SOC2 = { ap = 2, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+      AD_VE_GAN1_PUB2 = { ap = 2, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+      AD_VE_CEL2_GAN2 = { ap = 2, [1] = "nothing", [2] = "wounded", [3] = "wounded_steal", steal = 1000 },
+      AD_VE_SOC1_PUB1 = { ap = 2, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+      AD_VE_SOC2_CEL1 = { ap = 1, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+      AD_VE_CEL2_PUB2 = { ap = 1, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+    }
+  end
+  local crimeDef = crimeTable[typeKey]
+  if not crimeDef then
+    if DEBUG then log("evt_veCrime: crimeDef not found for typeKey="..tostring(typeKey)) end
+    safeBroadcastTo(pc.color, "Crime: This card has no crime option.", {1,0.6,0.2})
+    return
+  end
+  local apCost = { to = "EVENT", amount = crimeDef.ap }
+  if not tryPayAPOrBlock(pc.color, apCost) then
+    safeBroadcastTo(pc.color, "Not enough AP for Crime (need "..tostring(crimeDef.ap)..").", {1,0.6,0.2})
+    return
+  end
+  -- Set pendingVECrime BEFORE clearing pendingChoice to prevent premature finalization
+  -- Store crime AP amount for refund on cancel
+  pendingVECrime[g] = { color = pc.color, cardId = cardId, typeKey = typeKey, cardObj = cardObj, crimeAP = crimeDef.ap }
+  pendingChoice[g] = nil
+  cardUI_clear(cardObj)
+  -- Use VocationsController target selection UI instead of card buttons
+  local voc = findOneByTags({TAG_VOCATIONS_CTRL})
+  if voc and voc.call then
+    pcall(function()
+      voc.call("StartVECrimeTargetSelection", {
+        initiator = pc.color,
+        cardGuid = g
+      })
+    end)
+  else
+    -- Fallback to card buttons if VocationsController not available
+    cardUI_title(cardObj, "Choose target")
+    cardUI_btn(cardObj, "Yellow", "evt_veTargetYellow", -1.0)
+    cardUI_btn(cardObj, "Blue", "evt_veTargetBlue", -0.3)
+    cardUI_btn(cardObj, "Red", "evt_veTargetRed", 0.4)
+    cardUI_btn(cardObj, "Green", "evt_veTargetGreen", 1.1)
+    cardUI_btn(cardObj, "Cancel", "evt_cancelPending", 1.8)
+    safeBroadcastTo(pc.color, "Choose a player to commit crime on.", {1,0.9,0.5})
+  end
+end
+
+-- Helper function to process crime roll results
+local function processCrimeRollResult(roll, data, cardObj, g, targetColor)
+  if not roll or roll < 1 or roll > 6 then
+    if DEBUG then log("processCrimeRollResult: invalid roll="..tostring(roll)) end
+    return
+  end
+  -- Use typeKey if available, otherwise try to convert cardId
+  local crimeKey = data.typeKey or (CARD_TYPE and CARD_TYPE[data.cardId]) or data.cardId
+  local crimeTable = VE_CRIME_TABLE
+  if not crimeTable or type(crimeTable) ~= "table" then
+    -- Fallback crime table if VE_CRIME_TABLE is not accessible
+    crimeTable = {
+      AD_VE_NGO1_ENT1 = { ap = 1, [1] = "nothing", [2] = "wounded", [3] = "wounded_steal", steal = 1000 },
+      AD_VE_NGO1_GAN1 = { ap = 1, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 250, steal3 = 600 },
+      AD_VE_NGO2_SOC1 = { ap = 2, [1] = "nothing", [2] = "wounded", [3] = "wounded_steal", steal = 1000 },
+      AD_VE_NGO2_CEL1 = { ap = 2, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 800 },
+      AD_VE_ENT1_PUB1 = { ap = 1, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+      AD_VE_ENT2_GAN2 = { ap = 1, [1] = "nothing", [2] = "wounded", [3] = "wounded_steal", steal = 1000 },
+      AD_VE_ENT2_SOC2 = { ap = 2, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+      AD_VE_GAN1_PUB2 = { ap = 2, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+      AD_VE_CEL2_GAN2 = { ap = 2, [1] = "nothing", [2] = "wounded", [3] = "wounded_steal", steal = 1000 },
+      AD_VE_SOC1_PUB1 = { ap = 2, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+      AD_VE_SOC2_CEL1 = { ap = 1, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+      AD_VE_CEL2_PUB2 = { ap = 1, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+    }
+  end
+  local crimeDef = crimeTable[crimeKey]
+  if not crimeDef then
+    if DEBUG then log("processCrimeRollResult: crimeDef not found for crimeKey="..tostring(crimeKey)) end
+    pendingVECrime[g] = nil
+    if type(finalizeCard) == "function" then
+      finalizeCard(cardObj, "instant", data.color)
+    else
+      pcall(function() cardObj.clearButtons() end)
+      if type(findDiscardTarget) == "function" then
+        local target = findDiscardTarget()
+        if target then
+          local p = target.getPosition()
+          cardObj.setPositionSmooth({p.x, p.y + 2, p.z}, false, true)
+        end
+      end
+    end
+    return
+  end
+  local band = (roll <= 2) and 1 or ((roll <= 4) and 2 or 3)
+  local outcome = crimeDef[band]
+  if outcome == "nothing" then
+    pcall(function() broadcastToAll("Crime: Nothing happens.", {0.8,0.8,0.8}) end)
+  elseif outcome == "wounded" then
+    -- Add wounded token
+    if STATUS_TAG and STATUS_TAG.WOUNDED then
+      local ok, err = pcall(function() 
+        PS_AddStatus(targetColor, STATUS_TAG.WOUNDED)
+      end)
+      if not ok and DEBUG then
+        log("processCrimeRollResult: Failed to add WOUNDED status: "..tostring(err))
+      end
+    end
+    -- Reduce health by 3
+    local statsCtrl = findOneByTags({TAG_STATS_CTRL, colorTag(targetColor)})
+    if statsCtrl then
+      local ok = statsApply(statsCtrl, { h = -3 })
+      if not ok and DEBUG then
+        log("processCrimeRollResult: Failed to reduce health for "..tostring(targetColor))
+      end
+    end
+    pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED and loses 3 Health.", {1,0.6,0.4}) end)
+  elseif outcome == "wounded_steal" then
+    -- Add wounded token
+    if STATUS_TAG and STATUS_TAG.WOUNDED then
+      local ok, err = pcall(function() 
+        PS_AddStatus(targetColor, STATUS_TAG.WOUNDED)
+      end)
+      if not ok and DEBUG then
+        log("processCrimeRollResult: Failed to add WOUNDED status: "..tostring(err))
+      end
+    end
+    -- Reduce health by 3
+    local statsCtrl = findOneByTags({TAG_STATS_CTRL, colorTag(targetColor)})
+    if statsCtrl then
+      local ok = statsApply(statsCtrl, { h = -3 })
+      if not ok and DEBUG then
+        log("processCrimeRollResult: Failed to reduce health for "..tostring(targetColor))
+      end
+    end
+    
+    -- Steal money: take from target, give to initiator
+    local steal = (band == 2 and crimeDef.steal2) or (band == 3 and crimeDef.steal3) or crimeDef.steal or 0
+    if steal > 0 then
+      -- Get target's current money
+      local targetMoneyObj = resolveMoney(targetColor)
+      local targetCurrentMoney = 0
+      if targetMoneyObj then
+        targetCurrentMoney = moneyGet(targetMoneyObj) or 0
+      end
+      
+      -- Calculate amount to steal (can't steal more than they have)
+      local amountToSteal = math.min(steal, targetCurrentMoney)
+      
+      if amountToSteal > 0 then
+        -- Take money from target
+        local targetMoneyObj2 = resolveMoney(targetColor)
+        if targetMoneyObj2 then
+          pcall(function() moneyAdd(targetMoneyObj2, -amountToSteal) end)
+        end
+        
+        -- Give money to initiator
+        local initiatorMoneyObj = resolveMoney(data.color)
+        if initiatorMoneyObj then
+          pcall(function() moneyAdd(initiatorMoneyObj, amountToSteal) end)
+        end
+        
+        if amountToSteal < steal then
+          pcall(function() broadcastToAll("Crime: "..targetColor.." WOUNDED, loses 3 Health and "..tostring(amountToSteal).." WIN (only had "..tostring(targetCurrentMoney).."). "..data.color.." gains "..tostring(amountToSteal).." WIN.", {1,0.6,0.4}) end)
+        else
+          pcall(function() broadcastToAll("Crime: "..targetColor.." WOUNDED, loses 3 Health and "..tostring(amountToSteal).." WIN. "..data.color.." gains "..tostring(amountToSteal).." WIN.", {1,0.6,0.4}) end)
+        end
+      else
+        pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED and loses 3 Health but has no money to steal.", {1,0.6,0.4}) end)
+      end
+    else
+      pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED and loses 3 Health.", {1,0.6,0.4}) end)
+    end
+  end
+  pendingVECrime[g] = nil
+  -- Clear veSlotExtraCharged flag since crime action completed successfully
+  veSlotExtraCharged[g] = nil
+  if type(finalizeCard) == "function" then
+    finalizeCard(cardObj, "instant", data.color)
+  else
+    pcall(function() cardObj.clearButtons() end)
+    if type(findDiscardTarget) == "function" then
+      local target = findDiscardTarget()
+      if target then
+        local p = target.getPosition()
+        cardObj.setPositionSmooth({p.x, p.y + 2, p.z}, false, true)
+      end
+    end
+  end
+end
+
+-- Called by VocationsController when target is selected via UI
+function VECrimeTargetSelected(params)
+  if DEBUG then log("VECrimeTargetSelected: called with params="..tostring(params and (params.cardGuid or "nil").." targetColor="..tostring(params and params.targetColor or "nil"))) end
+  if not params or not params.cardGuid or not params.targetColor then 
+    if DEBUG then log("VECrimeTargetSelected: missing params") end
+    return 
+  end
+  local g = params.cardGuid
+  local data = pendingVECrime[g]
+  if not data then 
+    if DEBUG then log("VECrimeTargetSelected: no pendingVECrime data for guid="..tostring(g)) end
+    return 
+  end
+  local targetColor = params.targetColor
+  if data.color == targetColor then
+    safeBroadcastTo(data.color, "You cannot target yourself.", {1,0.6,0.2})
+    return
+  end
+  local cardObj = data.cardObj or getObjectFromGUID(g)
+  if not cardObj then 
+    if DEBUG then log("VECrimeTargetSelected: cardObj not found for guid="..tostring(g)) end
+    return 
+  end
+  lockCard(g, LOCK_SEC)
+  data.targetColor = targetColor
+  cardUI_clear(cardObj)
+  safeBroadcastTo(data.color, "Crime target: "..targetColor..". Rolling dice...", {1,0.9,0.5})
+  if DEBUG then log("VECrimeTargetSelected: starting dice roll for target="..tostring(targetColor)) end
+  
+  -- Always try to use physical die (GUID: 14d4a4)
+  local die = getObjectFromGUID("14d4a4")
+  if die then
+    if type(rollRealDieAsync) == "function" then
+      -- Use rollRealDieAsync if available
+      rollRealDieAsync(cardObj, function(roll, err)
+        if err or not roll then
+          -- Fallback: try to read die value directly - NEVER use math.random
+          local dieValue = nil
+          if die.getValue then
+            local ok, v = pcall(function() return die.getValue() end)
+            if ok and type(v) == "number" and v >= 1 and v <= 6 then
+              dieValue = v
+            end
+          end
+          if dieValue then
+            roll = dieValue
+            if DEBUG then log("VECrimeTargetSelected: rollRealDieAsync failed, using die value="..tostring(roll)) end
+          else
+            -- Keep trying to read physical die - don't use math.random
+            if DEBUG then log("VECrimeTargetSelected: rollRealDieAsync failed, continuing to poll physical die") end
+            -- Start polling for die value
+            local startTime = Time.time
+            local lastValue = nil
+            local stableCount = 0
+            local function readDieValueFallback()
+              if not die or not die.getValue then return nil end
+              local ok, v = pcall(function() return die.getValue() end)
+              if ok and type(v) == "number" and v >= 1 and v <= 6 then return v end
+              return nil
+            end
+            local function pollDieFallback()
+              if (Time.time - startTime) > DICE_ROLL_TIMEOUT then
+                local finalValue = readDieValueFallback()
+                if finalValue then
+                  if DEBUG then log("VECrimeTargetSelected: fallback poll got value="..tostring(finalValue)) end
+                  processCrimeRollResult(finalValue, data, cardObj, g, targetColor)
+                else
+                  -- Keep polling - never give up on physical die
+                  Wait.time(pollDieFallback, DICE_POLL)
+                end
+                return
+              end
+              local dieVal = readDieValueFallback()
+              if dieVal then
+                if dieVal == lastValue then
+                  stableCount = stableCount + 1
+                  if stableCount >= DICE_STABLE_READS then
+                    if DEBUG then log("VECrimeTargetSelected: fallback poll got stable value="..tostring(dieVal)) end
+                    processCrimeRollResult(dieVal, data, cardObj, g, targetColor)
+                    return
+                  end
+                else
+                  lastValue = dieVal
+                  stableCount = 1
+                end
+              else
+                stableCount = 0
+              end
+              Wait.time(pollDieFallback, DICE_POLL)
+            end
+            -- Wait 1.0 second for die to fall and settle before starting to poll
+            Wait.time(pollDieFallback, 1.0)
+            return -- Don't process result yet, wait for poll
+          end
+        end
+        if roll then
+          processCrimeRollResult(roll, data, cardObj, g, targetColor)
+        end
+      end)
+    else
+      -- Fallback: roll die and read value (always use physical die, never math.random)
+      if DEBUG then log("VECrimeTargetSelected: rollRealDieAsync not available, rolling physical die") end
+      -- Cache die home position if needed (inline to avoid chunking issues)
+      if die and not diceHome then
+        local ok, p, r = pcall(function()
+          local pos = die.getPosition()
+          local rot = die.getRotation()
+          return pos, rot
+        end)
+        if ok and p and r then
+          diceHome = { pos={x=p.x,y=p.y,z=p.z}, rot={x=r.x,y=r.y,z=r.z} }
+        end
+      end
+      -- Roll die physically
+      pcall(function() die.randomize() end)
+      pcall(function() die.roll() end)
+      
+      -- Use Wait.condition to wait for die.resting (like Turn Controller)
+      -- This ensures we read the final settled value, not the first value when it hits the table
+      local timeout = os.time() + 6
+      Wait.condition(
+        function()
+          -- Die is now resting - read the final value
+          local v = nil
+          local ok = pcall(function() v = die.getValue() end)
+          if ok and type(v) == "number" and v >= 1 and v <= 6 then
+            if DEBUG then log("VECrimeTargetSelected: die resting, final value="..tostring(v)) end
+            processCrimeRollResult(v, data, cardObj, g, targetColor)
+          else
+            if DEBUG then log("VECrimeTargetSelected: failed to read die value after resting") end
+            safeBroadcastTo(data.color, "ERROR: Failed to read die value.", {1,0,0})
+            pendingVECrime[g] = nil
+            cardUI_clear(cardObj)
+          end
+        end,
+        function()
+          -- Condition: wait until die is resting (fully settled)
+          local resting = false
+          pcall(function() resting = die.resting end)
+          if resting then return true end
+          if os.time() >= timeout then return true end
+          return false
+        end
+      )
+    end
+  else
+    -- Die not found - cannot proceed without physical die
+    safeBroadcastTo(data.color, "ERROR: Physical die (GUID: 14d4a4) not found. Cannot roll dice.", {1,0,0})
+    if DEBUG then log("VECrimeTargetSelected: ERROR - die not found (GUID 14d4a4), cannot proceed") end
+    pendingVECrime[g] = nil
+    cardUI_clear(cardObj)
+    -- Don't finalize card - let player try again
+  end
+end
+
+local function evt_veTarget(cardObj, targetColor)
+  if not cardObj then return end
+  local g = cardObj.getGUID()
+  local data = pendingVECrime[g]
+  if not data then return end
+  if data.color == targetColor then
+    safeBroadcastTo(data.color, "You cannot target yourself.", {1,0.6,0.2})
+    return
+  end
+  lockCard(g, LOCK_SEC)
+  data.targetColor = targetColor
+  cardUI_clear(cardObj)
+  safeBroadcastTo(data.color, "Crime target: "..targetColor..". Rolling dice...", {1,0.9,0.5})
+  -- Automatically roll dice instead of showing ROLL UI
+  rollRealDieAsync(cardObj, function(roll, err)
+    if err or not roll then
+      roll = math.random(1, 6)
+    end
+    -- Use typeKey if available, otherwise try to convert cardId
+    local crimeKey = data.typeKey or (CARD_TYPE and CARD_TYPE[data.cardId]) or data.cardId
+    local crimeTable = VE_CRIME_TABLE
+    if not crimeTable or type(crimeTable) ~= "table" then
+      -- Fallback crime table if VE_CRIME_TABLE is not accessible
+      crimeTable = {
+        AD_VE_NGO1_ENT1 = { ap = 1, [1] = "nothing", [2] = "wounded", [3] = "wounded_steal", steal = 1000 },
+        AD_VE_NGO1_GAN1 = { ap = 1, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 250, steal3 = 600 },
+        AD_VE_NGO2_SOC1 = { ap = 2, [1] = "nothing", [2] = "wounded", [3] = "wounded_steal", steal = 1000 },
+        AD_VE_NGO2_CEL1 = { ap = 2, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 800 },
+        AD_VE_ENT1_PUB1 = { ap = 1, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+        AD_VE_ENT2_GAN2 = { ap = 1, [1] = "nothing", [2] = "wounded", [3] = "wounded_steal", steal = 1000 },
+        AD_VE_ENT2_SOC2 = { ap = 2, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+        AD_VE_GAN1_PUB2 = { ap = 2, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+        AD_VE_CEL2_GAN2 = { ap = 2, [1] = "nothing", [2] = "wounded", [3] = "wounded_steal", steal = 1000 },
+        AD_VE_SOC1_PUB1 = { ap = 2, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+        AD_VE_SOC2_CEL1 = { ap = 1, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+        AD_VE_CEL2_PUB2 = { ap = 1, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+      }
+    end
+    local crimeDef = crimeTable[crimeKey]
+    if not crimeDef then
+      if DEBUG then log("evt_veTarget roll: crimeDef not found for crimeKey="..tostring(crimeKey)) end
+      pendingVECrime[g] = nil
+      finalizeCard(cardObj, "instant", data.color)
+      return
+    end
+    local band = (roll <= 2) and 1 or ((roll <= 4) and 2 or 3)
+    local outcome = crimeDef[band]
+    local targetColor = data.targetColor
+    if outcome == "nothing" then
+      pcall(function() broadcastToAll("Crime: Nothing happens.", {0.8,0.8,0.8}) end)
+    elseif outcome == "wounded" then
+      PS_AddStatus(targetColor, STATUS_TAG.WOUNDED)
+      pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED.", {1,0.6,0.4}) end)
+    elseif outcome == "wounded_steal" then
+      PS_AddStatus(targetColor, STATUS_TAG.WOUNDED)
+      local steal = (band == 2 and crimeDef.steal2) or (band == 3 and crimeDef.steal3) or crimeDef.steal or 0
+      if steal > 0 then
+        applyToPlayer_NoAP(targetColor, { money = -steal }, "VECrimeSteal")
+        pcall(function() broadcastToAll("Crime: "..targetColor.." WOUNDED and loses "..tostring(steal).." WIN.", {1,0.6,0.4}) end)
+      else
+        pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED.", {1,0.6,0.4}) end)
+      end
+    end
+    pendingVECrime[g] = nil
+    finalizeCard(cardObj, "instant", data.color)
+  end)
+end
+function evt_veTargetYellow(cardObj, p, alt) evt_veTarget(cardObj, "Yellow") end
+function evt_veTargetBlue(cardObj, p, alt)  evt_veTarget(cardObj, "Blue") end
+function evt_veTargetRed(cardObj, p, alt)   evt_veTarget(cardObj, "Red") end
+function evt_veTargetGreen(cardObj, p, alt) evt_veTarget(cardObj, "Green") end
+
+function evt_veCrimeRoll(cardObj, player_color, alt_click)
+  if not cardObj then return end
+  local g = cardObj.getGUID()
+  local data = pendingVECrime[g]
+  if not data or not data.targetColor then return end
+  lockCard(g, LOCK_SEC)
+  rollRealDieAsync(cardObj, function(roll, err)
+    if err or not roll then
+      roll = math.random(1, 6)
+    end
+    -- Use typeKey if available, otherwise try to convert cardId
+    local crimeKey = data.typeKey or (CARD_TYPE and CARD_TYPE[data.cardId]) or data.cardId
+    local crimeDef = VE_CRIME_TABLE and VE_CRIME_TABLE[crimeKey]
+    if not crimeDef then
+      pendingVECrime[g] = nil
+      finalizeCard(cardObj, "instant", data.color)
+      return
+    end
+    local band = (roll <= 2) and 1 or ((roll <= 4) and 2 or 3)
+    local outcome = crimeDef[band]
+    local targetColor = data.targetColor
+    if outcome == "nothing" then
+      pcall(function() broadcastToAll("Crime: Nothing happens.", {0.8,0.8,0.8}) end)
+    elseif outcome == "wounded" then
+      PS_AddStatus(targetColor, STATUS_TAG.WOUNDED)
+      pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED.", {1,0.6,0.4}) end)
+    elseif outcome == "wounded_steal" then
+      PS_AddStatus(targetColor, STATUS_TAG.WOUNDED)
+      local steal = (band == 2 and crimeDef.steal2) or (band == 3 and crimeDef.steal3) or crimeDef.steal or 0
+      if steal > 0 then
+        applyToPlayer_NoAP(targetColor, { money = -steal }, "VECrimeSteal")
+        pcall(function() broadcastToAll("Crime: "..targetColor.." WOUNDED and loses "..tostring(steal).." WIN.", {1,0.6,0.4}) end)
+      else
+        pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED.", {1,0.6,0.4}) end)
+      end
+    end
+    pendingVECrime[g] = nil
+    finalizeCard(cardObj, "instant", data.color)
+  end)
+end
+
+-- Vocation Event: only the player who played the card and has that vocation can use the button
+local function veChoiceAllowed(cardObj, player_color, veCode)
+  if DEBUG then log("veChoiceAllowed: START - player_color="..tostring(player_color).." veCode="..tostring(veCode)) end
+  if not cardObj or not player_color or not veCode then 
+    if DEBUG then log("veChoiceAllowed: missing params - cardObj="..tostring(cardObj).." player_color="..tostring(player_color).." veCode="..tostring(veCode)) end
+    return false 
+  end
+  if type(pendingChoice) ~= "table" then 
+    if DEBUG then log("veChoiceAllowed: pendingChoice is not a table") end
+    return false 
+  end
+  local g = cardObj.getGUID()
+  local pc = pendingChoice[g]
+  if not pc or pc.choiceKey ~= "VE_PICK_SIDE" then 
+    if DEBUG then log("veChoiceAllowed: no pc or wrong choiceKey - pc="..tostring(pc).." choiceKey="..tostring(pc and pc.choiceKey)) end
+    return false 
+  end
+  -- White player can use vocation cards as current turn color (for testing)
+  if player_color == "White" then
+    -- Get current turn color and use that for vocation check
+    local turnColor = nil
+    if Turns and Turns.turn_color and Turns.turn_color ~= "" then
+      turnColor = Turns.turn_color
+    elseif activeColor and activeColor ~= "" then
+      turnColor = activeColor
+    end
+    if turnColor and turnColor ~= "White" then
+      if DEBUG then log("veChoiceAllowed: White player using turn color "..tostring(turnColor).." for vocation check") end
+      -- Use turn color for vocation check instead of White
+      player_color = turnColor
+    else
+      if DEBUG then log("veChoiceAllowed: White player bypass - no turn color, allowing") end
+      return true
+    end
+  end
+  -- Normalize colors for comparison (handle case differences)
+  local function normColor(c)
+    if not c or type(c) ~= "string" or c == "" then return c end
+    return c:sub(1,1):upper() .. c:sub(2):lower()
+  end
+  local playerColorNorm = normColor(player_color)
+  local pcColorNorm = normColor(pc.color)
+  if playerColorNorm ~= pcColorNorm then 
+    if DEBUG then log("veChoiceAllowed: color mismatch - player='"..tostring(player_color).."' ("..tostring(playerColorNorm)..") pc.color='"..tostring(pc.color).."' ("..tostring(pcColorNorm)..")") end
+    return false 
+  end
+  -- VE_CODE_TO_VOCATION might be nil due to chunking - use fallback mapping
+  local codeToVoc = VE_CODE_TO_VOCATION
+  if not codeToVoc or type(codeToVoc) ~= "table" then
+    if DEBUG then log("veChoiceAllowed: VE_CODE_TO_VOCATION is nil, using fallback mapping") end
+    -- Fallback mapping if VE_CODE_TO_VOCATION is not accessible
+    codeToVoc = {
+      SOC1 = "SOCIAL_WORKER", SOC2 = "SOCIAL_WORKER",
+      CEL1 = "CELEBRITY", CEL2 = "CELEBRITY",
+      PUB1 = "PUBLIC_SERVANT", PUB2 = "PUBLIC_SERVANT",
+      GAN1 = "GANGSTER", GAN2 = "GANGSTER",
+      NGO1 = "NGO_WORKER", NGO2 = "NGO_WORKER",
+      ENT1 = "ENTREPRENEUR", ENT2 = "ENTREPRENEUR",
+    }
+  end
+  local requiredVoc = codeToVoc[veCode]
+  if not requiredVoc then 
+    if DEBUG then log("veChoiceAllowed: requiredVoc not found for veCode="..tostring(veCode)) end
+    return false 
+  end
+  if DEBUG then log("veChoiceAllowed: requiredVoc="..tostring(requiredVoc).." for veCode="..tostring(veCode)) end
+  local voc = findOneByTags({TAG_VOCATIONS_CTRL})
+  if not voc or not voc.call then 
+    if DEBUG then log("veChoiceAllowed: VocationsController not found or no call method") end
+    return false 
+  end
+  if DEBUG then log("veChoiceAllowed: calling VOC_GetVocation with color="..tostring(player_color)) end
+  local ok, gotVoc = pcall(function() return voc.call("VOC_GetVocation", { color = player_color }) end)
+  if not ok then 
+    if DEBUG then log("veChoiceAllowed: VOC_GetVocation call failed for "..tostring(player_color).." error="..tostring(gotVoc)) end
+    return false 
+  end
+  if DEBUG then log("veChoiceAllowed: VOC_GetVocation returned: "..tostring(gotVoc).." (type="..type(gotVoc)..")") end
+  -- Handle nil vocation (player has no vocation assigned)
+  if not gotVoc or gotVoc == "" then
+    if DEBUG then log("veChoiceAllowed: player has no vocation - gotVoc=nil") end
+    return false
+  end
+  -- Normalize both values for comparison (handle case differences, whitespace)
+  local gotVocStr = tostring(gotVoc):gsub("%s+", ""):upper()
+  local requiredVocStr = tostring(requiredVoc):gsub("%s+", ""):upper()
+  if gotVocStr == "" or requiredVocStr == "" then
+    if DEBUG then log("veChoiceAllowed: empty vocation after normalize - got='"..tostring(gotVoc).."' required='"..tostring(requiredVoc).."'") end
+    return false
+  end
+  if gotVocStr ~= requiredVocStr then
+    if DEBUG then log("veChoiceAllowed: mismatch - got='"..tostring(gotVoc).."' ("..gotVocStr..") required='"..tostring(requiredVoc).."' ("..requiredVocStr..")") end
+    return false
+  end
+  if DEBUG then log("veChoiceAllowed: ✓ match - got='"..tostring(gotVoc).."' required='"..tostring(requiredVoc).."'") end
+  return true
+end
+
+function evt_veChoiceA(cardObj, player_color, alt_click)
+  if not cardObj then return end
+  if DEBUG then log("evt_veChoiceA: called by "..tostring(player_color)) end
+  if type(pendingChoice) ~= "table" then 
+    if DEBUG then log("evt_veChoiceA: pendingChoice is not a table") end
+    return 
+  end
+  local g = cardObj.getGUID()
+  local pc = pendingChoice[g]
+  if not pc or pc.choiceKey ~= "VE_PICK_SIDE" then 
+    if DEBUG then log("evt_veChoiceA: no pendingChoice or wrong choiceKey - pc="..tostring(pc and pc.choiceKey)) end
+    return 
+  end
+  local meta = pc.meta
+  if not meta or not meta.ve then 
+    if DEBUG then log("evt_veChoiceA: no meta or ve") end
+    return 
+  end
+  local veCode = meta.ve.a
+  if not veCode then 
+    if DEBUG then log("evt_veChoiceA: no veCode from meta.ve.a") end
+    return 
+  end
+  if DEBUG then log("evt_veChoiceA: veCode="..tostring(veCode).." checking if allowed...") end
+  if not veChoiceAllowed(cardObj, player_color, veCode) then
+    -- Always use full vocation name, never show codes like ENT1 or NGO1
+    local displayNames = VE_DISPLAY_NAMES
+    if not displayNames or type(displayNames) ~= "table" then
+      displayNames = {
+        SOC1 = "Social Worker", SOC2 = "Social Worker",
+        CEL1 = "Celebrity", CEL2 = "Celebrity",
+        PUB1 = "Public Servant", PUB2 = "Public Servant",
+        GAN1 = "Gangster", GAN2 = "Gangster",
+        NGO1 = "NGO Worker", NGO2 = "NGO Worker",
+        ENT1 = "Entrepreneur", ENT2 = "Entrepreneur",
+      }
+    end
+    local vocationName = displayNames[veCode]
+    if not vocationName or vocationName == "" then
+      -- Fallback: try to get name from code-to-vocation mapping
+      local codeToVoc = VE_CODE_TO_VOCATION
+      if codeToVoc and codeToVoc[veCode] then
+        local vocConst = codeToVoc[veCode]
+        local vocNameMap = {
+          SOCIAL_WORKER = "Social Worker",
+          CELEBRITY = "Celebrity",
+          PUBLIC_SERVANT = "Public Servant",
+          GANGSTER = "Gangster",
+          NGO_WORKER = "NGO Worker",
+          ENTREPRENEUR = "Entrepreneur",
+        }
+        vocationName = vocNameMap[vocConst] or vocConst
+      else
+        vocationName = "the required vocation"
+      end
+    end
+    safeBroadcastTo(player_color, "Only "..tostring(vocationName).." can use this action.", {1,0.6,0.2})
+    return
+  end
+  lockCard(g, LOCK_SEC)
+  local actionIds = VE_ACTION_IDS
+  if not actionIds or type(actionIds) ~= "table" then
+    -- Fallback if VE_ACTION_IDS is not accessible
+    actionIds = {
+      SOC1 = "SW_SPECIAL_HOMELESS",   SOC2 = "SW_SPECIAL_REMOVAL",
+      CEL1 = "CELEB_SPECIAL_COLLAB",  CEL2 = "CELEB_SPECIAL_MEETUP",
+      PUB1 = "PS_SPECIAL_POLICY",     PUB2 = "PS_SPECIAL_BOTTLENECK",
+      GAN1 = "GANG_SPECIAL_ROBIN",    GAN2 = "GANG_SPECIAL_PROTECTION",
+      NGO1 = "NGO_SPECIAL_CRISIS",    NGO2 = "NGO_SPECIAL_SCANDAL",
+      ENT1 = "ENT_SPECIAL_EXPANSION", ENT2 = "ENT_SPECIAL_TRAINING",
+    }
+  end
+  local actionId = actionIds[veCode]
+  if actionId then
+    local voc = findOneByTags({TAG_VOCATIONS_CTRL})
+    if voc and voc.call then
+      if DEBUG then log("evt_veChoiceA: calling RunVocationEventCardAction with actionId="..tostring(actionId)) end
+      pcall(function() voc.call("RunVocationEventCardAction", { playerColor = pc.color, actionId = actionId }) end)
+    else
+      if DEBUG then log("evt_veChoiceA: VocationsController not found") end
+    end
+  else
+    if DEBUG then log("evt_veChoiceA: no actionId for veCode="..tostring(veCode)) end
+  end
+  -- Clear veSlotExtraCharged flag since action completed successfully
+  veSlotExtraCharged[g] = nil
+  
+  -- finishChoice might be nil due to chunking - inline the logic
+  if type(finishChoice) == "function" then
+    finishChoice(cardObj, pc)
+  else
+    pendingChoice[g] = nil
+    cardUI_clear(cardObj)
+    finalizeCard(cardObj, pc.kind, pc.color)
+  end
+end
+
+function evt_veChoiceB(cardObj, player_color, alt_click)
+  if not cardObj then return end
+  if DEBUG then log("evt_veChoiceB: called by "..tostring(player_color)) end
+  if type(pendingChoice) ~= "table" then 
+    if DEBUG then log("evt_veChoiceB: pendingChoice is not a table") end
+    return 
+  end
+  local g = cardObj.getGUID()
+  local pc = pendingChoice[g]
+  if not pc or pc.choiceKey ~= "VE_PICK_SIDE" then 
+    if DEBUG then log("evt_veChoiceB: no pendingChoice or wrong choiceKey - pc="..tostring(pc and pc.choiceKey)) end
+    return 
+  end
+  local meta = pc.meta
+  if not meta or not meta.ve then 
+    if DEBUG then log("evt_veChoiceB: no meta or ve") end
+    return 
+  end
+  local veCode = meta.ve.b
+  if not veCode then 
+    if DEBUG then log("evt_veChoiceB: no veCode from meta.ve.b") end
+    return 
+  end
+  if DEBUG then log("evt_veChoiceB: veCode="..tostring(veCode).." checking if allowed...") end
+  if not veChoiceAllowed(cardObj, player_color, veCode) then
+    -- Always use full vocation name, never show codes like ENT1 or NGO1
+    local displayNames = VE_DISPLAY_NAMES
+    if not displayNames or type(displayNames) ~= "table" then
+      displayNames = {
+        SOC1 = "Social Worker", SOC2 = "Social Worker",
+        CEL1 = "Celebrity", CEL2 = "Celebrity",
+        PUB1 = "Public Servant", PUB2 = "Public Servant",
+        GAN1 = "Gangster", GAN2 = "Gangster",
+        NGO1 = "NGO Worker", NGO2 = "NGO Worker",
+        ENT1 = "Entrepreneur", ENT2 = "Entrepreneur",
+      }
+    end
+    local vocationName = displayNames[veCode]
+    if not vocationName or vocationName == "" then
+      -- Fallback: try to get name from code-to-vocation mapping
+      local codeToVoc = VE_CODE_TO_VOCATION
+      if codeToVoc and codeToVoc[veCode] then
+        local vocConst = codeToVoc[veCode]
+        local vocNameMap = {
+          SOCIAL_WORKER = "Social Worker",
+          CELEBRITY = "Celebrity",
+          PUBLIC_SERVANT = "Public Servant",
+          GANGSTER = "Gangster",
+          NGO_WORKER = "NGO Worker",
+          ENTREPRENEUR = "Entrepreneur",
+        }
+        vocationName = vocNameMap[vocConst] or vocConst
+      else
+        vocationName = "the required vocation"
+      end
+    end
+    safeBroadcastTo(player_color, "Only "..tostring(vocationName).." can use this action.", {1,0.6,0.2})
+    return
+  end
+  lockCard(g, LOCK_SEC)
+  local actionIds = VE_ACTION_IDS
+  if not actionIds or type(actionIds) ~= "table" then
+    -- Fallback if VE_ACTION_IDS is not accessible
+    actionIds = {
+      SOC1 = "SW_SPECIAL_HOMELESS",   SOC2 = "SW_SPECIAL_REMOVAL",
+      CEL1 = "CELEB_SPECIAL_COLLAB",  CEL2 = "CELEB_SPECIAL_MEETUP",
+      PUB1 = "PS_SPECIAL_POLICY",     PUB2 = "PS_SPECIAL_BOTTLENECK",
+      GAN1 = "GANG_SPECIAL_ROBIN",    GAN2 = "GANG_SPECIAL_PROTECTION",
+      NGO1 = "NGO_SPECIAL_CRISIS",    NGO2 = "NGO_SPECIAL_SCANDAL",
+      ENT1 = "ENT_SPECIAL_EXPANSION", ENT2 = "ENT_SPECIAL_TRAINING",
+    }
+  end
+  local actionId = actionIds[veCode]
+  if actionId then
+    local voc = findOneByTags({TAG_VOCATIONS_CTRL})
+    if voc and voc.call then
+      if DEBUG then log("evt_veChoiceB: calling RunVocationEventCardAction with actionId="..tostring(actionId)) end
+      pcall(function() voc.call("RunVocationEventCardAction", { playerColor = pc.color, actionId = actionId }) end)
+    else
+      if DEBUG then log("evt_veChoiceB: VocationsController not found") end
+    end
+  else
+    if DEBUG then log("evt_veChoiceB: no actionId for veCode="..tostring(veCode)) end
+  end
+  -- Clear veSlotExtraCharged flag since action completed successfully
+  veSlotExtraCharged[g] = nil
+  
+  -- finishChoice might be nil due to chunking - inline the logic
+  if type(finishChoice) == "function" then
+    finishChoice(cardObj, pc)
+  else
+    pendingChoice[g] = nil
+    cardUI_clear(cardObj)
+    finalizeCard(cardObj, pc.kind, pc.color)
+  end
 end
 
 -- =========================================================
@@ -876,25 +1786,32 @@ local function rollRealDieAsync(cardObj, onDone)
   if not die then onDone(nil, "Die not found"); return end
 
   cacheDieHomeIfNeeded(die)
-  moveDieNearCard(die, cardObj)
+  -- Roll die in place, don't move it
   pcall(function() die.randomize() end)
+  pcall(function() die.roll() end)
 
-  local startT = Time.time
-  local last, stable = nil, 0
-
-  local function poll()
-    if (Time.time - startT) > DICE_ROLL_TIMEOUT then onDone(nil, "Timeout"); return end
-    local v = tryReadDieValue(die)
-
-    if v and v == last then stable = stable + 1
-    elseif v then last = v; stable = 1
-    else stable = 0 end
-
-    if stable >= DICE_STABLE_READS then onDone(last, nil); return end
-    Wait.time(poll, DICE_POLL)
-  end
-
-  Wait.time(poll, 0.18)
+  -- Use Wait.condition to wait for die.resting (like Turn Controller)
+  -- This ensures we read the final settled value, not the first value when it hits the table
+  local timeout = os.time() + 6
+  Wait.condition(
+    function()
+      -- Die is now resting - read the final value
+      local v = tryReadDieValue(die)
+      if v then
+        onDone(v, nil)
+      else
+        onDone(nil, "Failed to read die value after resting")
+      end
+    end,
+    function()
+      -- Condition: wait until die is resting (fully settled)
+      local resting = false
+      pcall(function() resting = die.resting end)
+      if resting then return true end
+      if os.time() >= timeout then return true end
+      return false
+    end
+  )
 end
 
 -- =========================================================
@@ -996,7 +1913,7 @@ mapPair("AD_64_VE-NGO2-CEL1","AD_65_VE-NGO2-CEL1","AD_VE_NGO2_CEL1")
 mapPair("AD_66_VE-SOC2-CEL1","AD_67_VE-SOC2-CEL1","AD_VE_SOC2_CEL1")
 mapPair("AD_68_VE-SOC1-PUB1","AD_69_VE-SOC1-PUB1","AD_VE_SOC1_PUB1")
 mapPair("AD_70_VE-GAN1-PUB2","AD_71_VE-GAN1-PUB2","AD_VE_GAN1_PUB2")
-mapPair("AD_72_VE-ENT1-PUB1","AD_73_VE-ENT1_PUB1","AD_VE_ENT1_PUB1") -- harmless if typo exists in your cards
+mapPair("AD_72_VE-ENT1-PUB1","AD_73_VE-ENT1-PUB1","AD_VE_ENT1_PUB1")
 mapPair("AD_74_VE-CEL2-PUB2","AD_75_VE-CEL2-PUB2","AD_VE_CEL2_PUB2")
 mapPair("AD_76_VE-CEL2-GAN2","AD_77_VE-CEL2-GAN2","AD_VE_CEL2_GAN2")
 mapPair("AD_78_VE-ENT2-GAN2","AD_79_VE-ENT2-GAN2","AD_VE_ENT2_GAN2")
@@ -1076,6 +1993,68 @@ local TYPES = {
   AD_VE_CEL2_GAN2 = { kind="instant", todo=true, ve={a="CEL2", b="GAN2"} },
   AD_VE_ENT2_GAN2 = { kind="instant", todo=true, ve={a="ENT2", b="GAN2"} },
   AD_VE_ENT2_SOC2 = { kind="instant", todo=true, ve={a="ENT2", b="SOC2"} },
+}
+
+-- Vocation Event (VE) card data
+local VE_DISPLAY_NAMES = {
+  SOC1 = "Social Worker", SOC2 = "Social Worker",
+  CEL1 = "Celebrity",     CEL2 = "Celebrity",
+  PUB1 = "Public Servant", PUB2 = "Public Servant",
+  GAN1 = "Gangster",      GAN2 = "Gangster",
+  NGO1 = "NGO Worker",    NGO2 = "NGO Worker",
+  ENT1 = "Entrepreneur",  ENT2 = "Entrepreneur",
+}
+local VE_ACTION_IDS = {
+  SOC1 = "SW_SPECIAL_HOMELESS",   SOC2 = "SW_SPECIAL_REMOVAL",
+  CEL1 = "CELEB_SPECIAL_COLLAB",  CEL2 = "CELEB_SPECIAL_MEETUP",
+  PUB1 = "PS_SPECIAL_POLICY",     PUB2 = "PS_SPECIAL_BOTTLENECK",
+  GAN1 = "GANG_SPECIAL_ROBIN",    GAN2 = "GANG_SPECIAL_PROTECTION",
+  NGO1 = "NGO_SPECIAL_CRISIS",    NGO2 = "NGO_SPECIAL_SCANDAL",
+  ENT1 = "ENT_SPECIAL_EXPANSION", ENT2 = "ENT_SPECIAL_TRAINING",
+}
+local VE_CODE_TO_VOCATION = {
+  SOC1 = "SOCIAL_WORKER", SOC2 = "SOCIAL_WORKER",
+  CEL1 = "CELEBRITY",     CEL2 = "CELEBRITY",
+  PUB1 = "PUBLIC_SERVANT", PUB2 = "PUBLIC_SERVANT",
+  GAN1 = "GANGSTER",      GAN2 = "GANGSTER",
+  NGO1 = "NGO_WORKER",    NGO2 = "NGO_WORKER",
+  ENT1 = "ENTREPRENEUR",  ENT2 = "ENTREPRENEUR",
+}
+local VE_CRIME_TABLE = {
+  AD_VE_NGO1_ENT1 = { ap = 1, [1] = "nothing", [2] = "wounded", [3] = "wounded_steal", steal = 1000 },
+  AD_VE_NGO1_GAN1 = { ap = 1, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 250, steal3 = 600 },
+  AD_VE_NGO2_SOC1 = { ap = 2, [1] = "nothing", [2] = "wounded", [3] = "wounded_steal", steal = 1000 },
+  AD_VE_NGO2_CEL1 = { ap = 2, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 800 },
+  AD_VE_ENT1_PUB1 = { ap = 1, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+  AD_VE_ENT2_GAN2 = { ap = 1, [1] = "nothing", [2] = "wounded", [3] = "wounded_steal", steal = 1000 },
+  AD_VE_ENT2_SOC2 = { ap = 2, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+  AD_VE_GAN1_PUB2 = { ap = 2, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+  AD_VE_CEL2_GAN2 = { ap = 2, [1] = "nothing", [2] = "wounded", [3] = "wounded_steal", steal = 1000 },
+  AD_VE_SOC1_PUB1 = { ap = 2, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+  AD_VE_SOC2_CEL1 = { ap = 1, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+  AD_VE_CEL2_PUB2 = { ap = 1, [1] = "nothing", [2] = "wounded_steal", [3] = "wounded_steal", steal2 = 200, steal3 = 500 },
+}
+
+-- AP costs for vocation event actions (used to calculate minimum action AP cost)
+local VE_ACTION_AP_COSTS = {
+  -- Social Worker
+  SOC1 = 2,  -- SW_SPECIAL_HOMELESS
+  SOC2 = 3,  -- SW_SPECIAL_REMOVAL
+  -- Celebrity
+  CEL1 = 2,  -- CELEB_SPECIAL_COLLAB
+  CEL2 = 2,  -- CELEB_SPECIAL_MEETUP
+  -- Public Servant
+  PUB1 = 2,  -- PS_SPECIAL_POLICY
+  PUB2 = 2,  -- PS_SPECIAL_BOTTLENECK
+  -- Gangster
+  GAN1 = 2,  -- GANG_SPECIAL_ROBIN
+  GAN2 = 3,  -- GANG_SPECIAL_PROTECTION
+  -- NGO Worker
+  NGO1 = 2,  -- NGO_SPECIAL_CRISIS
+  NGO2 = 2,  -- NGO_SPECIAL_SCANDAL
+  -- Entrepreneur
+  ENT1 = 2,  -- ENT_SPECIAL_EXPANSION
+  ENT2 = 2,  -- ENT_SPECIAL_TRAINING
 }
 
 -- =========================================================
@@ -1493,11 +2472,94 @@ local function handleSpecial(color, cardId, def, cardObj)
   end
 
   if def.todo == true and def.ve then
-    startChoiceOnCard_AB(
-      cardObj, color, def.kind or "instant", "VE_PICK_SIDE", cardId,
-      tostring(def.ve.a), tostring(def.ve.b), { ve=def.ve }
-    )
-    pcall(function() cardObj.setDescription("VE: "..tostring(def.ve.a).." OR "..tostring(def.ve.b).." (TODO)") end)
+    local ve = def.ve
+    if not ve or not ve.a or not ve.b then return nil end
+    
+    -- Check minimum AP required: slotExtra + lowest action cost
+    -- NOTE: slotExtra AP will be charged by Events Controller after engine returns successfully
+    -- We just need to check that player has enough AP, and mark that slotExtra will be charged
+    local g = cardObj.getGUID()
+    -- Read slotExtra AFTER CAR reduction (which happens earlier in playCardById)
+    local slotExtra = tonumber(slotExtraAPForCard[g]) or 0
+    
+    -- Calculate actual minimum action AP cost:
+    -- 1. Get crime AP cost from VE_CRIME_TABLE
+    local typeKey = CARD_TYPE[cardId]
+    local crimeAP = 1  -- Default fallback
+    if typeKey then
+      local crimeTable = VE_CRIME_TABLE
+      if not crimeTable or type(crimeTable) ~= "table" then
+        -- Fallback crime table
+        crimeTable = {
+          AD_VE_NGO1_ENT1 = { ap = 1 }, AD_VE_NGO1_GAN1 = { ap = 1 },
+          AD_VE_NGO2_SOC1 = { ap = 2 }, AD_VE_NGO2_CEL1 = { ap = 2 },
+          AD_VE_ENT1_PUB1 = { ap = 1 }, AD_VE_ENT2_GAN2 = { ap = 1 },
+          AD_VE_ENT2_SOC2 = { ap = 2 }, AD_VE_GAN1_PUB2 = { ap = 2 },
+          AD_VE_CEL2_GAN2 = { ap = 2 }, AD_VE_SOC1_PUB1 = { ap = 2 },
+          AD_VE_SOC2_CEL1 = { ap = 1 }, AD_VE_CEL2_PUB2 = { ap = 1 },
+        }
+      end
+      local crimeDef = crimeTable[typeKey]
+      if crimeDef and crimeDef.ap then
+        crimeAP = tonumber(crimeDef.ap) or 1
+      end
+    end
+    
+    -- 2. Get vocation action AP costs
+    local actionAPCosts = VE_ACTION_AP_COSTS
+    if not actionAPCosts or type(actionAPCosts) ~= "table" then
+      -- Fallback action AP costs
+      actionAPCosts = {
+        SOC1 = 2, SOC2 = 3, CEL1 = 2, CEL2 = 2,
+        PUB1 = 2, PUB2 = 2, GAN1 = 2, GAN2 = 3,
+        NGO1 = 2, NGO2 = 2, ENT1 = 2, ENT2 = 2,
+      }
+    end
+    local actionAAP = tonumber(actionAPCosts[ve.a]) or 999
+    local actionBAP = tonumber(actionAPCosts[ve.b]) or 999
+    
+    -- 3. Find minimum: min(crimeAP, actionAAP, actionBAP)
+    local minActionAP = math.min(crimeAP, actionAAP, actionBAP)
+    local minTotalAP = slotExtra + minActionAP
+    
+    if DEBUG then log("VE card: slotExtra="..tostring(slotExtra).." minActionAP="..tostring(minActionAP).." minTotalAP="..tostring(minTotalAP).." for card "..tostring(g)) end
+    
+    -- Pre-check: ensure player has enough AP for slotExtra + minimum action
+    -- Check even if slotExtra is 0, because there's still a minimum action cost
+    if minTotalAP > 0 then
+      local apCtrl = getApCtrl(color)
+      if apCtrl and apCtrl.call then
+        local apCostCheck = { to = "EVENT", amount = minTotalAP }
+        local okCan, can = pcall(function() return apCtrl.call("canSpendAP", apCostCheck) end)
+        if (not okCan) or (can ~= true) then
+          safeBroadcastTo(color, "⛔ Not enough AP. Need "..tostring(minTotalAP).." AP (slot cost: "..tostring(slotExtra).." + action: "..tostring(minActionAP)..").", {1,0.6,0.2})
+          -- Clear veSlotExtraCharged if it was set, since we're blocking
+          veSlotExtraCharged[g] = nil
+          return STATUS.BLOCKED
+        end
+      end
+    end
+    
+    -- Mark that slotExtra AP will be charged by Events Controller (for refund on cancel)
+    -- Events Controller charges slotExtra AP after engine returns STATUS.WAIT_CHOICE
+    -- Store the adjusted slotExtra value that Events Controller will charge
+    if slotExtra > 0 then
+      veSlotExtraCharged[g] = slotExtra  -- Store the actual amount that will be charged (for accurate refund)
+      if DEBUG then log("VE card: marked slotExtra AP="..tostring(slotExtra).." will be charged by Events Controller for card "..tostring(g)) end
+    end
+    
+    local labelA = VE_DISPLAY_NAMES[ve.a] or ve.a
+    local labelB = VE_DISPLAY_NAMES[ve.b] or ve.b
+    pendingChoice[g] = { color = color, kind = def.kind or "instant", choiceKey = "VE_PICK_SIDE", cardId = cardId, meta = { ve = ve } }
+    lockCard(g, LOCK_SEC)
+    cardUI_clear(cardObj)
+    cardUI_title(cardObj, "VOCATION EVENT")
+    -- Four corners: top-left Crime, top-right Cancel, bottom-left vocation A, bottom-right vocation B
+    cardUI_btnAt(cardObj, "Crime", "evt_veCrime", -0.6, 0.65, -0.6)
+    cardUI_btnAt(cardObj, "Cancel", "evt_cancelPending", 0.6, 0.65, -0.6)
+    cardUI_btnAt(cardObj, labelA, "evt_veChoiceA", -0.6, 0.15, 0.6)
+    cardUI_btnAt(cardObj, labelB, "evt_veChoiceB", 0.6, 0.15, 0.6)
+    safeBroadcastTo(color, "Choose: Crime, Cancel, or a vocation action.", {1,1,0.9})
     return STATUS.WAIT_CHOICE
   end
 
@@ -1676,8 +2738,6 @@ function evt_choiceA(cardObj, player_color, alt_click)
   lockCard(g, LOCK_SEC)
 
   if pc.choiceKey == "VE_PICK_SIDE" then
-    safeBroadcastTo(pc.color, "VE: wybrano A (TODO).", {0.7,0.9,1})
-    finishChoice(cardObj, pc)
     return
   end
 
@@ -1722,8 +2782,6 @@ function evt_choiceB(cardObj, player_color, alt_click)
   lockCard(g, LOCK_SEC)
 
   if pc.choiceKey == "VE_PICK_SIDE" then
-    safeBroadcastTo(pc.color, "VE: wybrano B (TODO).", {0.7,0.9,1})
-    finishChoice(cardObj, pc)
     return
   end
 
@@ -1984,10 +3042,11 @@ local function playCardById(cardId, cardObj, explicitSlotIdx)
     PS_AddStatus(color, def.statusAddTag)
   end
 
-  -- SPECIAL
-  if def.special then
+  -- SPECIAL (and Vocation Event cards: def.ve triggers 4-button choice)
+  if def.special or (def.todo and def.ve) then
     local s = handleSpecial(color, cardId, def, cardObj)
     if s == STATUS.WAIT_CHOICE then return STATUS.WAIT_CHOICE end
+    if s == STATUS.BLOCKED then return STATUS.BLOCKED end
   end
 
   -- DICE
@@ -2078,6 +3137,218 @@ function getAdjustedSlotExtraAP(args)
   local cardGuid = args.card_guid
   if not cardGuid then return 0 end
   return tonumber(slotExtraAPForCard[cardGuid]) or 0
+end
+
+-- Called by VocationsController when canceling VE crime target selection
+-- Refunds both slotExtra AP and crime action AP, and makes card interactable again
+function CancelVECrimeTargetSelection(args)
+  args = args or {}
+  local cardGuid = args.card_guid or args.cardGuid
+  if not cardGuid then
+    log("CancelVECrimeTargetSelection: missing cardGuid")
+    return false
+  end
+  
+  local g = cardGuid
+  local data = pendingVECrime[g]
+  if not data then
+    log("CancelVECrimeTargetSelection: no pendingVECrime for "..tostring(g))
+    return false
+  end
+  
+  local color = data.color
+  
+  log("CancelVECrimeTargetSelection: Starting refund for card "..tostring(g).." color="..tostring(color))
+  
+  -- Refund slotExtra AP if it was charged
+  -- Get slotExtra from veSlotExtraCharged[g] (stored when VE UI was shown)
+  -- OR from slotExtraAPForCard[g] as fallback (in case veSlotExtraCharged was cleared)
+  local slotExtra = 0
+  if veSlotExtraCharged[g] then
+    slotExtra = tonumber(veSlotExtraCharged[g]) or 0
+    log("CancelVECrimeTargetSelection: slotExtra from veSlotExtraCharged="..tostring(slotExtra))
+  else
+    -- Fallback: read from slotExtraAPForCard (should be the same value)
+    slotExtra = tonumber(slotExtraAPForCard[g]) or 0
+    log("CancelVECrimeTargetSelection: slotExtra from slotExtraAPForCard="..tostring(slotExtra))
+  end
+  
+  -- Use a shared table to track refunds across async callbacks
+  local refundTracker = { slotExtra = 0, crime = 0 }
+  
+  -- Refund slotExtra AP - refund one AP at a time using sequential Wait.time callbacks
+  if slotExtra > 0 then
+    local apCtrl = getApCtrl(color)
+    if apCtrl and apCtrl.call then
+      log("CancelVECrimeTargetSelection: Attempting to refund slotExtra AP="..tostring(slotExtra).." (one at a time, sequential)")
+      -- Use sequential Wait.time callbacks to ensure each refund completes before the next
+      -- Use longer delay (0.4s) to ensure each token fully settles before next one moves
+      for i = 1, slotExtra do
+        Wait.time(function()
+          if apCtrl and apCtrl.call then
+            local okRefund, result = pcall(function() 
+              return apCtrl.call("moveAP", { to = "E", amount = -1 })
+            end)
+            if okRefund and result and type(result) == "table" and result.ok == true then
+              local moved = tonumber(result.moved or 0) or 0
+              if moved > 0 then
+                refundTracker.slotExtra = refundTracker.slotExtra + moved
+                log("CancelVECrimeTargetSelection: Refunded slotExtra AP chunk "..tostring(i)..": moved="..tostring(moved))
+              else
+                log("CancelVECrimeTargetSelection: WARNING slotExtra refund chunk "..tostring(i).." succeeded but moved=0")
+              end
+            else
+              log("CancelVECrimeTargetSelection: FAILED slotExtra refund chunk "..tostring(i).." okRefund="..tostring(okRefund).." result="..tostring(result))
+            end
+            -- Log total after last refund
+            if i == slotExtra then
+              log("CancelVECrimeTargetSelection: Total slotExtra refunded="..tostring(refundTracker.slotExtra).." (requested "..tostring(slotExtra)..")")
+            end
+          end
+        end, 0.4 * i) -- Increased delay to 0.4s per token to ensure full settlement
+      end
+    else
+      log("CancelVECrimeTargetSelection: FAILED no apCtrl for color="..tostring(color))
+    end
+    -- Don't clear veSlotExtraCharged until refunds complete - cleared in final callback
+  else
+    log("CancelVECrimeTargetSelection: slotExtra is 0, skipping refund")
+  end
+  
+  -- Refund crime action AP - refund one AP at a time using sequential Wait.time callbacks
+  local crimeAP = data.crimeAP or 0
+  log("CancelVECrimeTargetSelection: crimeAP="..tostring(crimeAP))
+  if crimeAP > 0 then
+    local apCtrl = getApCtrl(color)
+    if apCtrl and apCtrl.call then
+      log("CancelVECrimeTargetSelection: Attempting to refund crime AP="..tostring(crimeAP).." (one at a time, sequential)")
+      -- Start crime AP refunds after slotExtra refunds complete
+      -- Use longer delay (0.4s) to ensure each token fully settles before next one moves
+      local startDelay = 0.4 * (slotExtra + 1)
+      for i = 1, crimeAP do
+        Wait.time(function()
+          if apCtrl and apCtrl.call then
+            local okRefund, result = pcall(function() 
+              return apCtrl.call("moveAP", { to = "E", amount = -1 })
+            end)
+            if okRefund and result and type(result) == "table" and result.ok == true then
+              local moved = tonumber(result.moved or 0) or 0
+              if moved > 0 then
+                refundTracker.crime = refundTracker.crime + moved
+                log("CancelVECrimeTargetSelection: Refunded crime AP chunk "..tostring(i)..": moved="..tostring(moved))
+              else
+                log("CancelVECrimeTargetSelection: WARNING crime refund chunk "..tostring(i).." succeeded but moved=0")
+              end
+            else
+              log("CancelVECrimeTargetSelection: FAILED crime refund chunk "..tostring(i).." okRefund="..tostring(okRefund).." result="..tostring(result))
+            end
+            -- Log total and send message after last refund
+            if i == crimeAP then
+              log("CancelVECrimeTargetSelection: Total crime AP refunded="..tostring(refundTracker.crime).." (requested "..tostring(crimeAP)..")")
+              local totalRefunded = refundTracker.slotExtra + refundTracker.crime
+              log("CancelVECrimeTargetSelection: Total refunded="..tostring(totalRefunded))
+              -- Add small delay to let tokens settle before clearing state
+              Wait.time(function()
+                -- Clear state after all refunds complete and tokens settle
+                veSlotExtraCharged[g] = nil -- Clear after all refunds complete
+                pendingVECrime[g] = nil
+                pendingChoice[g] = nil
+                -- Clear card UI
+                local cardObj = data.cardObj
+                if cardObj then
+                  cardUI_clear(cardObj)
+                end
+                -- Make card interactable again
+                if lockUntil then lockUntil[g] = nil end
+                clearDebounce(g)
+                -- Notify Events Controller
+                pcall(function()
+                  local ctrl = getObjectFromGUID(EVENTS_CONTROLLER_GUID)
+                  if ctrl and ctrl.call then
+                    ctrl.call("onCardCancelled", { card_guid = g })
+                  end
+                end)
+                -- Broadcast refund message
+                if totalRefunded > 0 then
+                  safeBroadcastTo(color, "Cancelled crime. Refunded "..tostring(totalRefunded).." AP.", {0.7,1,0.7})
+                else
+                  safeBroadcastTo(color, "Cancelled crime. (No AP refunded - check logs)", {1,0.6,0.2})
+                end
+                log("CancelVECrimeTargetSelection: cancelled VE crime for card "..tostring(g)..", refunded "..tostring(totalRefunded).." AP")
+              end, 0.2) -- Small delay to let tokens settle
+            end
+          end
+        end, startDelay + 0.4 * i) -- Increased delay to 0.4s per token to ensure full settlement
+      end
+    else
+      log("CancelVECrimeTargetSelection: FAILED no apCtrl for color="..tostring(color))
+      -- Clear state immediately if no AP controller
+      pendingVECrime[g] = nil
+      pendingChoice[g] = nil
+      local cardObj = data.cardObj
+      if cardObj then cardUI_clear(cardObj) end
+      if lockUntil then lockUntil[g] = nil end
+      clearDebounce(g)
+      pcall(function()
+        local ctrl = getObjectFromGUID(EVENTS_CONTROLLER_GUID)
+        if ctrl and ctrl.call then
+          ctrl.call("onCardCancelled", { card_guid = g })
+        end
+      end)
+    end
+  else
+    log("CancelVECrimeTargetSelection: crimeAP is 0, skipping refund")
+    -- If no crime AP to refund, send message after slotExtra refunds complete
+    if slotExtra > 0 then
+      -- Wait for all slotExtra refunds to complete, then add delay for tokens to settle
+      Wait.time(function()
+        local totalRefunded = refundTracker.slotExtra
+        log("CancelVECrimeTargetSelection: Total refunded="..tostring(totalRefunded))
+          -- Add small delay to let tokens settle before clearing state
+          Wait.time(function()
+            -- Clear state after all refunds complete and tokens settle
+            veSlotExtraCharged[g] = nil -- Clear after all refunds complete
+            pendingVECrime[g] = nil
+            pendingChoice[g] = nil
+            local cardObj = data.cardObj
+            if cardObj then cardUI_clear(cardObj) end
+            if lockUntil then lockUntil[g] = nil end
+            clearDebounce(g)
+            -- Notify Events Controller
+            pcall(function()
+              local ctrl = getObjectFromGUID(EVENTS_CONTROLLER_GUID)
+              if ctrl and ctrl.call then
+                ctrl.call("onCardCancelled", { card_guid = g })
+              end
+            end)
+            -- Broadcast refund message
+            if totalRefunded > 0 then
+              safeBroadcastTo(color, "Cancelled crime. Refunded "..tostring(totalRefunded).." AP.", {0.7,1,0.7})
+            else
+              safeBroadcastTo(color, "Cancelled crime. (No AP refunded - check logs)", {1,0.6,0.2})
+            end
+            log("CancelVECrimeTargetSelection: cancelled VE crime for card "..tostring(g)..", refunded "..tostring(totalRefunded).." AP")
+          end, 0.2) -- Small delay to let tokens settle
+        end, 0.4 * (slotExtra + 1)) -- Increased delay to match refund timing
+    else
+      -- No refunds needed, clear state immediately
+      pendingVECrime[g] = nil
+      pendingChoice[g] = nil
+      local cardObj = data.cardObj
+      if cardObj then cardUI_clear(cardObj) end
+      if lockUntil then lockUntil[g] = nil end
+      clearDebounce(g)
+      pcall(function()
+        local ctrl = getObjectFromGUID(EVENTS_CONTROLLER_GUID)
+        if ctrl and ctrl.call then
+          ctrl.call("onCardCancelled", { card_guid = g })
+        end
+      end)
+      safeBroadcastTo(color, "Cancelled crime. (No AP to refund)", {0.7,1,0.7})
+    end
+  end
+  
+  return true
 end
 
 function isObligatoryCard(args)

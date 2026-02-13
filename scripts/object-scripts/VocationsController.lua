@@ -18,6 +18,10 @@ local TAG_TURN_CTRL = "WLB_TURN_CTRL"
 local TAG_STATS_CTRL = "WLB_STATS_CTRL"
 local TAG_AP_CTRL = "WLB_AP_CTRL"
 local TAG_MONEY = "WLB_MONEY"
+local TAG_PLAYER_STATUS_CTRL = "WLB_PLAYER_STATUS_CTRL"
+
+-- Die GUID (same as TurnController)
+local DIE_GUID = "14d4a4"
 
 local COLORS = {"Yellow", "Blue", "Red", "Green"}
 
@@ -579,6 +583,10 @@ local function getApUnspentCount(color)
 end
 
 local function canSpendAP(color, amount)
+  -- Bypass AP checks if White is testing or if color is White
+  if color == "White" then return true end
+  if uiState and uiState.testingBypassActive then return true end
+  
   local ap = findApCtrlForColor(color)
   if not ap or not ap.call then
     warn("AP controller not found for "..tostring(color))
@@ -593,6 +601,17 @@ end
 local function spendAP(color, amount, reason)
   amount = tonumber(amount) or 0
   if amount <= 0 then return true end
+  
+  -- Bypass AP spending if White is testing or if color is White
+  if color == "White" then 
+    log("spendAP: Bypassing AP spend for White (testing mode)")
+    return true 
+  end
+  if uiState and uiState.testingBypassActive then 
+    log("spendAP: Bypassing AP spend for "..tostring(color).." (testing bypass active)")
+    return true 
+  end
+  
   local ap = findApCtrlForColor(color)
   if not ap or not ap.call then
     warn("AP controller not found for "..tostring(color))
@@ -630,6 +649,12 @@ end
 local function satAdd(color, amount)
   amount = tonumber(amount) or 0
   if amount == 0 then return true end
+  
+  -- White doesn't have SAT token - skip
+  if color == "White" then
+    log("satAdd: Skipping White (testing mode, no SAT token)")
+    return true
+  end
 
   local satObj = getSatToken(color)
   if not satObj then
@@ -711,6 +736,318 @@ local function findStatsController(color)
   return nil
 end
 
+local function findPlayerStatusController()
+  local list = getObjectsWithTag(TAG_PLAYER_STATUS_CTRL) or {}
+  for _, o in ipairs(list) do
+    if o and o.call then
+      return o
+    end
+  end
+  return nil
+end
+
+-- Check if player has at least one child
+local function hasChildren(color)
+  color = normalizeColor(color)
+  if not color then return false end
+  
+  local psc = findPlayerStatusController()
+  if not psc or not psc.call then return false end
+  
+  local ok, childAP = pcall(function()
+    return psc.call("PS_GetChildBlockedAP", {color=color})
+  end)
+  
+  if ok and type(childAP) == "number" then
+    -- Each child blocks 2 AP, so if childAP >= 2, player has at least 1 child
+    return childAP >= 2
+  end
+  
+  return false
+end
+
+-- Add WOUNDED status to a player
+local function addWoundedStatus(color)
+  color = normalizeColor(color)
+  if not color then return false end
+  
+  -- White doesn't get status tokens
+  if color == "White" then
+    log("addWoundedStatus: Skipping White (testing mode)")
+    return true
+  end
+  
+  local psc = findPlayerStatusController()
+  if not psc or not psc.call then
+    warn("Player Status Controller not found when adding WOUNDED status")
+    return false
+  end
+  
+  local ok = pcall(function()
+    return psc.call("PS_Event", {op="ADD_STATUS", color=color, statusKey="WOUNDED"})
+  end)
+  
+  if not ok then
+    warn("Failed to add WOUNDED status to "..tostring(color))
+  end
+  
+  return ok
+end
+
+-- Steal money from target player
+local function stealMoney(fromColor, toColor, amount)
+  amount = tonumber(amount) or 0
+  if amount <= 0 then return true end
+  
+  fromColor = normalizeColor(fromColor)
+  toColor = normalizeColor(toColor)
+  if not fromColor or not toColor then return false end
+  
+  -- Get current money from target
+  local targetMoney = getMoney(fromColor)
+  local amountToSteal = math.min(amount, targetMoney)
+  
+  if amountToSteal > 0 then
+    -- Deduct from target
+    if moneySpend(fromColor, amountToSteal) then
+      -- Add to thief
+      moneyAdd(toColor, amountToSteal)
+      log("stealMoney: "..tostring(toColor).." stole "..amountToSteal.." VIN from "..tostring(fromColor))
+      return true, amountToSteal
+    end
+  end
+  
+  return false, 0
+end
+
+-- Stats helpers (mirror YouthBoard: applyDelta on Stats controller)
+local function addKnowledge(color, n)
+  n = tonumber(n) or 0
+  if n == 0 then return true end
+  
+  -- White doesn't have Stats controller - skip
+  if color == "White" then
+    log("addKnowledge: Skipping White (testing mode, no Stats controller)")
+    return true
+  end
+  
+  local stats = findStatsController(color)
+  if not stats or not stats.call then
+    warn("Stats controller not found for "..tostring(color).." when adding Knowledge")
+    return false
+  end
+  local ok, err = pcall(function()
+    return stats.call("applyDelta", { k = n })
+  end)
+  if not ok then
+    warn("Stats applyDelta(k="..tostring(n)..") failed for "..tostring(color)..": "..tostring(err))
+  end
+  return ok
+end
+
+local function addSkills(color, n)
+  n = tonumber(n) or 0
+  if n == 0 then return true end
+  
+  -- White doesn't have Stats controller - skip
+  if color == "White" then
+    log("addSkills: Skipping White (testing mode, no Stats controller)")
+    return true
+  end
+  
+  local stats = findStatsController(color)
+  if not stats or not stats.call then
+    warn("Stats controller not found for "..tostring(color).." when adding Skills")
+    return false
+  end
+  local ok, err = pcall(function()
+    return stats.call("applyDelta", { s = n })
+  end)
+  if not ok then
+    warn("Stats applyDelta(s="..tostring(n)..") failed for "..tostring(color)..": "..tostring(err))
+  end
+  return ok
+end
+
+local function addHealth(color, n)
+  n = tonumber(n) or 0
+  if n == 0 then return true end
+  
+  -- White doesn't have Stats controller - skip
+  if color == "White" then
+    log("addHealth: Skipping White (testing mode, no Stats controller)")
+    return true
+  end
+  
+  local stats = findStatsController(color)
+  if not stats or not stats.call then
+    warn("Stats controller not found for "..tostring(color).." when adding Health")
+    return false
+  end
+  local ok, err = pcall(function()
+    return stats.call("applyDelta", { h = n })
+  end)
+  if not ok then
+    warn("Stats applyDelta(h="..tostring(n)..") failed for "..tostring(color)..": "..tostring(err))
+  end
+  return ok
+end
+
+-- Money helpers (mirror EventEngine/ShopEngine: resolveMoney + moneyAdd/moneySpend)
+local function resolveMoney(color)
+  color = normalizeColor(color)
+  if not color then return nil end
+  
+  -- Prefer player board with embedded money API (PlayerBoardController_Shared)
+  local board = findPlayerBoard(color)
+  if board and board.call then
+    local ok = pcall(function() return board.call("getMoney") end)
+    if ok then return board end
+  end
+  
+  -- Fallback: legacy money tile
+  local list = getObjectsWithTag(colorTag(color)) or {}
+  for _, o in ipairs(list) do
+    if o and o.hasTag and o.hasTag(TAG_MONEY) then
+      return o
+    end
+  end
+  
+  return nil
+end
+
+-- Forward declaration for getMoney (defined later, but used by moneySpend)
+local getMoney
+
+local function moneyAdd(color, amount)
+  amount = tonumber(amount) or 0
+  if amount == 0 then return true end
+  
+  -- White doesn't have money controller - skip
+  if color == "White" then
+    log("moneyAdd: Skipping White (testing mode, no money controller)")
+    return true
+  end
+  
+  local m = resolveMoney(color)
+  if not m or not m.call then
+    warn("Money controller not found for "..tostring(color))
+    safeBroadcastToColor("⚠️ No MoneyCtrl — cannot adjust "..amount.." VIN.", color, {1,0.7,0.2})
+    return false
+  end
+  
+  local ok = pcall(function() m.call("addMoney", { amount = amount }) end)
+  if ok then return true end
+  
+  ok = pcall(function() m.call("addMoney", { delta = amount }) end)
+  if not ok then
+    warn("Money addMoney failed for "..tostring(color).." amount="..tostring(amount))
+  end
+  return ok
+end
+
+local function moneySpend(color, amount)
+  amount = tonumber(amount) or 0
+  if amount <= 0 then return true end
+  
+  -- White bypasses money checks for testing
+  if color == "White" then return true end
+  
+  local m = resolveMoney(color)
+  if not m or not m.call then
+    warn("Money controller not found for "..tostring(color))
+    safeBroadcastToColor("⚠️ No MoneyCtrl — cannot spend "..amount.." VIN.", color, {1,0.7,0.2})
+    return false
+  end
+  
+  -- Get current money first
+  local currentMoney = getMoney(color)
+  
+  -- Determine how much to actually spend (can't spend more than they have)
+  local amountToSpend = math.min(amount, currentMoney)
+  
+  -- If they don't have enough, we'll spend what they have (down to 0)
+  if currentMoney < amount and currentMoney > 0 then
+    -- Try API_spend first for the amount they have
+    local ok, ret = pcall(function() return m.call("API_spend", { amount = amountToSpend }) end)
+    if ok and type(ret) == "table" and type(ret.ok) == "boolean" and ret.ok then
+      safeBroadcastToColor("⛔ Not enough money (need "..amount.." VIN, had "..currentMoney.." VIN). Paid "..amountToSpend.." VIN (now 0).", color, {1,0.6,0.2})
+      return true
+    end
+    
+    -- Fallback: try direct addMoney with negative
+    ok = pcall(function() m.call("addMoney", { amount = -amountToSpend }) end)
+    if ok then
+      safeBroadcastToColor("⛔ Not enough money (need "..amount.." VIN, had "..currentMoney.." VIN). Paid "..amountToSpend.." VIN (now 0).", color, {1,0.6,0.2})
+      return true
+    end
+    ok = pcall(function() m.call("addMoney", { delta = -amountToSpend }) end)
+    if ok then
+      safeBroadcastToColor("⛔ Not enough money (need "..amount.." VIN, had "..currentMoney.." VIN). Paid "..amountToSpend.." VIN (now 0).", color, {1,0.6,0.2})
+      return true
+    end
+    return false
+  end
+  
+  -- They have enough money - try API_spend first (safe spending with fund check)
+  local ok, ret = pcall(function() return m.call("API_spend", { amount = amount }) end)
+  if ok and type(ret) == "table" and type(ret.ok) == "boolean" then
+    if ret.ok then return true end
+    -- API_spend failed but they should have enough - try spending what they have
+    local actualMoney = ret.money or getMoney(color)
+    if actualMoney > 0 then
+      local spendOk, spendRet = pcall(function() return m.call("API_spend", { amount = actualMoney }) end)
+      if spendOk and type(spendRet) == "table" and spendRet.ok then
+        safeBroadcastToColor("⛔ Not enough money (need "..amount.." VIN, had "..actualMoney.." VIN). Paid "..actualMoney.." VIN (now 0).", color, {1,0.6,0.2})
+        return true
+      end
+      -- Fallback: direct addMoney
+      spendOk = pcall(function() m.call("addMoney", { amount = -actualMoney }) end)
+      if spendOk then
+        safeBroadcastToColor("⛔ Not enough money (need "..amount.." VIN, had "..actualMoney.." VIN). Paid "..actualMoney.." VIN (now 0).", color, {1,0.6,0.2})
+        return true
+      end
+      spendOk = pcall(function() m.call("addMoney", { delta = -actualMoney }) end)
+      if spendOk then
+        safeBroadcastToColor("⛔ Not enough money (need "..amount.." VIN, had "..actualMoney.." VIN). Paid "..actualMoney.." VIN (now 0).", color, {1,0.6,0.2})
+        return true
+      end
+    end
+    safeBroadcastToColor("⛔ Not enough money (need "..amount.." VIN, have "..(actualMoney or 0)..").", color, {1,0.6,0.2})
+    return false
+  end
+  
+  -- Fallback: direct addMoney with negative
+  ok = pcall(function() m.call("addMoney", { amount = -amount }) end)
+  if ok then return true end
+  
+  ok = pcall(function() m.call("addMoney", { delta = -amount }) end)
+  if not ok then
+    warn("Money spend failed for "..tostring(color).." amount="..tostring(amount))
+  end
+  return ok
+end
+
+-- Definition for getMoney (forward declared earlier)
+getMoney = function(color)
+  local m = resolveMoney(color)
+  if not m or not m.call then return 0 end
+  
+  local ok, v = pcall(function() return m.call("getMoney") end)
+  if ok and type(v) == "number" then return v end
+  
+  ok, v = pcall(function() return m.call("getValue") end)
+  if ok and type(v) == "number" then return v end
+  
+  ok, v = pcall(function() return m.call("getAmount") end)
+  if ok and type(v) == "number" then return v end
+  
+  ok, v = pcall(function() return m.call("getState") end)
+  if ok and type(v) == "table" and type(v.money) == "number" then return v.money end
+  
+  return 0
+end
+
 -- Year/Round token: used for Time (experience in rounds) for promotion
 local YEAR_TOKEN_TAG = "WLB_YEAR"
 local function findYearToken()
@@ -788,6 +1125,7 @@ local interaction = {
   targets = {},    -- [color] = true if should respond
   joinCostAP = 0,
   timer = 0,
+  customData = nil, -- Custom data for multi-stage interactions
 }
 
 local function updateInteractionTimerText()
@@ -807,10 +1145,212 @@ local function clearInteraction()
   interaction.targets = {}
   interaction.joinCostAP = 0
   interaction.timer = 0
+  interaction.customData = nil  -- Clear custom data
   if UI then
     UI.setAttribute("interactionOverlay", "active", "false")
   end
   updateInteractionTimerText()
+end
+
+-- =========================================================
+-- TARGET PLAYER SELECTION SYSTEM
+-- =========================================================
+
+local targetSelection = {
+  active = false,
+  initiator = nil,  -- Who is selecting the target
+  actionId = nil,  -- Which action requires a target
+  callback = nil,  -- Function to call with selected target (can be function or string function name)
+  callbackParams = nil,  -- Additional params to pass to callback
+  requireChildren = false,  -- If true, only show players with children
+}
+
+local function clearTargetSelection()
+  targetSelection.active = false
+  targetSelection.initiator = nil
+  targetSelection.actionId = nil
+  targetSelection.callback = nil
+  targetSelection.callbackParams = nil
+  targetSelection.requireChildren = false
+end
+
+-- Forward declarations (defined later, but needed here)
+local isPlayableColor
+local handleInteractionResponse
+
+local function startTargetSelection(params)
+  -- params: initiator, actionId, callback, requireChildren, title, subtitle
+  if not UI then return false end
+  
+  local initiator = normalizeColor(params.initiator)
+  if not initiator then return false end
+  
+  clearTargetSelection()
+  targetSelection.active = true
+  targetSelection.initiator = initiator
+  targetSelection.actionId = params.actionId
+  targetSelection.callback = params.callback
+  targetSelection.callbackParams = params.callbackParams
+  targetSelection.requireChildren = params.requireChildren or false
+  
+  log("startTargetSelection: callback="..tostring(targetSelection.callback).." callbackParams="..tostring(targetSelection.callbackParams and targetSelection.callbackParams.cardGuid or "nil"))
+  
+  -- Set title and subtitle
+  UI.setAttribute("targetSelectionTitle", "text", params.title or "SELECT TARGET PLAYER")
+  UI.setAttribute("targetSelectionSubtitle", "text", params.subtitle or "Choose which player to target:")
+  
+  -- Show/hide buttons based on valid targets
+  for _, c in ipairs(COLORS) do
+    local btnId = "btnTarget"..c
+    local isValid = true
+    local reason = ""
+    
+    -- Can't target self
+    if c == initiator then
+      isValid = false
+      reason = "self"
+    end
+    
+    -- Check if target is a playable color
+    if isValid and not isPlayableColor(c) then
+      isValid = false
+      reason = "not playable"
+    end
+    
+    -- Check if children are required
+    if isValid and targetSelection.requireChildren and not hasChildren(c) then
+      isValid = false
+      reason = "no children"
+    end
+    
+    if isValid then
+      UI.setAttribute(btnId, "active", "true")
+      UI.setAttribute(btnId, "interactable", "true")
+      log("startTargetSelection: showing button for "..c.." (initiator="..tostring(initiator)..")")
+    else
+      UI.setAttribute(btnId, "active", "false")
+      log("startTargetSelection: hiding button for "..c.." - reason: "..reason)
+    end
+  end
+  
+  UI.setAttribute("targetSelectionOverlay", "active", "true")
+  return true
+end
+
+-- Make hideTargetSelection global so it can be called from Global_Script_Complete.lua
+-- isCancel: if true, this is a cancellation (should refund AP). If false/nil, target was selected (don't refund)
+function hideTargetSelection(isCancel)
+  -- Check if this is a VE crime cancellation (actionId is "VE_CRIME")
+  -- Only refund if isCancel is true AND there's no callback (meaning it was actually canceled, not a target selection)
+  local wasVECrime = (targetSelection.actionId == "VE_CRIME")
+  local cardGuid = nil
+  if wasVECrime and targetSelection.callbackParams then
+    cardGuid = targetSelection.callbackParams.cardGuid
+  end
+  
+  if UI then
+    UI.setAttribute("targetSelectionOverlay", "active", "false")
+    -- Reset all target buttons to inactive state
+    for _, c in ipairs(COLORS) do
+      local btnId = "btnTarget"..c
+      UI.setAttribute(btnId, "active", "false")
+      UI.setAttribute(btnId, "interactable", "false")
+    end
+  end
+  
+  -- Only refund if this is actually a cancellation (isCancel is true) and it's VE crime
+  -- If a target was selected, handleTargetSelection will call hideTargetSelection with isCancel=false/nil
+  -- and then execute the callback, so we should NOT refund
+  if wasVECrime and cardGuid and isCancel == true then
+    local engine = getObjectFromGUID("7b92b3")
+    if engine and engine.call then
+      log("hideTargetSelection: VE crime cancelled, notifying Event Engine to refund AP for cardGuid="..tostring(cardGuid))
+      pcall(function()
+        engine.call("CancelVECrimeTargetSelection", { card_guid = cardGuid })
+      end)
+    end
+  end
+  
+  clearTargetSelection()
+end
+
+-- Make handleTargetSelection global so it can be called from Global_Script_Complete.lua
+function handleTargetSelection(targetColor)
+  if not targetSelection.active then return end
+  if not targetSelection.callback then return end
+  
+  targetColor = normalizeColor(targetColor)
+  if not targetColor then return end
+  
+  -- Validate target
+  if targetColor == targetSelection.initiator then
+    safeBroadcastToColor("You cannot target yourself.", targetSelection.initiator, {1,0.6,0.2})
+    return
+  end
+  
+  if targetSelection.requireChildren and not hasChildren(targetColor) then
+    safeBroadcastToColor(targetColor.." does not have any children.", targetSelection.initiator, {1,0.6,0.2})
+    return
+  end
+  
+  -- Store callback info BEFORE hiding UI (hideTargetSelection clears targetSelection)
+  local callback = targetSelection.callback
+  local callbackParams = targetSelection.callbackParams
+  
+  -- Hide UI (this clears targetSelection, so we must save callback first)
+  -- Pass false to indicate this is NOT a cancel - a target was selected
+  hideTargetSelection(false)
+  
+  -- Execute callback with selected target
+  if callback then
+    if type(callback) == "function" then
+      callback(targetColor)
+    elseif type(callback) == "string" then
+      -- Callback is a function name - call it on Event Engine
+      local engine = getObjectFromGUID("7b92b3")
+      if engine and engine.call then
+        local params = callbackParams or {}
+        params.targetColor = targetColor
+        log("handleTargetSelection: calling Event Engine function '"..callback.."' with params: cardGuid="..tostring(params.cardGuid).." targetColor="..tostring(targetColor))
+        local ok, result = pcall(function() return engine.call(callback, params) end)
+        if not ok then
+          log("handleTargetSelection: ERROR calling Event Engine - "..tostring(result))
+        else
+          log("handleTargetSelection: Event Engine call successful")
+        end
+      else
+        log("handleTargetSelection: Event Engine not found or no call method")
+      end
+    end
+  else
+    log("handleTargetSelection: no callback set (callback was nil)")
+  end
+end
+
+-- Called by Event Engine to start VE crime target selection
+function StartVECrimeTargetSelection(params)
+  if not params or not params.initiator or not params.cardGuid then 
+    log("StartVECrimeTargetSelection: missing params - initiator="..tostring(params and params.initiator).." cardGuid="..tostring(params and params.cardGuid))
+    return false 
+  end
+  local engine = getObjectFromGUID("7b92b3")
+  if not engine then 
+    log("StartVECrimeTargetSelection: Event Engine not found")
+    return false 
+  end
+  
+  log("StartVECrimeTargetSelection: calling startTargetSelection with callback='VECrimeTargetSelected' cardGuid="..tostring(params.cardGuid))
+  local result = startTargetSelection({
+    initiator = params.initiator,
+    actionId = "VE_CRIME",
+    title = "SELECT TARGET FOR CRIME",
+    subtitle = "Choose a player to commit crime against:",
+    requireChildren = false,
+    callback = "VECrimeTargetSelected",
+    callbackParams = { cardGuid = params.cardGuid }
+  })
+  log("StartVECrimeTargetSelection: startTargetSelection returned "..tostring(result))
+  return result
 end
 
 local function updateInteractionStatusText()
@@ -834,7 +1374,8 @@ local function updateInteractionStatusText()
   UI.setAttribute("interactionStatus", "text", text)
 end
 
-local function isPlayableColor(c)
+-- Define isPlayableColor (forward-declared earlier for use in startTargetSelection)
+isPlayableColor = function(c)
   c = normalizeColor(c)
   if not c then return false end
 
@@ -932,14 +1473,19 @@ local function tickInteractionTimer(expectedId)
 end
 
 local function startInteraction(params)
-  -- params: id, initiator, title, subtitle, joinCostText, effectText, joinCostAP, duration
+  -- params: id, initiator, title, subtitle, joinCostText, effectText, joinCostAP, duration, onlyTargets, customData
   if not UI then
     log("startInteraction: UI is nil")
     return
   end
 
   local initiator = normalizeColor(params.initiator)
-  if not initiator then return end
+  if not initiator then 
+    warn("startInteraction: Invalid initiator="..tostring(params.initiator))
+    return 
+  end
+  
+  log("startInteraction: initiator="..tostring(initiator)..", id="..tostring(params.id))
 
   clearInteraction()
   interaction.active = true
@@ -949,10 +1495,23 @@ local function startInteraction(params)
   interaction.responses = {}
   interaction.targets = {}
   interaction.timer = tonumber(params.duration or 30) or 30
+  interaction.customData = params.customData  -- Store custom data for later use
 
-  for _, c in ipairs(COLORS) do
-    if c ~= initiator and isPlayableColor(c) then
-      interaction.targets[c] = true
+  -- If onlyTargets is provided, use only those players
+  if params.onlyTargets and type(params.onlyTargets) == "table" then
+    for _, c in ipairs(params.onlyTargets) do
+      local nc = normalizeColor(c)
+      if nc and nc ~= "White" and isPlayableColor(nc) then
+        interaction.targets[nc] = true
+      end
+    end
+  else
+    -- Default: all players except initiator and White
+    for _, c in ipairs(COLORS) do
+      -- Skip White (testing/spectator) and the initiator
+      if c ~= initiator and c ~= "White" and isPlayableColor(c) then
+        interaction.targets[c] = true
+      end
     end
   end
 
@@ -960,6 +1519,22 @@ local function startInteraction(params)
   UI.setAttribute("interactionSubtitle", "text", params.subtitle or "")
   UI.setAttribute("interactionCost", "text", params.joinCostText or "")
   UI.setAttribute("interactionEffect", "text", params.effectText or "")
+  
+  -- Change button labels for choice interactions
+  if params.id == "SW_L1_PRACTICAL_WORKSHOP_CHOICE" then
+    -- Update button labels for all colors
+    for _, color in ipairs(COLORS) do
+      UI.setAttribute("interaction"..color.."Join", "text", "Knowledge")
+      UI.setAttribute("interaction"..color.."Ignore", "text", "Skills")
+    end
+  else
+    -- Default labels
+    for _, color in ipairs(COLORS) do
+      UI.setAttribute("interaction"..color.."Join", "text", "Join")
+      UI.setAttribute("interaction"..color.."Ignore", "text", "Ignore")
+    end
+  end
+  
   setInteractionPanelVisibility()
   updateInteractionStatusText()
   updateInteractionTimerText()
@@ -980,14 +1555,153 @@ local function allInteractionResponsesCollected()
   return true
 end
 
+-- Forward declare resolveInteractionEffectsWithDie so it can be called from resolveInteractionEffects_impl
+local resolveInteractionEffectsWithDie
+
 resolveInteractionEffects_impl = function()
   if not interaction.active then return end
 
   local id = interaction.id
   local initiator = interaction.initiator
 
+  -- Check if this interaction needs a die roll
+  local needsDieRoll = false
+  local dieRollActions = {
+    "CELEB_L1_STREET_PERF", "CELEB_L2_MEET_GREET", "CELEB_L3_CHARITY_STREAM",
+    "PS_L1_INCOME_TAX", "PS_L2_HITECH_TAX", "PS_L3_PROPERTY_TAX",
+    "NGO_L1_CHARITY", "NGO_L2_CROWDFUND", "NGO_L3_ADVOCACY",
+    "ENT_L1_FLASH_SALE", "ENT_L2_TRAINING", "ENT_SPECIAL_EXPANSION",
+    "GANG_L1_CRIME", "GANG_L2_CRIME", "GANG_L3_CRIME", "GANG_SPECIAL_ROBIN"
+  }
+  for _, actionId in ipairs(dieRollActions) do
+    if id == actionId then
+      needsDieRoll = true
+      break
+    end
+  end
+
+  if needsDieRoll then
+    -- Roll die first, then resolve
+    safeBroadcastAll("🎲 Rolling die for "..id.."...", {1,1,0.6})
+    rollPhysicalDieAndRead(function(die, err)
+      if err then
+        warn("Die roll failed: "..tostring(err).." - using fallback")
+        die = math.random(1, 6)
+        safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
+      else
+        safeBroadcastAll("🎲 Die result: "..die, {0.8,0.9,1})
+      end
+      resolveInteractionEffectsWithDie(id, initiator, die)
+    end)
+    return
+  end
+
+  -- No die roll needed, resolve immediately
+  resolveInteractionEffectsWithDie(id, initiator, nil)
+end
+
+-- Define resolveInteractionEffectsWithDie (forward declared above)
+resolveInteractionEffectsWithDie = function(id, initiator, die)
+  if not interaction.active then return end
+
+  -- Social Worker Level 1 – Practical workshop (Stage 1: who joined)
+  if id == "SW_L1_PRACTICAL_WORKSHOP" then
+    local participants = {}
+    for c, choice in pairs(interaction.responses) do
+      if choice == "JOIN" then
+        table.insert(participants, c)
+      end
+    end
+
+    if #participants == 0 then
+      safeBroadcastAll("Practical workshop: no one joined → no effect.", {0.9,0.9,0.9})
+      clearInteraction()
+      return
+    else
+      -- Check if all other players joined (for bonus)
+      local allJoined = true
+      for _, c in ipairs(COLORS) do
+        if c ~= initiator and isPlayableColor(c) and interaction.responses[c] ~= "JOIN" then
+          allJoined = false
+          break
+        end
+      end
+      
+      -- Store data for stage 2
+      local stage2Data = {
+        participants = participants,
+        initiator = initiator,
+        allJoined = allJoined
+      }
+      
+      safeBroadcastAll("Practical workshop: "..#participants.." player(s) joined! Now choosing rewards...", {0.7,1,0.7})
+      
+      -- Wait a moment, then start stage 2 (startInteraction will clear the first UI automatically)
+      Wait.time(function()
+        startInteraction({
+          id = "SW_L1_PRACTICAL_WORKSHOP_CHOICE",
+          initiator = initiator,
+          title = "PRACTICAL WORKSHOP - CHOOSE REWARD",
+          subtitle = "Each participant: choose +1 Knowledge OR +1 Skill",
+          joinCostText = "",  -- No cost for this choice
+          effectText = "Click your choice below:",
+          joinCostAP = 0,
+          duration = 30,
+          customData = stage2Data,
+          -- Override targets to only include participants
+          onlyTargets = participants
+        })
+      end, 1)
+      return
+    end
+  
+  -- Social Worker Level 1 – Practical workshop (Stage 2: reward choice)
+  elseif id == "SW_L1_PRACTICAL_WORKSHOP_CHOICE" then
+    local stage2Data = interaction.customData
+    if not stage2Data then
+      warn("SW_L1_PRACTICAL_WORKSHOP_CHOICE: No customData found!")
+      clearInteraction()
+      return
+    end
+    
+    local participants = stage2Data.participants or {}
+    local initiator = stage2Data.initiator
+    local allJoined = stage2Data.allJoined or false
+    
+    -- Apply rewards based on each player's choice
+    for _, c in ipairs(participants) do
+      local choice = interaction.responses[c]
+      if choice == "JOIN" then
+        -- "JOIN" button = Knowledge
+        addKnowledge(c, 1)
+        safeBroadcastToColor("You gained +1 Knowledge from Practical Workshop!", c, {0.3,1,0.3})
+      elseif choice == "IGNORE" then
+        -- "IGNORE" button = Skill
+        addSkills(c, 1)
+        safeBroadcastToColor("You gained +1 Skill from Practical Workshop!", c, {0.3,1,0.3})
+      else
+        -- No response, default to Knowledge
+        addKnowledge(c, 1)
+        safeBroadcastToColor("You gained +1 Knowledge from Practical Workshop! (default)", c, {0.9,0.9,0.6})
+      end
+    end
+    
+    -- Initiator gains +1 SAT per participant
+    satAdd(initiator, #participants)
+    safeBroadcastAll("Practical workshop: "..initiator.." gains +"..#participants.." Satisfaction!", {1,1,0.6})
+    
+    -- If all other players joined: +1 additional SAT & +1 Skill
+    if allJoined and #participants > 0 then
+      satAdd(initiator, 1)
+      addSkills(initiator, 1)
+      safeBroadcastAll("All players joined! "..initiator.." gains +1 Satisfaction & +1 Skill bonus!", {1,1,0.6})
+    end
+
+    safeBroadcastAll("Practical workshop complete!", {0.3,1,0.3})
+    clearInteraction()
+
   -- Social Worker Level 2 – Community wellbeing session
-  if id == "SW_L2_COMMUNITY_WELLBEING" then
+  elseif id == "SW_L2_COMMUNITY_WELLBEING" then
     local participants = {}
     for c, choice in pairs(interaction.responses) do
       if choice == "JOIN" then
@@ -1009,12 +1723,507 @@ resolveInteractionEffects_impl = function()
       local msg = "Community wellbeing session: "..initiator.." ran the event. Participants: "..table.concat(participants, ", ")
       safeBroadcastAll(msg, {0.7,1,0.7})
     end
+
+  -- Social Worker Level 3 – Expose social case
+  elseif id == "SW_L3_EXPOSE_CASE" then
+    -- All other players MUST choose (not optional)
+    for c, choice in pairs(interaction.responses) do
+      if choice == "JOIN" then
+        -- ENGAGE DEEPLY: +1 Knowledge, -2 Satisfaction
+        addKnowledge(c, 1)
+        satAdd(c, -2)
+      else
+        -- STAY IGNORANT: +1 Satisfaction
+        satAdd(c, 1)
+      end
+    end
+    -- Initiator: +3 Satisfaction
+    satAdd(initiator, 3)
+    safeBroadcastAll("Social case exposed: "..initiator.." gains +3 Satisfaction.", {0.7,1,0.7})
+
+  -- Celebrity Level 1 – Live Street Performance
+  elseif id == "CELEB_L1_STREET_PERF" then
+    local participants = {}
+    for c, choice in pairs(interaction.responses) do
+      if choice == "JOIN" then
+        table.insert(participants, c)
+      end
+    end
+
+    if #participants == 0 then
+      safeBroadcastToColor("Live Street Performance: no one joined → no effect.", initiator, {0.9,0.9,0.9})
+    else
+      -- Use die roll result
+      if not die or die < 1 or die > 6 then
+        die = math.random(1, 6)
+        warn("Invalid die value, using fallback: "..tostring(die))
+      end
+      local satPerParticipant = (die <= 3) and 2 or 4
+      
+      -- Each participant gains satisfaction
+      for _, c in ipairs(participants) do
+        satAdd(c, satPerParticipant)
+      end
+      
+      -- Celebrity gains +1 Skills & +150 VIN
+      addSkills(initiator, 1)
+      moneyAdd(initiator, 150)
+      
+      safeBroadcastAll("Live Street Performance: "..initiator.." performed. Participants gained +"..satPerParticipant.." Satisfaction.", {0.7,1,0.7})
+    end
+
+  -- Celebrity Level 2 – Meet & Greet
+  elseif id == "CELEB_L2_MEET_GREET" then
+    local participants = {}
+    for c, choice in pairs(interaction.responses) do
+      if choice == "JOIN" then
+        table.insert(participants, c)
+      end
+    end
+
+    if #participants == 0 then
+      -- Celebrity loses satisfaction
+      if not die or die < 1 or die > 6 then
+        die = math.random(1, 6)
+        warn("Invalid die value, using fallback: "..tostring(die))
+      end
+      local satLoss = (die <= 3) and -2 or -4
+      satAdd(initiator, satLoss)
+      safeBroadcastToColor("Meet & Greet: no one joined → you lose "..math.abs(satLoss).." Satisfaction.", initiator, {1,0.7,0.2})
+    else
+      -- Each participant gains +1 Knowledge & +1 Satisfaction
+      for _, c in ipairs(participants) do
+        addKnowledge(c, 1)
+        satAdd(c, 1)
+      end
+      
+      -- Celebrity gains satisfaction based on D6
+      if not die or die < 1 or die > 6 then
+        die = math.random(1, 6)
+        warn("Invalid die value, using fallback: "..tostring(die))
+      end
+      local celebSat = (die <= 3) and 3 or 5
+      satAdd(initiator, celebSat)
+      
+      safeBroadcastAll("Meet & Greet: "..initiator.." met fans. Participants gained +1 Knowledge & +1 Satisfaction.", {0.7,1,0.7})
+    end
+
+  -- Celebrity Special – Fan Talent Collaboration
+  elseif id == "CELEB_SPECIAL_COLLAB" then
+    local supporters = {}
+    for c, choice in pairs(interaction.responses) do
+      if choice == "JOIN" then
+        table.insert(supporters, c)
+        -- Each supporter: gain +1 Knowledge & +2 Satisfaction
+        addKnowledge(c, 1)
+        satAdd(c, 2)
+      end
+    end
+    
+    if #supporters > 0 then
+      -- Initiator gains +2 additional Satisfaction (once)
+      satAdd(initiator, 2)
+      safeBroadcastAll("Fan Collaboration: "..initiator.." collaborated with "..#supporters.." supporter(s).", {0.7,1,0.7})
+    end
+
+  -- Celebrity Level 3 – Extended Charity Stream
+  elseif id == "CELEB_L3_CHARITY_STREAM" then
+    -- This is a multi-donation event (players can join multiple times)
+    -- For now, treat each JOIN as one donation
+    local donations = 0
+    for c, choice in pairs(interaction.responses) do
+      if choice == "JOIN" then
+        donations = donations + 1
+        -- Each donation: donor gains +2 Satisfaction
+        satAdd(c, 2)
+        -- Deduct 500 VIN per donation
+        if not moneySpend(c, 500) then
+          -- If they can't afford it, remove them from donations
+          donations = donations - 1
+        end
+      end
+    end
+    
+    if donations > 0 then
+      -- Celebrity gains +2 SAT per donation & +1 AP obligation per donation
+      satAdd(initiator, donations * 2)
+      -- TODO: Track AP obligations
+      safeBroadcastToColor("+1 AP obligation per donation (manual tracking needed)", initiator, {0.7,0.7,1})
+      safeBroadcastAll("Charity Stream: "..initiator.." raised "..donations.." donation(s).", {0.7,1,0.7})
+    end
+
+  -- Public Servant Level 1 – Income Tax Campaign
+  elseif id == "PS_L1_INCOME_TAX" then
+    if not die or die < 1 or die > 6 then
+      die = math.random(1, 6)
+      warn("Invalid die value, using fallback: "..tostring(die))
+    end
+    if die <= 2 then
+      safeBroadcastAll("Income Tax Campaign: Some documents were missing → no taxes collected.", {0.9,0.9,0.9})
+    elseif die <= 4 then
+      -- Each player pays 15% of cash; initiator gains +1 Satisfaction
+      local totalCollected = 0
+      for _, c in ipairs(COLORS) do
+        if c ~= initiator and isPlayableColor(c) then
+          local currentMoney = getMoney(c)
+          local tax = math.floor(currentMoney * 0.15)
+          if tax > 0 then
+            moneySpend(c, tax)
+            totalCollected = totalCollected + tax
+          end
+        end
+      end
+      safeBroadcastAll("Income Tax Campaign: Each player pays 15% of cash. "..initiator.." gains +1 Satisfaction.", {0.7,1,0.7})
+      satAdd(initiator, 1)
+    else
+      -- Each player pays 30% of cash; initiator gains +3 Satisfaction
+      local totalCollected = 0
+      for _, c in ipairs(COLORS) do
+        if c ~= initiator and isPlayableColor(c) then
+          local currentMoney = getMoney(c)
+          local tax = math.floor(currentMoney * 0.30)
+          if tax > 0 then
+            moneySpend(c, tax)
+            totalCollected = totalCollected + tax
+          end
+        end
+      end
+      safeBroadcastAll("Income Tax Campaign: Each player pays 30% of cash. "..initiator.." gains +3 Satisfaction.", {0.7,1,0.7})
+      satAdd(initiator, 3)
+    end
+
+  -- Public Servant Level 2 – Hi-Tech Tax Campaign
+  elseif id == "PS_L2_HITECH_TAX" then
+    if not die or die < 1 or die > 6 then
+      die = math.random(1, 6)
+      warn("Invalid die value, using fallback: "..tostring(die))
+    end
+    if die <= 2 then
+      safeBroadcastAll("Hi-Tech Tax Campaign: Some documents were missing → no taxes collected.", {0.9,0.9,0.9})
+    elseif die <= 4 then
+      -- Each player pays 200 VIN per High-Tech item; initiator gains +2 Satisfaction
+      -- TODO: Count High-Tech items (need to query shop/inventory system)
+      -- For now, deduct a flat amount per player
+      for _, c in ipairs(COLORS) do
+        if c ~= initiator and isPlayableColor(c) then
+          -- TODO: Replace with actual High-Tech item count when available
+          moneySpend(c, 200)
+        end
+      end
+      safeBroadcastAll("Hi-Tech Tax Campaign: Each player pays 200 VIN per High-Tech item. "..initiator.." gains +2 Satisfaction.", {0.7,1,0.7})
+      satAdd(initiator, 2)
+    else
+      -- Each player pays 400 VIN per High-Tech item; initiator gains +4 Satisfaction
+      -- TODO: Count High-Tech items (need to query shop/inventory system)
+      for _, c in ipairs(COLORS) do
+        if c ~= initiator and isPlayableColor(c) then
+          -- TODO: Replace with actual High-Tech item count when available
+          moneySpend(c, 400)
+        end
+      end
+      safeBroadcastAll("Hi-Tech Tax Campaign: Each player pays 400 VIN per High-Tech item. "..initiator.." gains +4 Satisfaction.", {0.7,1,0.7})
+      satAdd(initiator, 4)
+    end
+
+  -- Public Servant Level 3 – Property Tax Campaign
+  elseif id == "PS_L3_PROPERTY_TAX" then
+    if not die or die < 1 or die > 6 then
+      die = math.random(1, 6)
+      warn("Invalid die value, using fallback: "..tostring(die))
+    end
+    if die <= 2 then
+      safeBroadcastAll("Property Tax Campaign: Some documents were missing → no taxes collected.", {0.9,0.9,0.9})
+    elseif die <= 4 then
+      -- Each player pays 200 VIN per property level; initiator gains +3 Satisfaction
+      -- TODO: Count property levels (need to query EstateEngine)
+      -- For now, deduct a flat amount per player
+      for _, c in ipairs(COLORS) do
+        if c ~= initiator and isPlayableColor(c) then
+          -- TODO: Replace with actual property level count when available
+          moneySpend(c, 200)
+        end
+      end
+      safeBroadcastAll("Property Tax Campaign: Each player pays 200 VIN per property level. "..initiator.." gains +3 Satisfaction.", {0.7,1,0.7})
+      satAdd(initiator, 3)
+    else
+      -- Each player pays 400 VIN per property level; initiator gains +6 Satisfaction
+      -- TODO: Count property levels (need to query EstateEngine)
+      for _, c in ipairs(COLORS) do
+        if c ~= initiator and isPlayableColor(c) then
+          -- TODO: Replace with actual property level count when available
+          moneySpend(c, 400)
+        end
+      end
+      safeBroadcastAll("Property Tax Campaign: Each player pays 400 VIN per property level. "..initiator.." gains +6 Satisfaction.", {0.7,1,0.7})
+      satAdd(initiator, 6)
+    end
+
+  -- NGO Worker Level 1 – Start Charity
+  elseif id == "NGO_L1_CHARITY" then
+    if not die or die < 1 or die > 6 then
+      die = math.random(1, 6)
+      warn("Invalid die value, using fallback: "..tostring(die))
+    end
+    if die <= 2 then
+      safeBroadcastAll("Start Charity: Nothing happens.", {0.9,0.9,0.9})
+    elseif die <= 4 then
+      -- Each player pays 200 VIN
+      for _, c in ipairs(COLORS) do
+        if c ~= initiator and isPlayableColor(c) then
+          moneySpend(c, 200)
+        end
+      end
+      safeBroadcastAll("Start Charity: Each player pays 200 VIN.", {0.7,1,0.7})
+    else
+      -- Each player pays 400 VIN; initiator gains 400 VIN reward
+      for _, c in ipairs(COLORS) do
+        if c ~= initiator and isPlayableColor(c) then
+          moneySpend(c, 400)
+        end
+      end
+      moneyAdd(initiator, 400)
+      safeBroadcastAll("Start Charity: Each player pays 400 VIN. "..initiator.." gains 400 VIN reward.", {0.7,1,0.7})
+    end
+
+  -- NGO Worker Level 2 – Crowdfunding Campaign
+  elseif id == "NGO_L2_CROWDFUND" then
+    if not die or die < 1 or die > 6 then
+      die = math.random(1, 6)
+      warn("Invalid die value, using fallback: "..tostring(die))
+    end
+    if die <= 2 then
+      safeBroadcastAll("Crowdfunding Campaign: Nothing happens.", {0.9,0.9,0.9})
+    elseif die <= 4 then
+      -- Each player pays 250 VIN
+      for _, c in ipairs(COLORS) do
+        if c ~= initiator and isPlayableColor(c) then
+          moneySpend(c, 250)
+        end
+      end
+      safeBroadcastAll("Crowdfunding Campaign: Each player pays 250 VIN.", {0.7,1,0.7})
+    else
+      -- Each player pays 400 VIN; initiator must spend this on High-Tech item
+      for _, c in ipairs(COLORS) do
+        if c ~= initiator and isPlayableColor(c) then
+          moneySpend(c, 400)
+        end
+      end
+      moneyAdd(initiator, 400)
+      -- TODO: Track spending requirement (initiator must spend this on High-Tech item)
+      safeBroadcastAll("Crowdfunding Campaign: Each player pays 400 VIN. "..initiator.." must spend this on High-Tech item.", {0.7,1,0.7})
+    end
+
+  -- NGO Worker Level 3 – Advocacy Pressure Campaign
+  elseif id == "NGO_L3_ADVOCACY" then
+    local participants = {}
+    for c, choice in pairs(interaction.responses) do
+      if choice == "JOIN" then
+        table.insert(participants, c)
+      end
+    end
+    
+    -- YES (JOIN): Pay 300 VIN, gain +2 Satisfaction
+    for _, c in ipairs(participants) do
+      if moneySpend(c, 300) then
+        satAdd(c, 2)
+      end
+    end
+    
+    -- NO (IGNORE): Lose -1 Satisfaction
+    for c, choice in pairs(interaction.responses) do
+      if choice == "IGNORE" then
+        satAdd(c, -1)
+      end
+    end
+    
+    -- Initiator: +1 SAT per participant, +1 Skill once per campaign
+    satAdd(initiator, #participants)
+    if #participants > 0 then
+      addSkills(initiator, 1)
+    end
+    
+    safeBroadcastAll("Advocacy Campaign: "..initiator.." ran the event. "..#participants.." participant(s).", {0.7,1,0.7})
+
+  -- NGO Worker Special – International Crisis Appeal
+  elseif id == "NGO_SPECIAL_CRISIS" then
+    local participants = {}
+    for c, choice in pairs(interaction.responses) do
+      if choice == "JOIN" then
+        table.insert(participants, c)
+        -- Each joiner: donate 200 VIN, gain +2 Satisfaction
+        if moneySpend(c, 200) then
+          satAdd(c, 2)
+        end
+      end
+    end
+    
+    -- Initiator: +2 SAT per joiner, +1 SAT per refuser
+    local joiners = #participants
+    local refusers = 0
+    for c, choice in pairs(interaction.responses) do
+      if choice == "IGNORE" then
+        refusers = refusers + 1
+      end
+    end
+    satAdd(initiator, joiners * 2 + refusers)
+    
+    safeBroadcastAll("Crisis Appeal: "..initiator.." raised "..joiners.." donation(s).", {0.7,1,0.7})
+
+  -- NGO Worker Special – Misused Donation Scandal
+  elseif id == "NGO_SPECIAL_SCANDAL" then
+    if not die or die < 1 or die > 6 then
+      die = math.random(1, 6)
+      warn("Invalid die value, using fallback: "..tostring(die))
+    end
+    if die <= 2 then
+      satAdd(initiator, -3)
+      safeBroadcastAll("Donation Scandal: Donor accuses you publicly → "..initiator.." loses -3 Satisfaction.", {1,0.7,0.2})
+    elseif die <= 4 then
+      satAdd(initiator, 4)
+      safeBroadcastAll("Donation Scandal: Issue resolved quietly → "..initiator.." gains +4 Satisfaction.", {0.7,1,0.7})
+    else
+      satAdd(initiator, 6)
+      addKnowledge(initiator, 1)
+      safeBroadcastAll("Donation Scandal: Donor apologizes publicly → "..initiator.." gains +6 Satisfaction & +1 Knowledge.", {0.7,1,0.7})
+    end
+
+  -- Entrepreneur Level 1 – Flash Sale Promotion
+  elseif id == "ENT_L1_FLASH_SALE" then
+    -- All players may immediately buy one Consumable with 30% discount
+    -- Initiator gains +1 Satisfaction per other player who buys
+    -- TODO: Implement shop interaction
+    safeBroadcastAll("Flash Sale: All players may buy one Consumable with 30% discount. "..initiator.." gains +1 Satisfaction per buyer.", {0.7,1,0.7})
+
+  -- Entrepreneur Level 2 – Commercial Training Course
+  elseif id == "ENT_L2_TRAINING" then
+    local participants = {}
+    for c, choice in pairs(interaction.responses) do
+      if choice == "JOIN" then
+        table.insert(participants, c)
+        -- Each participant pays 200 VIN
+        moneySpend(c, 200)
+      end
+    end
+    
+    -- Initiator gains +1 Satisfaction per participant
+    satAdd(initiator, #participants)
+    
+    -- Exam time! Roll D6 for each participant
+    -- Note: This needs individual die rolls per participant, but we only have one die roll
+    -- For now, use the single die roll for the first participant, then roll for others
+    for i, c in ipairs(participants) do
+      local examDie = die
+      if i == 1 then
+        -- Use the main die roll for first participant
+        if not examDie or examDie < 1 or examDie > 6 then
+          examDie = math.random(1, 6)
+          warn("Invalid die value for exam, using fallback: "..tostring(examDie))
+        end
+      else
+        -- For subsequent participants, roll again (would need async handling)
+        examDie = math.random(1, 6)
+        warn("Multiple exam participants - using fallback die for participant "..i)
+      end
+      if die == 1 then
+        safeBroadcastToColor("Training Exam: Failed → no learning", c, {1,0.7,0.2})
+      elseif die <= 5 then
+        -- TODO: Add +1 Knowledge OR +1 Skill (player choice)
+        safeBroadcastToColor("Training Exam: Passed → +1 Knowledge OR +1 Skill (manual adjustment needed)", c, {0.7,0.7,1})
+      else
+        -- TODO: Add +2 Knowledge OR +2 Skills (player choice)
+        safeBroadcastToColor("Training Exam: Genius → +2 Knowledge OR +2 Skills (manual adjustment needed)", c, {0.7,0.7,1})
+      end
+    end
+    
+    safeBroadcastAll("Training Course: "..initiator.." ran the course. "..#participants.." participant(s).", {0.7,1,0.7})
+
+  -- Entrepreneur Special – Aggressive Expansion
+  elseif id == "ENT_SPECIAL_EXPANSION" then
+    if not die or die < 1 or die > 6 then
+      die = math.random(1, 6)
+      warn("Invalid die value, using fallback: "..tostring(die))
+    end
+  if die <= 2 then
+    satAdd(initiator, -2)
+    moneySpend(initiator, 200)
+    safeBroadcastAll("Aggressive Expansion: Collapse → "..initiator.." loses -2 Satisfaction & -200 VIN.", {1,0.7,0.2})
+  elseif die <= 4 then
+    satAdd(initiator, 3)
+    safeBroadcastAll("Aggressive Expansion: Moderate growth → "..initiator.." gains +3 Satisfaction.", {0.7,1,0.7})
+  else
+    satAdd(initiator, 6)
+    moneyAdd(initiator, 800)
+    safeBroadcastAll("Aggressive Expansion: Massive success → "..initiator.." gains +6 Satisfaction & +800 VIN.", {0.7,1,0.7})
+    end
+
+  -- Entrepreneur Special – Employee Training Boost
+  elseif id == "ENT_SPECIAL_TRAINING" then
+  if not moneySpend(initiator, 500) then
+    safeBroadcastToColor("⛔ Not enough money (need 500 VIN) for Employee Training.", initiator, {1,0.6,0.2})
+    return false
+  end
+  satAdd(initiator, 2)
+  addSkills(initiator, 2)
+  safeBroadcastAll("Employee Training: "..initiator.." gains +2 Satisfaction & +2 Skills.", {0.7,1,0.7})
+
+  -- Gangster Special – Robin Hood Job
+  elseif id == "GANG_SPECIAL_ROBIN" then
+    if not die or die < 1 or die > 6 then
+      die = math.random(1, 6)
+      warn("Invalid die value, using fallback: "..tostring(die))
+    end
+  if die <= 2 then
+    -- Pay 200 VIN to bank
+    moneySpend(initiator, 200)
+    satAdd(initiator, -2)
+    safeBroadcastAll("Robin Hood Job: Plan leaks → "..initiator.." pays 200 VIN to bank & loses -2 Satisfaction.", {1,0.7,0.2})
+  elseif die <= 4 then
+    -- Steal+donate up to 500 VIN (gain money, then donate it)
+    moneyAdd(initiator, 500)
+    -- TODO: Donate to bank/charity (for now just gain the money)
+    satAdd(initiator, 4)
+    safeBroadcastAll("Robin Hood Job: Steal+donate up to 500 VIN → "..initiator.." gains +4 Satisfaction.", {0.7,1,0.7})
+  else
+    -- Steal+donate up to 1000 VIN
+    moneyAdd(initiator, 1000)
+    -- TODO: Donate to bank/charity (for now just gain the money)
+    satAdd(initiator, 7)
+    safeBroadcastAll("Robin Hood Job: Steal+donate up to 1000 VIN → "..initiator.." gains +7 Satisfaction.", {0.7,1,0.7})
+  end
+
+  -- Gangster Special – Protection Racket
+  elseif id == "GANG_SPECIAL_PROTECTION" then
+    local participants = {}
+    for c, choice in pairs(interaction.responses) do
+      if choice == "JOIN" then
+        table.insert(participants, c)
+        -- Pay: spend 200 VIN per vocation level
+        local targetLevel = state.levels[c] or 1
+        local cost = 200 * targetLevel
+        if not moneySpend(c, cost) then
+          -- If they can't afford it, treat as refuse
+          table.remove(participants, #participants)
+          satAdd(c, -2)
+          addHealth(c, -2)
+        end
+      else
+        -- Refuse: lose -2 Health & -2 Satisfaction
+        addHealth(c, -2)
+        satAdd(c, -2)
+      end
+    end
+    
+    -- Initiator: +1 SAT per payer, keep the money
+    satAdd(initiator, #participants)
+    -- TODO: Track heat level increase
+    safeBroadcastAll("Protection Racket: "..initiator.." collected from "..#participants.." payer(s). Heat level +1.", {0.7,1,0.7})
   end
 
   clearInteraction()
 end
 
-local function handleInteractionResponse(color, choice, actorColor)
+-- Definition of handleInteractionResponse (forward-declared earlier)
+handleInteractionResponse = function(color, choice, actorColor)
   if not interaction.active then return end
   color = normalizeColor(color)
   if not color or not interaction.targets[color] then return end
@@ -1486,6 +2695,53 @@ function VOC_GetVocationData(params)
   return VOCATION_DATA[vocation]
 end
 
+-- =========================================================
+-- DIE ROLLING
+-- =========================================================
+local function getDie()
+  return getObjectFromGUID(DIE_GUID)
+end
+
+local function tryReadDieValue(die)
+  if not die then return nil end
+  if die.getValue then
+    local ok, v = pcall(function() return die.getValue() end)
+    if ok and type(v) == "number" and v >= 1 and v <= 6 then return v end
+  end
+  return nil
+end
+
+local function rollPhysicalDieAndRead(callback)
+  local die = getDie()
+  if not die then
+    callback(nil, "Die not found (GUID "..tostring(DIE_GUID)..")")
+    return
+  end
+
+  pcall(function() die.randomize() end)
+  pcall(function() die.roll() end)
+
+  local timeout = os.time() + 6
+
+  Wait.condition(
+    function()
+      local v = tryReadDieValue(die)
+      if v then
+        callback(v, nil)
+      else
+        callback(nil, "Failed to read die value (getValue).")
+      end
+    end,
+    function()
+      local resting = false
+      pcall(function() resting = die.resting end)
+      if resting then return true end
+      if os.time() >= timeout then return true end
+      return false
+    end
+  )
+end
+
 -- Start Social Worker Level 2 community event: "Community wellbeing session"
 -- Flow:
 --  - Active Social Worker (level 2+) spends 2 AP
@@ -1502,33 +2758,44 @@ function VOC_StartSocialWorkerCommunitySession(params)
   if not color then
     return false, "Invalid color"
   end
+  
+  -- If White is testing, use effectsTarget for initiator and effects
+  local effectsTarget = params.effectsTarget
+  local initiatorColor = effectsTarget or color
+  
+  log("VOC_StartSocialWorkerCommunitySession: color="..tostring(color)..", effectsTarget="..tostring(effectsTarget)..", initiatorColor="..tostring(initiatorColor))
 
-  local vocation = state.vocations[color]
-  if vocation ~= VOC_SOCIAL_WORKER then
+  local vocation = state.vocations[initiatorColor]
+  
+  -- Bypass checks if White is testing
+  if color ~= "White" and vocation ~= VOC_SOCIAL_WORKER then
     safeBroadcastToColor("Only Social Worker can use this community event.", color, {1,0.7,0.2})
     return false, "Wrong vocation"
   end
 
-  local level = state.levels[color] or 1
-  if level < 2 then
+  local level = state.levels[initiatorColor] or 1
+  -- Bypass level checks if White is testing
+  if color ~= "White" and level < 2 then
     safeBroadcastToColor("Community wellbeing session requires Social Worker Level 2.", color, {1,0.7,0.2})
     return false, "Wrong level"
   end
 
-  -- Spend 2 AP from initiator
-  if not canSpendAP(color, 2) then
-    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) to start Community wellbeing session.", color, {1,0.6,0.2})
+  -- Spend 2 AP from initiator (bypass if White is testing)
+  if not canSpendAP(initiatorColor, 2) then
+    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) to start Community wellbeing session.", initiatorColor, {1,0.6,0.2})
     return false, "Not enough AP"
   end
-  local ok = spendAP(color, 2, "SW_L2_COMMUNITY_WELLBEING")
+  local ok = spendAP(initiatorColor, 2, "SW_L2_COMMUNITY_WELLBEING")
   if not ok then
-    safeBroadcastToColor("⛔ Failed to deduct 2 AP for Community wellbeing session.", color, {1,0.6,0.2})
+    safeBroadcastToColor("⛔ Failed to deduct 2 AP for Community wellbeing session.", initiatorColor, {1,0.6,0.2})
     return false, "AP deduction failed"
   end
 
+  log("VOC_StartSocialWorkerCommunitySession: Starting interaction with initiator="..tostring(initiatorColor))
+  
   startInteraction({
     id = "SW_L2_COMMUNITY_WELLBEING",
-    initiator = color,
+    initiator = initiatorColor,  -- Use the actual player color
     title = "COMMUNITY EVENT – Community wellbeing session",
     subtitle = "Social Worker – Cost for you: Spend 2 AP",
     joinCostText = "Others may join by spending 1 AP.",
@@ -1536,6 +2803,1423 @@ function VOC_StartSocialWorkerCommunitySession(params)
     joinCostAP = 1,
   })
 
+  return true
+end
+
+-- =========================================================
+-- SOCIAL WORKER ACTIONS
+-- =========================================================
+
+-- Social Worker Level 1: Practical workshop
+function VOC_StartSocialWorkerPracticalWorkshop(params)
+  params = params or {}
+  log("VOC_StartSocialWorkerPracticalWorkshop: Called with params="..tostring(params and "table" or "nil"))
+  
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then 
+    log("VOC_StartSocialWorkerPracticalWorkshop: ERROR - No valid color")
+    return false, "Invalid color" 
+  end
+  
+  -- If White is testing, use effectsTarget for initiator and effects
+  local effectsTarget = params.effectsTarget
+  local initiatorColor = effectsTarget or color
+  
+  log("VOC_StartSocialWorkerPracticalWorkshop: color="..tostring(color)..", effectsTarget="..tostring(effectsTarget)..", initiatorColor="..tostring(initiatorColor))
+
+  if not state or not state.vocations then
+    log("VOC_StartSocialWorkerPracticalWorkshop: ERROR - state or state.vocations is nil")
+    safeBroadcastToColor("Game state error. Please restart the game.", color, {1,0.6,0.2})
+    return false, "State error"
+  end
+  
+  local vocation = state.vocations[initiatorColor]
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and vocation ~= VOC_SOCIAL_WORKER then
+    safeBroadcastToColor("Only Social Worker can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  local level = (state.levels and state.levels[initiatorColor]) or 1
+  if color ~= "White" and level < 1 then
+    safeBroadcastToColor("Practical workshop requires Social Worker Level 1.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(initiatorColor, 2) then
+    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) to start Practical workshop.", initiatorColor, {1,0.6,0.2})
+    return false
+  end
+  if not spendAP(initiatorColor, 2, "SW_L1_PRACTICAL_WORKSHOP") then
+    safeBroadcastToColor("⛔ Failed to deduct 2 AP.", initiatorColor, {1,0.6,0.2})
+    return false
+  end
+
+  startInteraction({
+    id = "SW_L1_PRACTICAL_WORKSHOP",
+    initiator = initiatorColor,
+    title = "PRACTICAL WORKSHOP",
+    subtitle = "Social Worker Level 1 – Cost for you: Spend 2 AP",
+    joinCostText = "Others may join by spending 1 AP.",
+    effectText = "Each participant gains +1 Knowledge OR +1 Skill (their choice). You gain +1 Satisfaction per participant. If all other players join, you gain +1 additional Satisfaction & +1 Skill.",
+    joinCostAP = 1,
+  })
+  return true
+end
+
+-- Social Worker Level 3: Expose a disturbing social case
+function VOC_StartSocialWorkerExposeCase(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+  
+  -- If White is testing, use effectsTarget for initiator and effects
+  local effectsTarget = params.effectsTarget
+  local initiatorColor = effectsTarget or color
+  
+  log("VOC_StartSocialWorkerExposeCase: color="..tostring(color)..", effectsTarget="..tostring(effectsTarget)..", initiatorColor="..tostring(initiatorColor))
+
+  local vocation = state.vocations[initiatorColor]
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and vocation ~= VOC_SOCIAL_WORKER then
+    safeBroadcastToColor("Only Social Worker can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  local level = state.levels[initiatorColor] or 1
+  -- White bypasses level checks for testing
+  if color ~= "White" and level < 3 then
+    safeBroadcastToColor("Expose social case requires Social Worker Level 3.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(initiatorColor, 3) then
+    safeBroadcastToColor("⛔ Not enough AP (need 3 AP) to expose social case.", initiatorColor, {1,0.6,0.2})
+    return false
+  end
+  if not spendAP(initiatorColor, 3, "SW_L3_EXPOSE_CASE") then
+    safeBroadcastToColor("⛔ Failed to deduct 3 AP.", initiatorColor, {1,0.6,0.2})
+    return false
+  end
+
+  startInteraction({
+    id = "SW_L3_EXPOSE_CASE",
+    initiator = initiatorColor,
+    title = "EXPOSE DISTURBING SOCIAL CASE",
+    subtitle = "Social Worker Level 3 – Cost for you: Spend 3 AP",
+    joinCostText = "All other players MUST choose:",
+    effectText = "ENGAGE DEEPLY: Gain +1 Knowledge and -2 Satisfaction. OR STAY IGNORANT: Gain +1 Satisfaction. You gain +3 Satisfaction for bringing truth to light.",
+    joinCostAP = 0,  -- Mandatory choice, not optional join
+  })
+  return true
+end
+
+-- Social Worker Special: Homeless Shelter Breakthrough
+function VOC_StartSocialWorkerHomelessShelter(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  local vocation = state.vocations[color]
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and vocation ~= VOC_SOCIAL_WORKER then
+    safeBroadcastToColor("Only Social Worker can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(color, 2) then
+    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) for Homeless Shelter.", color, {1,0.6,0.2})
+    return false
+  end
+  
+  if not moneySpend(color, 100) then
+    safeBroadcastToColor("⛔ Not enough money (need 100 VIN) for Homeless Shelter.", color, {1,0.6,0.2})
+    return false
+  end
+  
+  if not spendAP(color, 2, "SW_SPECIAL_HOMELESS") then
+    safeBroadcastToColor("⛔ Failed to deduct 2 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  -- Roll D6 for outcome
+  safeBroadcastAll("🎲 Rolling die for Homeless Shelter...", {1,1,0.6})
+  rollPhysicalDieAndRead(function(die, err)
+    if err then
+      warn("Die roll failed: "..tostring(err).." - using fallback")
+      die = math.random(1, 6)
+      safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
+    else
+      safeBroadcastAll("🎲 Die result: "..die, {0.8,0.9,1})
+    end
+    
+    local satGain = 0
+    local skillGain = 0
+    
+    if die <= 2 then
+      satGain = -1
+      safeBroadcastToColor("Homeless Shelter: Leave before intake finishes → -1 Satisfaction", color, {1,0.7,0.2})
+    elseif die <= 4 then
+      satGain = 3
+      safeBroadcastToColor("Homeless Shelter: Accept temporary shelter → +3 Satisfaction", color, {0.3,1,0.3})
+    else
+      satGain = 7
+      skillGain = 1
+      safeBroadcastToColor("Homeless Shelter: Enter long-term support → +7 Satisfaction & +1 Skill", color, {0.3,1,0.3})
+    end
+    
+    satAdd(color, satGain)
+    if skillGain > 0 then
+      addSkills(color, skillGain)
+    end
+  end)
+  
+  return true
+end
+
+-- Social Worker Special: Forced Protective Removal
+function VOC_StartSocialWorkerRemoval(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+  
+  -- If White is testing, use effectsTarget for initiator and effects
+  local effectsTarget = params.effectsTarget
+  local initiatorColor = effectsTarget or color
+  
+  log("VOC_StartSocialWorkerRemoval: color="..tostring(color)..", effectsTarget="..tostring(effectsTarget)..", initiatorColor="..tostring(initiatorColor))
+
+  local vocation = state.vocations[initiatorColor]
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and vocation ~= VOC_SOCIAL_WORKER then
+    safeBroadcastToColor("Only Social Worker can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(initiatorColor, 3) then
+    safeBroadcastToColor("⛔ Not enough AP (need 3 AP) for Protective Removal.", initiatorColor, {1,0.6,0.2})
+    return false
+  end
+  
+  -- Show target selection UI (requires player with at least one child)
+  startTargetSelection({
+    initiator = initiatorColor,
+    actionId = "SW_SPECIAL_REMOVAL",
+    title = "SELECT TARGET FOR PROTECTIVE REMOVAL",
+    subtitle = "Choose a player who has at least one child:",
+    requireChildren = true,
+    callback = function(targetColor)
+      log("Protective Removal: "..initiatorColor.." selected target: "..targetColor)
+      
+      -- Verify target has children
+      if not hasChildren(targetColor) then
+        safeBroadcastToColor(targetColor.." does not have any children.", initiatorColor, {1,0.6,0.2})
+        return
+      end
+      
+      -- Now spend AP and execute action
+      if not spendAP(initiatorColor, 3, "SW_SPECIAL_REMOVAL") then
+        safeBroadcastToColor("⛔ Failed to deduct 3 AP.", initiatorColor, {1,0.6,0.2})
+        return
+      end
+      
+      -- Roll D6 for outcome
+      safeBroadcastAll("🎲 Rolling die for Protective Removal ("..initiatorColor.." → "..targetColor..")...", {1,1,0.6})
+      rollPhysicalDieAndRead(function(die, err)
+        if err then
+          warn("Die roll failed: "..tostring(err).." - using fallback")
+          die = math.random(1, 6)
+          safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
+        else
+          safeBroadcastAll("🎲 Die result: "..die, {0.8,0.9,1})
+        end
+        
+        if die <= 2 then
+          -- False alarm: -1 Health & -2 Satisfaction, victim gains +3 Satisfaction
+          addHealth(initiatorColor, -1)
+          satAdd(initiatorColor, -2)
+          satAdd(targetColor, 3)  -- Victim gains satisfaction
+          safeBroadcastAll("Protective Removal: False alarm → "..initiatorColor.." loses -1 Health & -2 Satisfaction. "..targetColor.." gains +3 Satisfaction.", {1,0.7,0.2})
+        elseif die <= 4 then
+          satAdd(initiatorColor, 3)
+          safeBroadcastAll("Protective Removal: Temporary intervention → "..initiatorColor.." gains +3 Satisfaction. "..targetColor.."'s child removed for 1 year.", {0.3,1,0.3})
+          -- TODO: Child removal mechanics (remove child token for 1 year)
+        else
+          satAdd(initiatorColor, 4)
+          satAdd(targetColor, -6)  -- Victim loses satisfaction
+          safeBroadcastAll("Protective Removal: Permanent removal → "..initiatorColor.." gains +4 Satisfaction. "..targetColor.." loses -6 Satisfaction and child is permanently removed.", {0.3,1,0.3})
+          -- TODO: Permanent child removal mechanics (remove child token permanently)
+        end
+      end)
+    end
+  })
+  
+  return true
+end
+
+-- =========================================================
+-- CELEBRITY ACTIONS
+-- =========================================================
+
+function VOC_StartCelebrityStreetPerformance(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[color] ~= VOC_CELEBRITY then
+    safeBroadcastToColor("Only Celebrity can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  local level = state.levels[color] or 1
+  if level < 1 then
+    safeBroadcastToColor("Live Street Performance requires Celebrity Level 1.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(color, 2) then
+    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) to start Live Street Performance.", color, {1,0.6,0.2})
+    return false
+  end
+  if not spendAP(color, 2, "CELEB_L1_STREET_PERF") then
+    safeBroadcastToColor("⛔ Failed to deduct 2 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  startInteraction({
+    id = "CELEB_L1_STREET_PERF",
+    initiator = color,
+    title = "LIVE STREET PERFORMANCE STREAM",
+    subtitle = "Celebrity Level 1 – Cost for you: Spend 2 AP",
+    joinCostText = "Others may join by spending 1 AP.",
+    effectText = "Each participant gains +2 or +4 Satisfaction (D6 roll). If someone participated, Celebrity gains +1 Skill & +150 VIN.",
+    joinCostAP = 1,
+  })
+  return true
+end
+
+function VOC_StartCelebrityMeetGreet(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[color] ~= VOC_CELEBRITY then
+    safeBroadcastToColor("Only Celebrity can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  local level = state.levels[color] or 1
+  -- White bypasses level checks for testing
+  if color ~= "White" and level < 2 then
+    safeBroadcastToColor("Meet & Greet requires Celebrity Level 2.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(color, 1) then
+    safeBroadcastToColor("⛔ Not enough AP (need 1 AP) to start Meet & Greet.", color, {1,0.6,0.2})
+    return false
+  end
+  
+  if not moneySpend(color, 200) then
+    safeBroadcastToColor("⛔ Not enough money (need 200 VIN) for Meet & Greet.", color, {1,0.6,0.2})
+    return false
+  end
+  
+  if not spendAP(color, 1, "CELEB_L2_MEET_GREET") then
+    safeBroadcastToColor("⛔ Failed to deduct 1 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  startInteraction({
+    id = "CELEB_L2_MEET_GREET",
+    initiator = color,
+    title = "MEET & GREET",
+    subtitle = "Celebrity Level 2 – Cost for you: Spend 1 AP & 200 VIN",
+    joinCostText = "Others may join by spending 1 AP & 200 VIN.",
+    effectText = "Each participant gains +1 Knowledge & +1 Satisfaction. Celebrity gains +3 or +5 Satisfaction (D6 roll). If no one joins, Celebrity loses -2 or -4 Satisfaction.",
+    joinCostAP = 1,
+  })
+  return true
+end
+
+function VOC_StartCelebrityCharityStream(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[color] ~= VOC_CELEBRITY then
+    safeBroadcastToColor("Only Celebrity can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  local level = state.levels[color] or 1
+  -- White bypasses level checks for testing
+  if color ~= "White" and level < 3 then
+    safeBroadcastToColor("Extended Charity Stream requires Celebrity Level 3.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(color, 2) then
+    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) to start Charity Stream.", color, {1,0.6,0.2})
+    return false
+  end
+  if not spendAP(color, 2, "CELEB_L3_CHARITY_STREAM") then
+    safeBroadcastToColor("⛔ Failed to deduct 2 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  startInteraction({
+    id = "CELEB_L3_CHARITY_STREAM",
+    initiator = color,
+    title = "EXTENDED CHARITY STREAM",
+    subtitle = "Celebrity Level 3 – Cost for you: Spend 2 AP",
+    joinCostText = "Other players may join multiple times by paying 500 VIN each time.",
+    effectText = "For each donation: Donor gains +2 Satisfaction. Celebrity gains +2 Satisfaction & +1 AP obligation. Celebrity receives NO money.",
+    joinCostAP = 0,  -- Money cost only
+  })
+  return true
+end
+
+function VOC_StartCelebrityCollaboration(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[color] ~= VOC_CELEBRITY then
+    safeBroadcastToColor("Only Celebrity can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(color, 3) then
+    safeBroadcastToColor("⛔ Not enough AP (need 3 AP) for Fan Collaboration.", color, {1,0.6,0.2})
+    return false
+  end
+  
+  if not moneySpend(color, 200) then
+    safeBroadcastToColor("⛔ Not enough money (need 200 VIN) for Fan Collaboration.", color, {1,0.6,0.2})
+    return false
+  end
+  
+  if not spendAP(color, 3, "CELEB_SPECIAL_COLLAB") then
+    safeBroadcastToColor("⛔ Failed to deduct 3 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  satAdd(color, 4)
+  addSkills(color, 1)
+  
+  startInteraction({
+    id = "CELEB_SPECIAL_COLLAB",
+    initiator = color,
+    title = "FAN TALENT COLLABORATION",
+    subtitle = "Celebrity Special – Cost for you: Spend 3 AP & 200 VIN",
+    joinCostText = "Others may voluntarily spend 2 AP to support.",
+    effectText = "You gain +4 Satisfaction & +1 Skill. Each supporter gains +1 Knowledge & +2 Satisfaction. If someone supports, you gain +2 additional Satisfaction.",
+    joinCostAP = 2,
+  })
+  return true
+end
+
+function VOC_StartCelebrityMeetup(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[color] ~= VOC_CELEBRITY then
+    safeBroadcastToColor("Only Celebrity can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(color, 2) then
+    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) for Fan Meetup.", color, {1,0.6,0.2})
+    return false
+  end
+  
+  if not moneySpend(color, 200) then
+    safeBroadcastToColor("⛔ Not enough money (need 200 VIN) for Fan Meetup.", color, {1,0.6,0.2})
+    return false
+  end
+  
+  if not spendAP(color, 2, "CELEB_SPECIAL_MEETUP") then
+    safeBroadcastToColor("⛔ Failed to deduct 2 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  safeBroadcastAll("🎲 Rolling die for Fan Meetup...", {1,1,0.6})
+  rollPhysicalDieAndRead(function(die, err)
+    if err then
+      warn("Die roll failed: "..tostring(err).." - using fallback")
+      die = math.random(1, 6)
+      safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
+    else
+      safeBroadcastAll("🎲 Die result: "..die, {0.8,0.9,1})
+    end
+    
+    if die <= 2 then
+      addHealth(color, -1)
+      satAdd(color, -2)
+      safeBroadcastAll("Fan Meetup Backfire: Chaos & backlash → "..color.." loses -1 Health & -2 Satisfaction.", {1,0.7,0.2})
+    elseif die <= 4 then
+      satAdd(color, 3)
+      safeBroadcastAll("Fan Meetup Backfire: Nice but could be better → "..color.." gains +3 Satisfaction.", {0.7,1,0.7})
+    else
+      satAdd(color, 7)
+      moneyAdd(color, 300)
+      safeBroadcastAll("Fan Meetup Backfire: Enormous love → "..color.." gains +7 Satisfaction & +300 VIN.", {0.7,1,0.7})
+    end
+  end)
+  
+  return true
+end
+
+-- =========================================================
+-- PUBLIC SERVANT ACTIONS
+-- =========================================================
+
+function VOC_StartPublicServantIncomeTax(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[color] ~= VOC_PUBLIC_SERVANT then
+    safeBroadcastToColor("Only Public Servant can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  local level = state.levels[color] or 1
+  if level < 1 then
+    safeBroadcastToColor("Income Tax Campaign requires Public Servant Level 1.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(color, 2) then
+    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) to start Income Tax Campaign.", color, {1,0.6,0.2})
+    return false
+  end
+  if not spendAP(color, 2, "PS_L1_INCOME_TAX") then
+    safeBroadcastToColor("⛔ Failed to deduct 2 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  -- Roll D6 immediately (no interaction needed)
+  safeBroadcastAll("🎲 Rolling die for Income Tax Campaign...", {1,1,0.6})
+  rollPhysicalDieAndRead(function(die, err)
+    if err then
+      warn("Die roll failed: "..tostring(err).." - using fallback")
+      die = math.random(1, 6)
+      safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
+    else
+      safeBroadcastAll("🎲 Die result: "..die, {0.8,0.9,1})
+    end
+    
+    if die <= 2 then
+      safeBroadcastAll("Income Tax Campaign: Some documents were missing → no taxes collected.", {0.9,0.9,0.9})
+    elseif die <= 4 then
+      -- Each player pays 15% of cash; initiator gains +1 Satisfaction
+      local totalCollected = 0
+      for _, c in ipairs(COLORS) do
+        if c ~= color and isPlayableColor(c) then
+          local currentMoney = getMoney(c)
+          local tax = math.floor(currentMoney * 0.15)
+          if tax > 0 then
+            moneySpend(c, tax)
+            totalCollected = totalCollected + tax
+          end
+        end
+      end
+      safeBroadcastAll("Income Tax Campaign: Each player pays 15% of cash. "..color.." gains +1 Satisfaction.", {0.7,1,0.7})
+      satAdd(color, 1)
+    else
+    -- Each player pays 30% of cash; initiator gains +3 Satisfaction
+    local totalCollected = 0
+    for _, c in ipairs(COLORS) do
+      if c ~= color and isPlayableColor(c) then
+        local currentMoney = getMoney(c)
+        local tax = math.floor(currentMoney * 0.30)
+        if tax > 0 then
+          moneySpend(c, tax)
+          totalCollected = totalCollected + tax
+        end
+      end
+    end
+    safeBroadcastAll("Income Tax Campaign: Each player pays 30% of cash. "..color.." gains +3 Satisfaction.", {0.7,1,0.7})
+    satAdd(color, 3)
+    end
+  end)
+  
+  return true
+end
+
+function VOC_StartPublicServantHiTechTax(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[color] ~= VOC_PUBLIC_SERVANT then
+    safeBroadcastToColor("Only Public Servant can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  local level = state.levels[color] or 1
+  -- White bypasses level checks for testing
+  if color ~= "White" and level < 2 then
+    safeBroadcastToColor("Hi-Tech Tax Campaign requires Public Servant Level 2.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(color, 2) then
+    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) to start Hi-Tech Tax Campaign.", color, {1,0.6,0.2})
+    return false
+  end
+  if not spendAP(color, 2, "PS_L2_HITECH_TAX") then
+    safeBroadcastToColor("⛔ Failed to deduct 2 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  -- Roll D6 immediately
+  safeBroadcastAll("🎲 Rolling die for Hi-Tech Tax Campaign...", {1,1,0.6})
+  rollPhysicalDieAndRead(function(die, err)
+    if err then
+      warn("Die roll failed: "..tostring(err).." - using fallback")
+      die = math.random(1, 6)
+      safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
+    else
+      safeBroadcastAll("🎲 Die result: "..die, {0.8,0.9,1})
+    end
+    
+    if die <= 2 then
+      safeBroadcastAll("Hi-Tech Tax Campaign: Some documents were missing → no taxes collected.", {0.9,0.9,0.9})
+    elseif die <= 4 then
+      -- Each player pays 200 VIN per High-Tech item; initiator gains +2 Satisfaction
+      -- TODO: Count High-Tech items (need to query shop/inventory system)
+      for _, c in ipairs(COLORS) do
+        if c ~= color and isPlayableColor(c) then
+          -- TODO: Replace with actual High-Tech item count when available
+          moneySpend(c, 200)
+        end
+      end
+      safeBroadcastAll("Hi-Tech Tax Campaign: Each player pays 200 VIN per High-Tech item. "..color.." gains +2 Satisfaction.", {0.7,1,0.7})
+      satAdd(color, 2)
+    else
+    -- Each player pays 400 VIN per High-Tech item; initiator gains +4 Satisfaction
+    -- TODO: Count High-Tech items (need to query shop/inventory system)
+    for _, c in ipairs(COLORS) do
+      if c ~= color and isPlayableColor(c) then
+        -- TODO: Replace with actual High-Tech item count when available
+        moneySpend(c, 400)
+      end
+    end
+    safeBroadcastAll("Hi-Tech Tax Campaign: Each player pays 400 VIN per High-Tech item. "..color.." gains +4 Satisfaction.", {0.7,1,0.7})
+    satAdd(color, 4)
+    end
+  end)
+  
+  return true
+end
+
+function VOC_StartPublicServantPropertyTax(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[color] ~= VOC_PUBLIC_SERVANT then
+    safeBroadcastToColor("Only Public Servant can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  local level = state.levels[color] or 1
+  -- White bypasses level checks for testing
+  if color ~= "White" and level < 3 then
+    safeBroadcastToColor("Property Tax Campaign requires Public Servant Level 3.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(color, 2) then
+    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) to start Property Tax Campaign.", color, {1,0.6,0.2})
+    return false
+  end
+  if not spendAP(color, 2, "PS_L3_PROPERTY_TAX") then
+    safeBroadcastToColor("⛔ Failed to deduct 2 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  -- Roll D6 immediately
+  safeBroadcastAll("🎲 Rolling die for Property Tax Campaign...", {1,1,0.6})
+  rollPhysicalDieAndRead(function(die, err)
+    if err then
+      warn("Die roll failed: "..tostring(err).." - using fallback")
+      die = math.random(1, 6)
+      safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
+    else
+      safeBroadcastAll("🎲 Die result: "..die, {0.8,0.9,1})
+    end
+    
+    if die <= 2 then
+      safeBroadcastAll("Property Tax Campaign: Some documents were missing → no taxes collected.", {0.9,0.9,0.9})
+    elseif die <= 4 then
+      -- Each player pays 200 VIN per property level; initiator gains +3 Satisfaction
+      -- TODO: Count property levels (need to query EstateEngine)
+      for _, c in ipairs(COLORS) do
+        if c ~= color and isPlayableColor(c) then
+          -- TODO: Replace with actual property level count when available
+          moneySpend(c, 200)
+        end
+      end
+      safeBroadcastAll("Property Tax Campaign: Each player pays 200 VIN per property level. "..color.." gains +3 Satisfaction.", {0.7,1,0.7})
+      satAdd(color, 3)
+    else
+    -- Each player pays 400 VIN per property level; initiator gains +6 Satisfaction
+    -- TODO: Count property levels (need to query EstateEngine)
+    for _, c in ipairs(COLORS) do
+      if c ~= color and isPlayableColor(c) then
+        -- TODO: Replace with actual property level count when available
+        moneySpend(c, 400)
+      end
+    end
+    safeBroadcastAll("Property Tax Campaign: Each player pays 400 VIN per property level. "..color.." gains +6 Satisfaction.", {0.7,1,0.7})
+    satAdd(color, 6)
+    end
+  end)
+  
+  return true
+end
+
+function VOC_StartPublicServantPolicy(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[color] ~= VOC_PUBLIC_SERVANT then
+    safeBroadcastToColor("Only Public Servant can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  -- Check health (need -1 Health)
+  -- Check AP (need 3 AP)
+  
+  if not canSpendAP(color, 3) then
+    safeBroadcastToColor("⛔ Not enough AP (need 3 AP) for Policy Deadline.", color, {1,0.6,0.2})
+    return false
+  end
+  
+  addHealth(color, -1)
+  
+  if not spendAP(color, 3, "PS_SPECIAL_POLICY") then
+    safeBroadcastToColor("⛔ Failed to deduct 3 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  satAdd(color, 5)
+  addKnowledge(color, 1)
+  safeBroadcastAll("Policy Drafting Deadline: "..color.." gains +5 Satisfaction & +1 Knowledge.", {0.7,1,0.7})
+  
+  return true
+end
+
+function VOC_StartPublicServantBottleneck(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[color] ~= VOC_PUBLIC_SERVANT then
+    safeBroadcastToColor("Only Public Servant can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(color, 3) then
+    safeBroadcastToColor("⛔ Not enough AP (need 3 AP) for Bureaucratic Bottleneck.", color, {1,0.6,0.2})
+    return false
+  end
+  if not spendAP(color, 3, "PS_SPECIAL_BOTTLENECK") then
+    safeBroadcastToColor("⛔ Failed to deduct 3 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  safeBroadcastAll("🎲 Rolling die for Bureaucratic Bottleneck...", {1,1,0.6})
+  rollPhysicalDieAndRead(function(die, err)
+    if err then
+      warn("Die roll failed: "..tostring(err).." - using fallback")
+      die = math.random(1, 6)
+      safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
+    else
+      safeBroadcastAll("🎲 Die result: "..die, {0.8,0.9,1})
+    end
+    
+    if die <= 2 then
+      -- All other players lose 2 AP; initiator loses -2 Satisfaction
+      -- TODO: Deduct AP from other players
+      satAdd(color, -2)
+      safeBroadcastAll("Bureaucratic Bottleneck: System collapsed → All other players lose 2 AP. "..color.." loses -2 Satisfaction.", {1,0.7,0.2})
+    elseif die <= 4 then
+      safeBroadcastAll("Bureaucratic Bottleneck: Tried a lot but didn't manage to change anything → No effect.", {0.9,0.9,0.9})
+    else
+      satAdd(color, 7)
+      -- All other players gain +2 Satisfaction
+      for _, c in ipairs(COLORS) do
+        if c ~= color and isPlayableColor(c) then
+          satAdd(c, 2)
+        end
+      end
+      safeBroadcastAll("Bureaucratic Bottleneck: Reformed the whole system → "..color.." gains +7 Satisfaction, all other players gain +2 Satisfaction.", {0.7,1,0.7})
+    end
+  end)
+  
+  return true
+end
+
+-- =========================================================
+-- NGO WORKER ACTIONS
+-- =========================================================
+
+function VOC_StartNGOCharity(params)
+  params = params or {}
+  log("VOC_StartNGOCharity: Called with params="..tostring(params and "table" or "nil"))
+  
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then 
+    log("VOC_StartNGOCharity: ERROR - No valid color")
+    return false, "Invalid color" 
+  end
+  
+  -- If White is testing, use effectsTarget for initiator and effects
+  local effectsTarget = params.effectsTarget
+  local initiatorColor = effectsTarget or color
+  
+  log("VOC_StartNGOCharity: color="..tostring(color)..", effectsTarget="..tostring(effectsTarget)..", initiatorColor="..tostring(initiatorColor))
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[initiatorColor] ~= VOC_NGO_WORKER then
+    safeBroadcastToColor("Only NGO Worker can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  local level = state.levels[initiatorColor] or 1
+  if color ~= "White" and level < 1 then
+    safeBroadcastToColor("Start Charity requires NGO Worker Level 1.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(initiatorColor, 2) then
+    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) to start Charity.", initiatorColor, {1,0.6,0.2})
+    return false
+  end
+  if not spendAP(initiatorColor, 2, "NGO_L1_CHARITY") then
+    safeBroadcastToColor("⛔ Failed to deduct 2 AP.", initiatorColor, {1,0.6,0.2})
+    return false
+  end
+
+  safeBroadcastAll("🎲 Rolling die for Start Charity ("..initiatorColor..")...", {1,1,0.6})
+  rollPhysicalDieAndRead(function(die, err)
+    if err then
+      warn("Die roll failed: "..tostring(err).." - using fallback")
+      die = math.random(1, 6)
+      safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
+    else
+      safeBroadcastAll("🎲 Die result: "..die, {0.8,0.9,1})
+    end
+    
+    if die <= 2 then
+      safeBroadcastAll("Start Charity: Nothing happens.", {0.9,0.9,0.9})
+    elseif die <= 4 then
+      -- Each player pays 200 VIN
+      for _, c in ipairs(COLORS) do
+        if c ~= initiatorColor and isPlayableColor(c) then
+          moneySpend(c, 200)
+        end
+      end
+      safeBroadcastAll("Start Charity: Each player pays 200 VIN.", {0.7,1,0.7})
+    else
+      -- Each player pays 400 VIN; initiator gains 400 VIN reward
+      for _, c in ipairs(COLORS) do
+        if c ~= initiatorColor and isPlayableColor(c) then
+          moneySpend(c, 400)
+        end
+      end
+      moneyAdd(initiatorColor, 400)
+      safeBroadcastAll("Start Charity: Each player pays 400 VIN. "..initiatorColor.." gains 400 VIN reward.", {0.7,1,0.7})
+    end
+  end)
+  
+  return true
+end
+
+function VOC_StartNGOCrowdfunding(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[color] ~= VOC_NGO_WORKER then
+    safeBroadcastToColor("Only NGO Worker can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  local level = state.levels[color] or 1
+  -- White bypasses level checks for testing
+  if color ~= "White" and level < 2 then
+    safeBroadcastToColor("Crowdfunding Campaign requires NGO Worker Level 2.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(color, 2) then
+    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) to start Crowdfunding.", color, {1,0.6,0.2})
+    return false
+  end
+  if not spendAP(color, 2, "NGO_L2_CROWDFUND") then
+    safeBroadcastToColor("⛔ Failed to deduct 2 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  safeBroadcastAll("🎲 Rolling die for Crowdfunding Campaign...", {1,1,0.6})
+  rollPhysicalDieAndRead(function(die, err)
+    if err then
+      warn("Die roll failed: "..tostring(err).." - using fallback")
+      die = math.random(1, 6)
+      safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
+    else
+      safeBroadcastAll("🎲 Die result: "..die, {0.8,0.9,1})
+    end
+    
+    if die <= 2 then
+      safeBroadcastAll("Crowdfunding Campaign: Nothing happens.", {0.9,0.9,0.9})
+    elseif die <= 4 then
+      -- Each player pays 250 VIN
+      for _, c in ipairs(COLORS) do
+        if c ~= color and isPlayableColor(c) then
+          moneySpend(c, 250)
+        end
+      end
+      safeBroadcastAll("Crowdfunding Campaign: Each player pays 250 VIN.", {0.7,1,0.7})
+    else
+    -- Each player pays 400 VIN; initiator must spend this on High-Tech item
+    for _, c in ipairs(COLORS) do
+      if c ~= color and isPlayableColor(c) then
+        moneySpend(c, 400)
+      end
+    end
+    moneyAdd(color, 400)
+    -- TODO: Track spending requirement (initiator must spend this on High-Tech item)
+    safeBroadcastAll("Crowdfunding Campaign: Each player pays 400 VIN. "..color.." must spend this on High-Tech item.", {0.7,1,0.7})
+    end
+  end)
+  
+  return true
+end
+
+function VOC_StartNGOAdvocacy(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[color] ~= VOC_NGO_WORKER then
+    safeBroadcastToColor("Only NGO Worker can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  local level = state.levels[color] or 1
+  -- White bypasses level checks for testing
+  if color ~= "White" and level < 3 then
+    safeBroadcastToColor("Advocacy Pressure Campaign requires NGO Worker Level 3.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(color, 3) then
+    safeBroadcastToColor("⛔ Not enough AP (need 3 AP) to start Advocacy Campaign.", color, {1,0.6,0.2})
+    return false
+  end
+  if not spendAP(color, 3, "NGO_L3_ADVOCACY") then
+    safeBroadcastToColor("⛔ Failed to deduct 3 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  startInteraction({
+    id = "NGO_L3_ADVOCACY",
+    initiator = color,
+    title = "ADVOCACY PRESSURE CAMPAIGN",
+    subtitle = "NGO Worker Level 3 – Cost for you: Spend 3 AP",
+    joinCostText = "Other players choose YES or NO:",
+    effectText = "YES: Pay 300 VIN and gain +2 Satisfaction. NO: Lose -1 Satisfaction. You gain +1 Satisfaction per participant & +1 Skill once per campaign.",
+    joinCostAP = 0,  -- Money cost only for YES
+  })
+  return true
+end
+
+function VOC_StartNGOCrisis(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[color] ~= VOC_NGO_WORKER then
+    safeBroadcastToColor("Only NGO Worker can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(color, 1) then
+    safeBroadcastToColor("⛔ Not enough AP (need 1 AP) for Crisis Appeal.", color, {1,0.6,0.2})
+    return false
+  end
+  
+  if not moneySpend(color, 200) then
+    safeBroadcastToColor("⛔ Not enough money (need 200 VIN) for Crisis Appeal.", color, {1,0.6,0.2})
+    return false
+  end
+  
+  if not spendAP(color, 1, "NGO_SPECIAL_CRISIS") then
+    safeBroadcastToColor("⛔ Failed to deduct 1 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  startInteraction({
+    id = "NGO_SPECIAL_CRISIS",
+    initiator = color,
+    title = "INTERNATIONAL CRISIS APPEAL",
+    subtitle = "NGO Worker Special – Cost for you: Spend 1 AP & 200 VIN",
+    joinCostText = "Each other player chooses:",
+    effectText = "JOIN: Donate 200 VIN and gain +2 Satisfaction. OR IGNORE. You gain +2 Satisfaction for each joiner and +1 Satisfaction per refuser.",
+    joinCostAP = 0,  -- Money cost only
+  })
+  return true
+end
+
+function VOC_StartNGOScandal(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[color] ~= VOC_NGO_WORKER then
+    safeBroadcastToColor("Only NGO Worker can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(color, 2) then
+    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) for Donation Scandal.", color, {1,0.6,0.2})
+    return false
+  end
+  
+  if not moneySpend(color, 300) then
+    safeBroadcastToColor("⛔ Not enough money (need 300 VIN) for Donation Scandal.", color, {1,0.6,0.2})
+    return false
+  end
+  
+  if not spendAP(color, 2, "NGO_SPECIAL_SCANDAL") then
+    safeBroadcastToColor("⛔ Failed to deduct 2 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  safeBroadcastAll("🎲 Rolling die for Donation Scandal...", {1,1,0.6})
+  rollPhysicalDieAndRead(function(die, err)
+    if err then
+      warn("Die roll failed: "..tostring(err).." - using fallback")
+      die = math.random(1, 6)
+      safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
+    else
+      safeBroadcastAll("🎲 Die result: "..die, {0.8,0.9,1})
+    end
+    
+    if die <= 2 then
+      satAdd(color, -3)
+      safeBroadcastAll("Donation Scandal: Donor accuses you publicly → "..color.." loses -3 Satisfaction.", {1,0.7,0.2})
+    elseif die <= 4 then
+      satAdd(color, 4)
+      safeBroadcastAll("Donation Scandal: Issue resolved quietly → "..color.." gains +4 Satisfaction.", {0.7,1,0.7})
+    else
+      satAdd(color, 6)
+      addKnowledge(color, 1)
+      safeBroadcastAll("Donation Scandal: Donor apologizes publicly → "..color.." gains +6 Satisfaction & +1 Knowledge.", {0.7,1,0.7})
+    end
+  end)
+  
+  return true
+end
+
+-- =========================================================
+-- ENTREPRENEUR ACTIONS
+-- =========================================================
+
+function VOC_StartEntrepreneurFlashSale(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[color] ~= VOC_ENTREPRENEUR then
+    safeBroadcastToColor("Only Entrepreneur can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  local level = state.levels[color] or 1
+  if level < 1 then
+    safeBroadcastToColor("Flash Sale Promotion requires Entrepreneur Level 1.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(color, 1) then
+    safeBroadcastToColor("⛔ Not enough AP (need 1 AP) to start Flash Sale.", color, {1,0.6,0.2})
+    return false
+  end
+  if not spendAP(color, 1, "ENT_L1_FLASH_SALE") then
+    safeBroadcastToColor("⛔ Failed to deduct 1 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  -- All players may immediately buy one Consumable with 30% discount
+  -- Initiator gains +1 Satisfaction per other player who buys
+  -- TODO: Implement shop interaction
+  safeBroadcastAll("Flash Sale: All players may buy one Consumable with 30% discount. "..color.." gains +1 Satisfaction per buyer.", {0.7,1,0.7})
+  
+  return true
+end
+
+function VOC_StartEntrepreneurTraining(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[color] ~= VOC_ENTREPRENEUR then
+    safeBroadcastToColor("Only Entrepreneur can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  local level = state.levels[color] or 1
+  -- White bypasses level checks for testing
+  if color ~= "White" and level < 2 then
+    safeBroadcastToColor("Commercial Training Course requires Entrepreneur Level 2.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(color, 2) then
+    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) to start Training Course.", color, {1,0.6,0.2})
+    return false
+  end
+  if not spendAP(color, 2, "ENT_L2_TRAINING") then
+    safeBroadcastToColor("⛔ Failed to deduct 2 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  startInteraction({
+    id = "ENT_L2_TRAINING",
+    initiator = color,
+    title = "COMMERCIAL TRAINING COURSE",
+    subtitle = "Entrepreneur Level 2 – Cost for you: Spend 2 AP",
+    joinCostText = "Others may pay 200 VIN to participate.",
+    effectText = "Each participant may improve Knowledge or Skills. Exam time! D6: 1=Failed, 2-5=Passed (+1 K/S), 6=Genius (+2 K/S). You gain +1 Satisfaction per participant.",
+    joinCostAP = 0,  -- Money cost only
+  })
+  return true
+end
+
+function VOC_StartEntrepreneurExpansion(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[color] ~= VOC_ENTREPRENEUR then
+    safeBroadcastToColor("Only Entrepreneur can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(color, 2) then
+    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) for Aggressive Expansion.", color, {1,0.6,0.2})
+    return false
+  end
+  
+  if not moneySpend(color, 300) then
+    safeBroadcastToColor("⛔ Not enough money (need 300 VIN) for Aggressive Expansion.", color, {1,0.6,0.2})
+    return false
+  end
+  
+  if not spendAP(color, 2, "ENT_SPECIAL_EXPANSION") then
+    safeBroadcastToColor("⛔ Failed to deduct 2 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  safeBroadcastAll("🎲 Rolling die for Aggressive Expansion...", {1,1,0.6})
+  rollPhysicalDieAndRead(function(die, err)
+    if err then
+      warn("Die roll failed: "..tostring(err).." - using fallback")
+      die = math.random(1, 6)
+      safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
+    else
+      safeBroadcastAll("🎲 Die result: "..die, {0.8,0.9,1})
+    end
+    
+    if die <= 2 then
+      satAdd(color, -2)
+      moneySpend(color, 200)
+      safeBroadcastAll("Aggressive Expansion: Collapse → "..color.." loses -2 Satisfaction & -200 VIN.", {1,0.7,0.2})
+    elseif die <= 4 then
+      satAdd(color, 3)
+      safeBroadcastAll("Aggressive Expansion: Moderate growth → "..color.." gains +3 Satisfaction.", {0.7,1,0.7})
+    else
+      satAdd(color, 6)
+      moneyAdd(color, 800)
+      safeBroadcastAll("Aggressive Expansion: Massive success → "..color.." gains +6 Satisfaction & +800 VIN.", {0.7,1,0.7})
+    end
+  end)
+  
+  return true
+end
+
+function VOC_StartEntrepreneurEmployeeTraining(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[color] ~= VOC_ENTREPRENEUR then
+    safeBroadcastToColor("Only Entrepreneur can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(color, 2) then
+    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) for Employee Training.", color, {1,0.6,0.2})
+    return false
+  end
+  
+  if not moneySpend(color, 500) then
+    safeBroadcastToColor("⛔ Not enough money (need 500 VIN) for Employee Training.", color, {1,0.6,0.2})
+    return false
+  end
+  
+  if not spendAP(color, 2, "ENT_SPECIAL_TRAINING") then
+    safeBroadcastToColor("⛔ Failed to deduct 2 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  if not moneySpend(color, 500) then
+    safeBroadcastToColor("⛔ Not enough money (need 500 VIN) for Employee Training.", color, {1,0.6,0.2})
+    return false
+  end
+  satAdd(color, 2)
+  addSkills(color, 2)
+  safeBroadcastAll("Employee Training: "..color.." gains +2 Satisfaction & +2 Skills.", {0.7,1,0.7})
+  
+  return true
+end
+
+-- =========================================================
+-- GANGSTER ACTIONS
+-- =========================================================
+
+function VOC_StartGangsterCrime(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+  
+  -- If White is testing, use effectsTarget for initiator and effects
+  local effectsTarget = params.effectsTarget
+  local initiatorColor = effectsTarget or color
+  
+  log("VOC_StartGangsterCrime: color="..tostring(color)..", effectsTarget="..tostring(effectsTarget)..", initiatorColor="..tostring(initiatorColor))
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[initiatorColor] ~= VOC_GANGSTER then
+    safeBroadcastToColor("Only Gangster can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  local level = tonumber(params.level) or (state.levels[initiatorColor] or 1)
+  if color ~= "White" and (level < 1 or level > 3) then
+    safeBroadcastToColor("Invalid crime level.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(initiatorColor, 2) then
+    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) to commit crime.", initiatorColor, {1,0.6,0.2})
+    return false
+  end
+  
+  -- Show target selection UI
+  startTargetSelection({
+    initiator = initiatorColor,
+    actionId = "GANG_L"..level.."_CRIME",
+    title = "SELECT TARGET FOR CRIME",
+    subtitle = "Choose a player to commit crime against:",
+    requireChildren = false,
+    callback = function(targetColor)
+      log("Crime: "..initiatorColor.." selected target: "..targetColor)
+      
+      -- Now spend AP and execute action
+      if not spendAP(initiatorColor, 2, "GANG_L"..level.."_CRIME") then
+        safeBroadcastToColor("⛔ Failed to deduct 2 AP.", initiatorColor, {1,0.6,0.2})
+        return
+      end
+      
+      -- Roll D6 for crime outcome
+      safeBroadcastAll("🎲 Rolling die for Crime ("..initiatorColor.." → "..targetColor..")...", {1,1,0.6})
+      rollPhysicalDieAndRead(function(die, err)
+        if err then
+          warn("Die roll failed: "..tostring(err).." - using fallback")
+          die = math.random(1, 6)
+          safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
+        else
+          safeBroadcastAll("🎲 Die result: "..die, {0.8,0.9,1})
+        end
+        
+        local stolenMoney = 0
+        local canStealItem = false
+        
+        if level == 1 then
+          if die <= 2 then
+            safeBroadcastAll("Crime: Failed → nothing happens.", {0.9,0.9,0.9})
+            return true
+          elseif die <= 4 then
+            stolenMoney = 300
+            addWoundedStatus(targetColor)
+            local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
+            safeBroadcastAll("Crime: Partial success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualAmount.." VIN.", {0.7,1,0.7})
+          else
+            stolenMoney = 500
+            canStealItem = true
+            addWoundedStatus(targetColor)
+            local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
+            safeBroadcastAll("Crime: Full success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualAmount.." VIN (or can choose High-Tech item).", {0.7,1,0.7})
+          end
+          satAdd(initiatorColor, die)  -- Satisfaction = amount on D6
+        elseif level == 2 then
+          if die <= 2 then
+            safeBroadcastAll("Crime: Failed → nothing happens.", {0.9,0.9,0.9})
+            return true
+          elseif die <= 4 then
+            stolenMoney = 750
+            addWoundedStatus(targetColor)
+            local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
+            safeBroadcastAll("Crime: Partial success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualAmount.." VIN.", {0.7,1,0.7})
+          else
+            stolenMoney = 1000
+            canStealItem = true
+            addWoundedStatus(targetColor)
+            local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
+            safeBroadcastAll("Crime: Full success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualAmount.." VIN (or can choose High-Tech item).", {0.7,1,0.7})
+          end
+          satAdd(initiatorColor, die)
+        else  -- level 3
+          if die <= 2 then
+            safeBroadcastAll("Crime: Failed → nothing happens.", {0.9,0.9,0.9})
+            return true
+          elseif die <= 4 then
+            stolenMoney = 1500
+            addWoundedStatus(targetColor)
+            local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
+            safeBroadcastAll("Crime: Partial success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualAmount.." VIN.", {0.7,1,0.7})
+          else
+            stolenMoney = 2000
+            canStealItem = true
+            addWoundedStatus(targetColor)
+            local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
+            safeBroadcastAll("Crime: Full success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualAmount.." VIN (or can choose High-Tech item).", {0.7,1,0.7})
+          end
+          satAdd(initiatorColor, die)
+        end
+        
+        -- Note: High-Tech item selection needs manual player action in the current system
+        if canStealItem then
+          safeBroadcastToColor("You can choose to steal a High-Tech item instead of the money. (Manual selection required)", color, {1,1,0.6})
+        end
+      end)
+    end
+  })
+  
+  return true
+end
+
+function VOC_StartGangsterRobinHood(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[color] ~= VOC_GANGSTER then
+    safeBroadcastToColor("Only Gangster can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(color, 2) then
+    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) for Robin Hood Job.", color, {1,0.6,0.2})
+    return false
+  end
+  if not spendAP(color, 2, "GANG_SPECIAL_ROBIN") then
+    safeBroadcastToColor("⛔ Failed to deduct 2 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  safeBroadcastAll("🎲 Rolling die for Robin Hood Job...", {1,1,0.6})
+  rollPhysicalDieAndRead(function(die, err)
+    if err then
+      warn("Die roll failed: "..tostring(err).." - using fallback")
+      die = math.random(1, 6)
+      safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
+    else
+      safeBroadcastAll("🎲 Die result: "..die, {0.8,0.9,1})
+    end
+    
+    if die <= 2 then
+      -- Pay 200 VIN to bank
+      moneySpend(color, 200)
+      satAdd(color, -2)
+      safeBroadcastAll("Robin Hood Job: Plan leaks → "..color.." pays 200 VIN to bank & loses -2 Satisfaction.", {1,0.7,0.2})
+    elseif die <= 4 then
+      -- Steal+donate up to 500 VIN (gain money, then donate it)
+      moneyAdd(color, 500)
+      -- TODO: Donate to bank/charity (for now just gain the money)
+      satAdd(color, 4)
+      safeBroadcastAll("Robin Hood Job: Steal+donate up to 500 VIN → "..color.." gains +4 Satisfaction.", {0.7,1,0.7})
+    else
+      -- Steal+donate up to 1000 VIN
+      moneyAdd(color, 1000)
+      -- TODO: Donate to bank/charity (for now just gain the money)
+      satAdd(color, 7)
+      safeBroadcastAll("Robin Hood Job: Steal+donate up to 1000 VIN → "..color.." gains +7 Satisfaction.", {0.7,1,0.7})
+    end
+  end)
+  
+  return true
+end
+
+function VOC_StartGangsterProtection(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+
+  -- White bypasses vocation checks for testing
+  if color ~= "White" and state.vocations[color] ~= VOC_GANGSTER then
+    safeBroadcastToColor("Only Gangster can use this action.", color, {1,0.7,0.2})
+    return false
+  end
+
+  if not canSpendAP(color, 3) then
+    safeBroadcastToColor("⛔ Not enough AP (need 3 AP) for Protection Racket.", color, {1,0.6,0.2})
+    return false
+  end
+  if not spendAP(color, 3, "GANG_SPECIAL_PROTECTION") then
+    safeBroadcastToColor("⛔ Failed to deduct 3 AP.", color, {1,0.6,0.2})
+    return false
+  end
+
+  startInteraction({
+    id = "GANG_SPECIAL_PROTECTION",
+    initiator = color,
+    title = "PROTECTION RACKET",
+    subtitle = "Gangster Special – Cost for you: Spend 3 AP",
+    joinCostText = "Each other player chooses:",
+    effectText = "PAY: Spend 200 VIN per vocation level. You gain +1 Satisfaction per payer and keep the money. REFUSE: Lose -2 Health & -2 Satisfaction. This event raises heat level by 1.",
+    joinCostAP = 0,  -- Money cost only for PAY
+  })
   return true
 end
 
@@ -1622,9 +4306,10 @@ function VOC_CanPromote(params)
     if #parts > 0 then return false, failMsg(parts) end
     -- Check additional cost (e.g., Celebrity Level 3 needs 4000 VIN)
     if promotion.additionalCost then
-      -- TODO: Check if player has enough money
-      -- For now, just note it
-      log("Additional cost required: " .. promotion.additionalCost .. " VIN")
+      local currentMoney = getMoney(color)
+      if currentMoney < promotion.additionalCost then
+        return false, "Not enough money (need " .. promotion.additionalCost .. " VIN, have " .. currentMoney .. ")"
+      end
     end
     return true, "All requirements met"
     
@@ -1716,7 +4401,378 @@ local uiState = {
   activeColor = nil,
   currentScreen = nil,  -- "selection", "summary", or nil
   previewedVocation = nil,
+  previewedVocationOwner = nil, -- Which player owns the previewed vocation
+  currentActionMap = {},  -- [buttonIndex] = actionId for current vocation/level
+  testingBypassActive = false   -- True when White is testing actions (bypass all checks)
 }
+
+-- =========================================================
+-- VOCATION ACTIONS SYSTEM
+-- =========================================================
+
+-- Get available actions for a vocation at a specific level
+-- Returns array of {buttonIndex, label, actionId} where buttonIndex is 1-5
+local function getVocationActions(vocation, level)
+  local actions = {}
+  log("getVocationActions: vocation="..tostring(vocation)..", level="..tostring(level))
+  
+  if vocation == VOC_SOCIAL_WORKER then
+    -- Show buttons based on level: level 1 shows button 1, level 2 shows buttons 1-2, level 3 shows all 1-3
+    if level >= 1 then
+      log("getVocationActions: Adding Social Worker Level 1 action (Practical workshop)")
+      table.insert(actions, {buttonIndex = 1, label = "Practical workshop", actionId = "SW_L1_PRACTICAL_WORKSHOP"})
+    end
+    if level >= 2 then
+      log("getVocationActions: Adding Social Worker Level 2 action (Community wellbeing)")
+      table.insert(actions, {buttonIndex = 2, label = "Community wellbeing", actionId = "SW_L2_COMMUNITY_WELLBEING"})
+    end
+    if level >= 3 then
+      log("getVocationActions: Adding Social Worker Level 3 action (Expose social case)")
+      table.insert(actions, {buttonIndex = 3, label = "Expose social case", actionId = "SW_L3_EXPOSE_CASE"})
+    end
+    -- Special actions removed for now
+    
+  elseif vocation == VOC_CELEBRITY then
+    -- Show buttons based on level
+    if level >= 1 then
+      table.insert(actions, {buttonIndex = 1, label = "Live Street Performance", actionId = "CELEB_L1_STREET_PERF"})
+    end
+    if level >= 2 then
+      table.insert(actions, {buttonIndex = 2, label = "Meet & Greet", actionId = "CELEB_L2_MEET_GREET"})
+    end
+    if level >= 3 then
+      table.insert(actions, {buttonIndex = 3, label = "Charity Stream", actionId = "CELEB_L3_CHARITY_STREAM"})
+    end
+    -- Special actions removed for now
+    
+  elseif vocation == VOC_PUBLIC_SERVANT then
+    -- Show buttons based on level
+    if level >= 1 then
+      table.insert(actions, {buttonIndex = 1, label = "Income Tax Campaign", actionId = "PS_L1_INCOME_TAX"})
+    end
+    if level >= 2 then
+      table.insert(actions, {buttonIndex = 2, label = "Hi-Tech Tax Campaign", actionId = "PS_L2_HITECH_TAX"})
+    end
+    if level >= 3 then
+      table.insert(actions, {buttonIndex = 3, label = "Property Tax Campaign", actionId = "PS_L3_PROPERTY_TAX"})
+    end
+    -- Special actions removed for now
+    
+  elseif vocation == VOC_NGO_WORKER then
+    -- Show buttons based on level
+    if level >= 1 then
+      table.insert(actions, {buttonIndex = 1, label = "Start Charity", actionId = "NGO_L1_CHARITY"})
+    end
+    if level >= 2 then
+      table.insert(actions, {buttonIndex = 2, label = "Crowdfunding", actionId = "NGO_L2_CROWDFUND"})
+    end
+    if level >= 3 then
+      table.insert(actions, {buttonIndex = 3, label = "Advocacy Campaign", actionId = "NGO_L3_ADVOCACY"})
+    end
+    -- Special actions removed for now
+    
+  elseif vocation == VOC_ENTREPRENEUR then
+    -- Show buttons based on level
+    if level >= 1 then
+      table.insert(actions, {buttonIndex = 1, label = "Flash Sale", actionId = "ENT_L1_FLASH_SALE"})
+    end
+    if level >= 2 then
+      table.insert(actions, {buttonIndex = 2, label = "Training Course", actionId = "ENT_L2_TRAINING"})
+    end
+    -- Level 3 has no action (only passive perks)
+    -- Special actions removed for now
+    
+  elseif vocation == VOC_GANGSTER then
+    -- Show buttons based on level
+    if level >= 1 then
+      table.insert(actions, {buttonIndex = 1, label = "Crime vs Player Lv1", actionId = "GANG_L1_CRIME"})
+    end
+    if level >= 2 then
+      table.insert(actions, {buttonIndex = 2, label = "Crime vs Player Lv2", actionId = "GANG_L2_CRIME"})
+    end
+    if level >= 3 then
+      table.insert(actions, {buttonIndex = 3, label = "Crime vs Player Lv3", actionId = "GANG_L3_CRIME"})
+    end
+    -- Special actions removed for now
+  end
+  
+  return actions
+end
+
+-- Update action button visibility and labels
+local function updateActionButtons(actions)
+  if not UI then return end
+  
+  -- Clear previous action map
+  uiState.currentActionMap = {}
+  
+  -- Hide all buttons first
+  for i = 1, 5 do
+    UI.setAttribute("btnAction"..i, "active", "false")
+    UI.setAttribute("btnAction"..i, "text", "")
+  end
+  
+  -- Show and label buttons that have actions
+  for _, action in ipairs(actions) do
+    if action.buttonIndex >= 1 and action.buttonIndex <= 5 then
+      log("updateActionButtons: Setting button "..action.buttonIndex.." - label="..tostring(action.label)..", actionId="..tostring(action.actionId))
+      UI.setAttribute("btnAction"..action.buttonIndex, "text", action.label)
+      UI.setAttribute("btnAction"..action.buttonIndex, "active", "true")
+      -- Store actionId mapping
+      uiState.currentActionMap[action.buttonIndex] = action.actionId
+    end
+  end
+  log("updateActionButtons: Complete. currentActionMap="..tostring(JSON.encode(uiState.currentActionMap)))
+end
+
+-- Forward declarations for UI functions
+local hideSummaryUI
+
+-- Shared router: dispatch by actionId (used by UI_VocationAction and RunVocationEventCardAction)
+local function executeVocationActionById(actionId, params)
+  if actionId == "SW_L1_PRACTICAL_WORKSHOP" then
+    return VOC_StartSocialWorkerPracticalWorkshop(params)
+  elseif actionId == "SW_L2_COMMUNITY_WELLBEING" then
+    return VOC_StartSocialWorkerCommunitySession(params)
+  elseif actionId == "SW_L3_EXPOSE_CASE" then
+    return VOC_StartSocialWorkerExposeCase(params)
+  elseif actionId == "SW_SPECIAL_HOMELESS" then
+    return VOC_StartSocialWorkerHomelessShelter(params)
+  elseif actionId == "SW_SPECIAL_REMOVAL" then
+    return VOC_StartSocialWorkerRemoval(params)
+  elseif actionId == "CELEB_L1_STREET_PERF" then
+    return VOC_StartCelebrityStreetPerformance(params)
+  elseif actionId == "CELEB_L2_MEET_GREET" then
+    return VOC_StartCelebrityMeetGreet(params)
+  elseif actionId == "CELEB_L3_CHARITY_STREAM" then
+    return VOC_StartCelebrityCharityStream(params)
+  elseif actionId == "CELEB_SPECIAL_COLLAB" then
+    return VOC_StartCelebrityCollaboration(params)
+  elseif actionId == "CELEB_SPECIAL_MEETUP" then
+    return VOC_StartCelebrityMeetup(params)
+  elseif actionId == "PS_L1_INCOME_TAX" then
+    return VOC_StartPublicServantIncomeTax(params)
+  elseif actionId == "PS_L2_HITECH_TAX" then
+    return VOC_StartPublicServantHiTechTax(params)
+  elseif actionId == "PS_L3_PROPERTY_TAX" then
+    return VOC_StartPublicServantPropertyTax(params)
+  elseif actionId == "PS_SPECIAL_POLICY" then
+    return VOC_StartPublicServantPolicy(params)
+  elseif actionId == "PS_SPECIAL_BOTTLENECK" then
+    return VOC_StartPublicServantBottleneck(params)
+  elseif actionId == "NGO_L1_CHARITY" then
+    return VOC_StartNGOCharity(params)
+  elseif actionId == "NGO_L2_CROWDFUND" then
+    return VOC_StartNGOCrowdfunding(params)
+  elseif actionId == "NGO_L3_ADVOCACY" then
+    return VOC_StartNGOAdvocacy(params)
+  elseif actionId == "NGO_SPECIAL_CRISIS" then
+    return VOC_StartNGOCrisis(params)
+  elseif actionId == "NGO_SPECIAL_SCANDAL" then
+    return VOC_StartNGOScandal(params)
+  elseif actionId == "ENT_L1_FLASH_SALE" then
+    return VOC_StartEntrepreneurFlashSale(params)
+  elseif actionId == "ENT_L2_TRAINING" then
+    return VOC_StartEntrepreneurTraining(params)
+  elseif actionId == "ENT_SPECIAL_EXPANSION" then
+    return VOC_StartEntrepreneurExpansion(params)
+  elseif actionId == "ENT_SPECIAL_TRAINING" then
+    return VOC_StartEntrepreneurEmployeeTraining(params)
+  elseif actionId == "GANG_L1_CRIME" then
+    params.level = 1
+    return VOC_StartGangsterCrime(params)
+  elseif actionId == "GANG_L2_CRIME" then
+    params.level = 2
+    return VOC_StartGangsterCrime(params)
+  elseif actionId == "GANG_L3_CRIME" then
+    params.level = 3
+    return VOC_StartGangsterCrime(params)
+  elseif actionId == "GANG_SPECIAL_ROBIN" then
+    return VOC_StartGangsterRobinHood(params)
+  elseif actionId == "GANG_SPECIAL_PROTECTION" then
+    return VOC_StartGangsterProtection(params)
+  else
+    local color = params and params.color
+    safeBroadcastToColor("Action not implemented: "..tostring(actionId), color or "White", {1,0.6,0.2})
+    return false, "Action not implemented"
+  end
+end
+
+-- Handle action button click
+function UI_VocationAction(params)
+  log("=== UI_VocationAction START ===")
+  
+  -- Defensive check: ensure params exists
+  if not params then
+    log("UI_VocationAction: ERROR - params is nil!")
+    safeBroadcastToColor("Error: Action parameters missing.", "White", {1,0.6,0.2})
+    return false, "Params is nil"
+  end
+  
+  -- Defensive check: ensure uiState exists
+  if not uiState then
+    log("UI_VocationAction: ERROR - uiState is nil!")
+    safeBroadcastToColor("Error: UI state not initialized.", "White", {1,0.6,0.2})
+    return false, "uiState is nil"
+  end
+  
+  params = params or {}
+  local originalColor = params.playerColor
+  local color = normalizeColor(params.playerColor)
+  log("UI_VocationAction: playerColor="..tostring(originalColor)..", normalized="..tostring(color))
+  log("UI_VocationAction: previewedVocation="..tostring(uiState.previewedVocation)..", previewedVocationOwner="..tostring(uiState.previewedVocationOwner))
+  
+  -- For White (spectator/host): find which vocation is being viewed
+  -- White stays as White for bypass checks, but we track the actual player for effects
+  local effectsTarget = nil  -- The actual player who receives effects
+  
+  if color == "White" then
+    log("UI_VocationAction: White player detected - finding vocation owner")
+    
+    -- FIRST PRIORITY: Use the tracked owner from uiState (set when showSummaryUI was called)
+    if uiState.previewedVocationOwner then
+      effectsTarget = uiState.previewedVocationOwner
+      log("UI_VocationAction: Using tracked vocation owner: "..tostring(effectsTarget))
+    -- Second check: if viewing a specific player's vocation, find who owns it
+    elseif uiState.previewedVocation then
+      -- Find who owns this vocation (only one player can own each vocation)
+      for _, c in ipairs(COLORS) do
+        if state.vocations[c] == uiState.previewedVocation then
+          effectsTarget = c
+          log("UI_VocationAction: Found vocation owner via search: "..tostring(c))
+          break
+        end
+      end
+    end
+    
+    -- Fallback: use active turn color
+    if not effectsTarget then
+      effectsTarget = getActiveTurnColor()
+      log("UI_VocationAction: Using active turn color as fallback: "..tostring(effectsTarget))
+    end
+    
+    -- Fallback: use first player with a vocation
+    if not effectsTarget then
+      for _, c in ipairs(COLORS) do
+        if state.vocations[c] then
+          effectsTarget = c
+          log("UI_VocationAction: Using first vocation owner as fallback: "..tostring(c))
+          break
+        end
+      end
+    end
+    
+    if not effectsTarget then
+      log("UI_VocationAction: White player, no vocation owner found")
+      safeBroadcastToColor("No vocation owner found. Assign a vocation to a player first.", "White", {1,0.6,0.2})
+      return false, "No vocation owner"
+    end
+    
+    -- White stays White for bypass, effects go to the actual player
+    log("UI_VocationAction: ✓ White testing mode: color=White (bypass), effectsTarget="..tostring(effectsTarget))
+    params.effectsTarget = effectsTarget
+    
+    -- Set bypass flag (check uiState exists first)
+    if uiState then
+      uiState.testingBypassActive = true
+      
+      -- Clear bypass flag after action completes
+      Wait.time(function()
+        -- Defensive: check uiState still exists in callback
+        if uiState then
+          uiState.testingBypassActive = false
+          log("UI_VocationAction: Cleared testing bypass flag after action")
+        else
+          log("UI_VocationAction: WARNING - uiState is nil in Wait.time callback")
+        end
+      end, 5)  -- Increased delay to allow interaction to complete
+    else
+      log("UI_VocationAction: WARNING - uiState is nil, cannot set testing bypass flag")
+    end
+  elseif not color then
+    color = getActorColor()
+    log("UI_VocationAction: Fallback to getActorColor: "..tostring(color))
+  end
+  
+  -- Pass color to action functions
+  log("UI_VocationAction: params.color="..tostring(color)..", effectsTarget="..tostring(params.effectsTarget or "none"))
+  params.color = color
+  
+  if not color then
+    log("UI_VocationAction: Invalid color after all checks")
+    safeBroadcastToColor("Invalid player color. Cannot execute action.", params.playerColor or "White", {1,0.6,0.2})
+    return false, "Invalid color"
+  end
+  
+  log("UI_VocationAction: Final color="..tostring(color))
+  
+  local buttonIndex = tonumber(params.buttonIndex)
+  if not buttonIndex or buttonIndex < 1 or buttonIndex > 5 then
+    log("UI_VocationAction: Invalid buttonIndex="..tostring(params.buttonIndex))
+    safeBroadcastToColor("Invalid action button.", color, {1,0.6,0.2})
+    return false, "Invalid button index"
+  end
+  
+  log("UI_VocationAction: buttonIndex="..tostring(buttonIndex))
+  log("UI_VocationAction: currentActionMap="..tostring(JSON and JSON.encode(uiState.currentActionMap) or "JSON not available"))
+  
+  if not uiState.currentActionMap then
+    log("UI_VocationAction: ERROR - currentActionMap is nil!")
+    safeBroadcastToColor("Action map not initialized. Please try reopening the vocation UI.", color, {1,0.6,0.2})
+    return false, "Action map is nil"
+  end
+  
+  local actionId = uiState.currentActionMap[buttonIndex]
+  log("UI_VocationAction: actionId="..tostring(actionId))
+  
+  if not actionId then
+    log("UI_VocationAction: No actionId found for button "..tostring(buttonIndex))
+    safeBroadcastToColor("This action is not available. Button "..tostring(buttonIndex).." has no action mapped.", color, {1,0.6,0.2})
+    return false, "No action for button "..buttonIndex
+  end
+  
+  log("UI_VocationAction: Executing action "..tostring(actionId).." for "..tostring(color))
+  
+  -- Close the vocation explanation UI so player can see the die roll
+  -- Use pcall to safely call hideSummaryUI in case of scoping issues
+  pcall(function()
+    if hideSummaryUI then
+      hideSummaryUI()
+    else
+      -- Fallback: directly hide the UI panels
+      if UI then
+        UI.setAttribute("vocationSummaryPanel", "active", "false")
+        UI.setAttribute("selectionCardPanel", "active", "false")
+        if uiState then
+          uiState.currentScreen = "selection"
+          uiState.previewedVocation = nil
+          uiState.previewedVocationOwner = nil
+        end
+      end
+    end
+  end)
+  
+  return executeVocationActionById(actionId, params)
+end
+
+-- Called by Event Engine when a player chooses a vocation side on a Vocation Event card.
+-- params: { playerColor, actionId }
+function RunVocationEventCardAction(params)
+  if not params or not params.playerColor or not params.actionId then
+    pcall(function() broadcastToAll("Vocation Event: missing playerColor or actionId.", {1,0.6,0.2}) end)
+    return false, "Missing params"
+  end
+  local color = normalizeColor(params.playerColor)
+  if not color then
+    pcall(function() broadcastToAll("Vocation Event: invalid player color.", {1,0.6,0.2}) end)
+    return false, "Invalid color"
+  end
+  local actionParams = {
+    color = color,
+    effectsTarget = color,
+  }
+  return executeVocationActionById(params.actionId, actionParams)
+end
 
 -- Safe UI setters: missing element IDs should NOT break the whole flow
 local function uiSet(id, attr, value)
@@ -1737,8 +4793,8 @@ local function uiGet(id, attr)
 end
 
 
--- Hide the Vocation Summary UI panel (must be defined before showSelectionUI)
-local function hideSummaryUI()
+-- Define hideSummaryUI (forward-declared earlier)
+hideSummaryUI = function()
   if not UI then 
     log("hideSummaryUI: UI is nil")
     return 
@@ -1748,8 +4804,15 @@ local function hideSummaryUI()
     UI.setAttribute("vocationSummaryPanel", "active", "false")
     UI.setAttribute("selectionCardPanel", "active", "false")
   end)
-  uiState.currentScreen = "selection"
-  uiState.previewedVocation = nil
+  
+  -- Defensive: check uiState exists before indexing
+  if uiState then
+    uiState.currentScreen = "selection"
+    uiState.previewedVocation = nil
+    uiState.previewedVocationOwner = nil
+  else
+    log("hideSummaryUI: WARNING - uiState is nil, cannot clear state")
+  end
 end
 
 -- Hide the Vocation Selection UI panel
@@ -1871,7 +4934,7 @@ local function showSelectionUI(color, points, showSciencePointsLabelParam)
       UI.setAttribute("selectionKnowledgeSkillLine", "active", "false")
       log("DEBUG: Set subtitle to: Player: " .. color .. " | Science Points=" .. tostring(sciencePoints))
     else
-      -- Youth (round 1 or round 6): show Knowledge • Skill on one line
+      -- Youth (round 1 or round 6): show Knowledge • Skills on one line
       UI.setAttribute("selectionSciencePoints", "active", "false")
       UI.setAttribute("selectionSciencePoints", "text", "")
       local k, s = 0, 0
@@ -1882,9 +4945,9 @@ local function showSelectionUI(color, points, showSciencePointsLabelParam)
           s = ks.s or 0
         end
       end
-      UI.setAttribute("selectionKnowledgeSkillLine", "text", "Knowledge: " .. tostring(k) .. "  •  Skill: " .. tostring(s))
+      UI.setAttribute("selectionKnowledgeSkillLine", "text", "Knowledge: " .. tostring(k) .. "  •  Skills: " .. tostring(s))
       UI.setAttribute("selectionKnowledgeSkillLine", "active", "true")
-      log("DEBUG: Set subtitle to: Player: " .. color .. " | Knowledge=" .. tostring(k) .. " Skill=" .. tostring(s))
+      log("DEBUG: Set subtitle to: Player: " .. color .. " | Knowledge=" .. tostring(k) .. " Skills=" .. tostring(s))
     end
 
     -- Update button states (disable taken vocations)
@@ -1993,6 +5056,22 @@ local function showSummaryUI(color, vocation, previewOnly)
     end
   end
   
+  -- Work out who actually OWNS this vocation (if anyone) - declare outside pcall
+  local ownerColor = nil
+  for _, c in ipairs(COLORS) do
+    if state.vocations[c] == vocation then
+      ownerColor = c
+      break
+    end
+  end
+  local viewerColor = color
+  
+  -- Also check if the viewer's vocation matches (in case they're viewing their own)
+  if not ownerColor and state.vocations[viewerColor] == vocation then
+    ownerColor = viewerColor
+    log("showSummaryUI: Viewer owns this vocation: "..tostring(viewerColor))
+  end
+  
   local ok, err = pcall(function()
     log("showSummaryUI: Setting UI attributes...")
     
@@ -2063,13 +5142,70 @@ local function showSummaryUI(color, vocation, previewOnly)
       UI.setAttribute("btnConfirm", "color", "#4a90e2")
     end
     
-    -- "Show explanation" (read-only): hide Back/Confirm, show Exit. Selection flow: show Back/Confirm, hide Exit.
+    log("showSummaryUI: ownerColor="..tostring(ownerColor)..", viewerColor="..tostring(viewerColor)..", previewOnly="..tostring(previewOnly)..", vocation="..tostring(vocation))
+    if viewerColor then
+      log("showSummaryUI: state.vocations["..tostring(viewerColor).."]="..tostring(state.vocations[viewerColor]))
+      log("showSummaryUI: state.levels["..tostring(viewerColor).."]="..tostring(state.levels[viewerColor] or "nil"))
+    end
+    
+    -- "Show explanation" (read-only): hide Back/Confirm, show Exit.
+    -- Selection / other flows: show Back/Confirm, hide Exit.
+    log("showSummaryUI: previewOnly="..tostring(previewOnly))
     if previewOnly then
       UI.setAttribute("actionButtons", "active", "false")
       UI.setAttribute("btnExit", "active", "true")
+      log("showSummaryUI: Preview mode - hiding actionButtons (Back/Confirm), showing Exit")
     else
       UI.setAttribute("actionButtons", "active", "true")
       UI.setAttribute("btnExit", "active", "false")
+      log("showSummaryUI: Selection mode - showing actionButtons (Back/Confirm), hiding Exit")
+    end
+
+    -- Configure vocation action buttons:
+    -- - If White is viewing: show ALL buttons for testing (use level 3 to show all actions)
+    -- - If owner is viewing: show buttons based on their actual level
+    -- - Otherwise: hide buttons
+    local shouldShowActions = false
+    local levelToUse = 1
+    
+    if viewerColor == "White" then
+      -- White viewing for testing - show ALL level buttons (1, 2, 3)
+      levelToUse = 3  -- Level 3 shows all buttons for testing
+      shouldShowActions = true
+      log("showSummaryUI: White viewer - showing ALL level buttons (1, 2, 3) for testing")
+      if ownerColor then
+        log("showSummaryUI: Owner is "..tostring(ownerColor).." at level "..tostring(state.levels and state.levels[ownerColor] or "nil"))
+      else
+        log("showSummaryUI: No owner found")
+      end
+    elseif ownerColor then
+      -- Check if viewer is the owner OR if no owner color was found but viewer has this vocation
+      local isOwner = (viewerColor == ownerColor) or (state.vocations[viewerColor] == vocation)
+      if isOwner then
+        -- Owner viewing their own vocation - show based on their actual level
+        log("showSummaryUI: Owner checking level for "..tostring(ownerColor or viewerColor))
+        if state.levels then
+          log("showSummaryUI: state.levels["..tostring(ownerColor or viewerColor).."] = "..tostring(state.levels[ownerColor or viewerColor]))
+        end
+        levelToUse = state.levels[ownerColor or viewerColor] or 1
+        shouldShowActions = true
+        log("showSummaryUI: Owner viewing own vocation - level="..levelToUse..", owner="..tostring(ownerColor)..", viewer="..tostring(viewerColor)..", isOwner="..tostring(isOwner))
+      else
+        log("showSummaryUI: Viewer is not owner - hiding buttons (owner="..tostring(ownerColor)..", viewer="..tostring(viewerColor)..")")
+      end
+    else
+      log("showSummaryUI: No owner found - hiding buttons (viewer="..viewerColor..")")
+    end
+    
+    if shouldShowActions then
+      local actions = getVocationActions(vocation, levelToUse)
+      log("showSummaryUI: getVocationActions returned "..#actions.." actions for vocation="..tostring(vocation)..", level="..levelToUse)
+      updateActionButtons(actions)
+      UI.setAttribute("vocationActionButtons", "active", "true")
+      log("showSummaryUI: Showing action buttons for "..viewerColor.." (vocation="..tostring(vocation)..", level="..levelToUse..", actions="..#actions..")")
+    else
+      UI.setAttribute("vocationActionButtons", "active", "false")
+      log("showSummaryUI: Hiding action buttons (viewer="..viewerColor..", owner="..tostring(ownerColor)..")")
     end
     
     -- Verify the panel is actually active (with delay to allow UI to update)
@@ -2093,7 +5229,9 @@ local function showSummaryUI(color, vocation, previewOnly)
   
   uiState.currentScreen = "summary"
   uiState.previewedVocation = vocation
-  log("Summary UI shown for " .. color .. " -> " .. vocation)
+  -- Store the OWNER's color (who actually owns this vocation), not the viewer
+  uiState.previewedVocationOwner = ownerColor  -- ownerColor was determined earlier
+  log("Summary UI shown for viewer=" .. color .. ", owner=" .. tostring(ownerColor) .. ", vocation=" .. vocation)
   return true
 end
 
@@ -3370,6 +6508,7 @@ function UI_ConfirmVocation(player, value, id)
     uiState.activeColor = nil
     uiState.currentScreen = nil
     uiState.previewedVocation = nil
+    uiState.previewedVocationOwner = nil
     return
   end
 
@@ -3433,6 +6572,7 @@ function UI_ConfirmVocation(player, value, id)
   uiState.activeColor = nil
   uiState.currentScreen = nil
   uiState.previewedVocation = nil
+  uiState.previewedVocationOwner = nil
 end
 
 -- UI Callback: Science points allocation (+K, -K, +S, -S) from selection card or science panel
@@ -3593,6 +6733,7 @@ function VOC_UI_CloseVocationExplanation(payload)
   end)
   uiState.currentScreen = nil
   uiState.previewedVocation = nil
+  uiState.previewedVocationOwner = nil
   log("Vocation explanation closed – UI hidden, back to playing")
 end
 
@@ -3663,6 +6804,7 @@ function UI_CancelSelection(player, value, id)
   uiState.activeColor = nil
   uiState.currentScreen = nil
   uiState.previewedVocation = nil
+  uiState.previewedVocationOwner = nil
   
   log("Vocation selection cancelled by " .. tostring(color))
   broadcastToAll("Vocation selection cancelled", {0.7, 0.7, 0.7})
@@ -3905,15 +7047,18 @@ local function createDebugButtons()
   --   pcall(function() self.clearButtons() end)
   -- end
   
-  -- Create debug buttons: 2 above, 3 below (to avoid covering test button and overlapping)
+  -- Create debug buttons: 2 above, 3 below, 2 more below (to avoid covering test button and overlapping)
   local buttons = {
     -- Top row (above)
     { label = "TEST\nSELECTION", fn = "btnDebugStartSelection", pos = {-0.75, 0.6, 0}, color = {0.2, 0.6, 1.0} },
     { label = "TEST\nSUMMARY", fn = "btnDebugShowSummary", pos = {0.75, 0.6, 0}, color = {0.2, 1.0, 0.6} },
-    -- Bottom row (below)
+    -- Middle row
     { label = "TEST\nCALLBACK", fn = "btnDebugTestCallback", pos = {-0.75, 0.0, 0}, color = {1.0, 0.6, 0.2} },
     { label = "FULL\nTEST", fn = "btnDebugFullTest", pos = {0.0, 0.0, 0}, color = {0.8, 0.2, 0.8} },
     { label = "TEST\nSW L2 EVT", fn = "btnDebug_TestSWEvent", pos = {0.75, 0.0, 0}, color = {0.9, 0.3, 0.3} },
+    -- Bottom row (level management)
+    { label = "SHOW\nLEVELS", fn = "btnDebug_ShowLevels", pos = {-0.5, -0.6, 0}, color = {1.0, 1.0, 0.2} },
+    { label = "SET\nLEVEL 1", fn = "btnDebug_SetLevel1", pos = {0.5, -0.6, 0}, color = {0.2, 1.0, 1.0} },
   }
   
   for _, btn in ipairs(buttons) do
@@ -4210,6 +7355,48 @@ function btnDebugFullTest(obj, player)
 end
 
 -- Debug button: Test Social Worker L2 community wellbeing session interaction
+-- Debug: Show current levels for all players
+function btnDebug_ShowLevels(obj, player)
+  log("=== DEBUG: Showing current player levels ===")
+  broadcastToAll("📊 Current Player Levels:", {1, 1, 0.6})
+  
+  for _, c in ipairs(COLORS) do
+    local vocation = state.vocations[c] or "None"
+    local level = state.levels[c] or 0
+    broadcastToAll("  " .. c .. ": " .. vocation .. " (Level " .. level .. ")", {0.8, 0.8, 1})
+    log("  " .. c .. ": vocation=" .. tostring(vocation) .. ", level=" .. tostring(level))
+  end
+end
+
+-- Debug: Set player level to 1 (for testing)
+function btnDebug_SetLevel1(obj, player)
+  log("=== DEBUG: Setting player level to 1 ===")
+  
+  local color = nil
+  if player and player.color and player.color ~= "" and player.color ~= "White" then
+    color = normalizeColor(player.color)
+  end
+  
+  if not color or not isPlayableColor(color) then
+    -- Default to first player with a vocation
+    for _, c in ipairs(COLORS) do
+      if state.vocations[c] then
+        color = c
+        break
+      end
+    end
+  end
+  
+  if color and state.vocations[color] then
+    local oldLevel = state.levels[color] or 0
+    state.levels[color] = 1
+    broadcastToAll("✅ " .. color .. " level changed: " .. oldLevel .. " → 1", {0.3, 1, 0.3})
+    log("Set " .. color .. " to level 1 (was " .. oldLevel .. ")")
+  else
+    broadcastToAll("❌ No player color found or no vocation assigned", {1, 0.6, 0.2})
+  end
+end
+
 function btnDebug_TestSWEvent(obj, player)
   log("=== DEBUG: Testing Social Worker L2 community wellbeing session ===")
   
