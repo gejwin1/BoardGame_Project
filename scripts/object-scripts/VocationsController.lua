@@ -19,6 +19,7 @@ local TAG_STATS_CTRL = "WLB_STATS_CTRL"
 local TAG_AP_CTRL = "WLB_AP_CTRL"
 local TAG_MONEY = "WLB_MONEY"
 local TAG_PLAYER_STATUS_CTRL = "WLB_PLAYER_STATUS_CTRL"
+local TAG_HEAT_POLICE = "WLB_POLICE"  -- Police car pawn on shop board (Heat 0-6)
 
 -- Die GUID (same as TurnController)
 local DIE_GUID = "14d4a4"
@@ -795,6 +796,7 @@ local function addWoundedStatus(color)
 end
 
 -- Steal money from target player
+-- Chunk-safe: die callback may run in another TTS chunk where getMoney/moneySpend/moneyAdd are nil; use _G.VOC_CTRL fallback.
 local function stealMoney(fromColor, toColor, amount)
   amount = tonumber(amount) or 0
   if amount <= 0 then return true end
@@ -803,15 +805,23 @@ local function stealMoney(fromColor, toColor, amount)
   toColor = normalizeColor(toColor)
   if not fromColor or not toColor then return false end
   
-  -- Get current money from target
-  local targetMoney = getMoney(fromColor)
+  local gm = (type(getMoney) == "function" and getMoney) or (type(_G.VOC_CTRL) == "table" and type(_G.VOC_CTRL.getMoney) == "function" and _G.VOC_CTRL.getMoney)
+  if not gm then
+    warn("stealMoney: getMoney not available (chunk)")
+    return false, 0
+  end
+  local targetMoney = gm(fromColor)
   local amountToSteal = math.min(amount, targetMoney)
   
   if amountToSteal > 0 then
-    -- Deduct from target
-    if moneySpend(fromColor, amountToSteal) then
-      -- Add to thief
-      moneyAdd(toColor, amountToSteal)
+    local spendFn = (type(moneySpend) == "function" and moneySpend) or (type(_G.VOC_CTRL) == "table" and type(_G.VOC_CTRL.moneySpend) == "function" and _G.VOC_CTRL.moneySpend)
+    local addFn = (type(moneyAdd) == "function" and moneyAdd) or (type(_G.VOC_CTRL) == "table" and type(_G.VOC_CTRL.moneyAdd) == "function" and _G.VOC_CTRL.moneyAdd)
+    if not spendFn or not addFn then
+      warn("stealMoney: moneySpend/moneyAdd not available (chunk)")
+      return false, 0
+    end
+    if spendFn(fromColor, amountToSteal) then
+      addFn(toColor, amountToSteal)
       log("stealMoney: "..tostring(toColor).." stole "..amountToSteal.." VIN from "..tostring(fromColor))
       return true, amountToSteal
     end
@@ -1046,6 +1056,22 @@ getMoney = function(color)
   if ok and type(v) == "table" and type(v.money) == "number" then return v.money end
   
   return 0
+end
+
+-- Publish money/status helpers to _G so async callbacks (e.g. crime die roll) can use them from any TTS chunk
+if not _G.VOC_CTRL then _G.VOC_CTRL = {} end
+_G.VOC_CTRL.getMoney = getMoney
+_G.VOC_CTRL.moneySpend = moneySpend
+_G.VOC_CTRL.moneyAdd = moneyAdd
+_G.VOC_CTRL.stealMoney = stealMoney
+_G.VOC_CTRL.addWoundedStatus = addWoundedStatus
+
+-- Heat / Police pawn (Crime & Investigation system)
+local function findHeatPawn()
+  for _, o in ipairs(getAllObjects()) do
+    if o and o.hasTag and o.hasTag(TAG_HEAT_POLICE) then return o end
+  end
+  return nil
 end
 
 -- Year/Round token: used for Time (experience in rounds) for promotion
@@ -1566,12 +1592,13 @@ resolveInteractionEffects_impl = function()
 
   -- Check if this interaction needs a die roll
   local needsDieRoll = false
+  -- Robin Hood (GANG_SPECIAL_ROBIN) is NOT in this list: it uses VOC_StartGangsterRobinHood which does target selection first, then die. Never resolve it here (no target).
   local dieRollActions = {
     "CELEB_L1_STREET_PERF", "CELEB_L2_MEET_GREET", "CELEB_L3_CHARITY_STREAM",
     "PS_L1_INCOME_TAX", "PS_L2_HITECH_TAX", "PS_L3_PROPERTY_TAX",
     "NGO_L1_CHARITY", "NGO_L2_CROWDFUND", "NGO_L3_ADVOCACY",
     "ENT_L1_FLASH_SALE", "ENT_L2_TRAINING", "ENT_SPECIAL_EXPANSION",
-    "GANG_L1_CRIME", "GANG_L2_CRIME", "GANG_L3_CRIME", "GANG_SPECIAL_ROBIN"
+    "GANG_L1_CRIME", "GANG_L2_CRIME", "GANG_L3_CRIME"
   }
   for _, actionId in ipairs(dieRollActions) do
     if id == actionId then
@@ -2166,30 +2193,11 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
   addSkills(initiator, 2)
   safeBroadcastAll("Employee Training: "..initiator.." gains +2 Satisfaction & +2 Skills.", {0.7,1,0.7})
 
-  -- Gangster Special – Robin Hood Job
+  -- Gangster Special – Robin Hood Job must NEVER be resolved here (no target). It is only run via VOC_StartGangsterRobinHood (event card / vocation action) which does: choose target → roll die → steal from target, donate to orphanage, +SAT to initiator.
   elseif id == "GANG_SPECIAL_ROBIN" then
-    if not die or die < 1 or die > 6 then
-      die = math.random(1, 6)
-      warn("Invalid die value, using fallback: "..tostring(die))
-    end
-  if die <= 2 then
-    -- Pay 200 VIN to bank
-    moneySpend(initiator, 200)
-    satAdd(initiator, -2)
-    safeBroadcastAll("Robin Hood Job: Plan leaks → "..initiator.." pays 200 VIN to bank & loses -2 Satisfaction.", {1,0.7,0.2})
-  elseif die <= 4 then
-    -- Steal+donate up to 500 VIN (gain money, then donate it)
-    moneyAdd(initiator, 500)
-    -- TODO: Donate to bank/charity (for now just gain the money)
-    satAdd(initiator, 4)
-    safeBroadcastAll("Robin Hood Job: Steal+donate up to 500 VIN → "..initiator.." gains +4 Satisfaction.", {0.7,1,0.7})
-  else
-    -- Steal+donate up to 1000 VIN
-    moneyAdd(initiator, 1000)
-    -- TODO: Donate to bank/charity (for now just gain the money)
-    satAdd(initiator, 7)
-    safeBroadcastAll("Robin Hood Job: Steal+donate up to 1000 VIN → "..initiator.." gains +7 Satisfaction.", {0.7,1,0.7})
-  end
+    safeBroadcastAll("Robin Hood Job: Use the vocation event card and choose a target first. This path has no target – no effect applied.", {1,0.85,0.3})
+    clearInteraction()
+    return
 
   -- Gangster Special – Protection Racket
   elseif id == "GANG_SPECIAL_PROTECTION" then
@@ -2774,9 +2782,8 @@ function VOC_StartSocialWorkerCommunitySession(params)
   end
 
   local level = state.levels[initiatorColor] or 1
-  -- Bypass level checks if White is testing
-  if color ~= "White" and level < 2 then
-    safeBroadcastToColor("Community wellbeing session requires Social Worker Level 2.", color, {1,0.7,0.2})
+  if color ~= "White" and level ~= 2 then
+    safeBroadcastToColor("⛔ This action is only available at Social Worker Level 2. Your character is Level " .. tostring(level) .. ".", initiatorColor, {1,0.6,0.2})
     return false, "Wrong level"
   end
 
@@ -2841,8 +2848,8 @@ function VOC_StartSocialWorkerPracticalWorkshop(params)
   end
 
   local level = (state.levels and state.levels[initiatorColor]) or 1
-  if color ~= "White" and level < 1 then
-    safeBroadcastToColor("Practical workshop requires Social Worker Level 1.", color, {1,0.7,0.2})
+  if color ~= "White" and level ~= 1 then
+    safeBroadcastToColor("⛔ This action is only available at Social Worker Level 1. Your character is Level " .. tostring(level) .. ".", initiatorColor, {1,0.6,0.2})
     return false
   end
 
@@ -2887,9 +2894,8 @@ function VOC_StartSocialWorkerExposeCase(params)
   end
 
   local level = state.levels[initiatorColor] or 1
-  -- White bypasses level checks for testing
-  if color ~= "White" and level < 3 then
-    safeBroadcastToColor("Expose social case requires Social Worker Level 3.", color, {1,0.7,0.2})
+  if color ~= "White" and level ~= 3 then
+    safeBroadcastToColor("⛔ This action is only available at Social Worker Level 3. Your character is Level " .. tostring(level) .. ".", initiatorColor, {1,0.6,0.2})
     return false
   end
 
@@ -3293,8 +3299,8 @@ function VOC_StartPublicServantIncomeTax(params)
   end
 
   local level = state.levels[color] or 1
-  if level < 1 then
-    safeBroadcastToColor("Income Tax Campaign requires Public Servant Level 1.", color, {1,0.7,0.2})
+  if color ~= "White" and level ~= 1 then
+    safeBroadcastToColor("⛔ This action is only available at Public Servant Level 1. Your character is Level " .. tostring(level) .. ".", color, {1,0.6,0.2})
     return false
   end
 
@@ -3368,9 +3374,8 @@ function VOC_StartPublicServantHiTechTax(params)
   end
 
   local level = state.levels[color] or 1
-  -- White bypasses level checks for testing
-  if color ~= "White" and level < 2 then
-    safeBroadcastToColor("Hi-Tech Tax Campaign requires Public Servant Level 2.", color, {1,0.7,0.2})
+  if color ~= "White" and level ~= 2 then
+    safeBroadcastToColor("⛔ This action is only available at Public Servant Level 2. Your character is Level " .. tostring(level) .. ".", color, {1,0.6,0.2})
     return false
   end
 
@@ -3436,9 +3441,8 @@ function VOC_StartPublicServantPropertyTax(params)
   end
 
   local level = state.levels[color] or 1
-  -- White bypasses level checks for testing
-  if color ~= "White" and level < 3 then
-    safeBroadcastToColor("Property Tax Campaign requires Public Servant Level 3.", color, {1,0.7,0.2})
+  if color ~= "White" and level ~= 3 then
+    safeBroadcastToColor("⛔ This action is only available at Public Servant Level 3. Your character is Level " .. tostring(level) .. ".", color, {1,0.6,0.2})
     return false
   end
 
@@ -4039,6 +4043,13 @@ function VOC_StartGangsterCrime(params)
     return false
   end
 
+  -- Enforce: action level must match character level (Gangster 1 → Lv1 only, etc.)
+  local characterLevel = state.levels[initiatorColor] or 1
+  if color ~= "White" and level ~= characterLevel then
+    safeBroadcastToColor("⛔ This action is only available at Gangster Level " .. tostring(level) .. ". Your character is Level " .. tostring(characterLevel) .. ".", initiatorColor, {1,0.6,0.2})
+    return false
+  end
+
   if not canSpendAP(initiatorColor, 2) then
     safeBroadcastToColor("⛔ Not enough AP (need 2 AP) to commit crime.", initiatorColor, {1,0.6,0.2})
     return false
@@ -4073,6 +4084,7 @@ function VOC_StartGangsterCrime(params)
         
         local stolenMoney = 0
         local canStealItem = false
+        local actualStolenAmount = 0  -- for Heat & Investigation restitution (Tier 3)
         
         if level == 1 then
           if die <= 2 then
@@ -4082,12 +4094,14 @@ function VOC_StartGangsterCrime(params)
             stolenMoney = 300
             addWoundedStatus(targetColor)
             local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
+            actualStolenAmount = actualAmount or 0
             safeBroadcastAll("Crime: Partial success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualAmount.." VIN.", {0.7,1,0.7})
           else
             stolenMoney = 500
             canStealItem = true
             addWoundedStatus(targetColor)
             local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
+            actualStolenAmount = actualAmount or 0
             safeBroadcastAll("Crime: Full success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualAmount.." VIN (or can choose High-Tech item).", {0.7,1,0.7})
           end
           satAdd(initiatorColor, die)  -- Satisfaction = amount on D6
@@ -4099,12 +4113,14 @@ function VOC_StartGangsterCrime(params)
             stolenMoney = 750
             addWoundedStatus(targetColor)
             local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
+            actualStolenAmount = actualAmount or 0
             safeBroadcastAll("Crime: Partial success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualAmount.." VIN.", {0.7,1,0.7})
           else
             stolenMoney = 1000
             canStealItem = true
             addWoundedStatus(targetColor)
             local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
+            actualStolenAmount = actualAmount or 0
             safeBroadcastAll("Crime: Full success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualAmount.." VIN (or can choose High-Tech item).", {0.7,1,0.7})
           end
           satAdd(initiatorColor, die)
@@ -4116,16 +4132,26 @@ function VOC_StartGangsterCrime(params)
             stolenMoney = 1500
             addWoundedStatus(targetColor)
             local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
+            actualStolenAmount = actualAmount or 0
             safeBroadcastAll("Crime: Partial success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualAmount.." VIN.", {0.7,1,0.7})
           else
             stolenMoney = 2000
             canStealItem = true
             addWoundedStatus(targetColor)
             local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
+            actualStolenAmount = actualAmount or 0
             safeBroadcastAll("Crime: Full success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualAmount.." VIN (or can choose High-Tech item).", {0.7,1,0.7})
           end
           satAdd(initiatorColor, die)
         end
+        
+        -- Heat & Investigation (only after successful crime)
+        RunCrimeInvestigation({
+          initiatorColor = initiatorColor,
+          vocationLevel = level,
+          crimeGainsVIN = actualStolenAmount,
+          targetColor = targetColor,
+        })
         
         -- Note: High-Tech item selection needs manual player action in the current system
         if canStealItem then
@@ -4136,6 +4162,86 @@ function VOC_StartGangsterCrime(params)
   })
   
   return true
+end
+
+-- =========================================================
+-- CRIME, HEAT & INVESTIGATION (global heat, punishment ladder)
+-- Call after any SUCCESSFUL crime (Gangster or VE card).
+--
+-- ORDER: (1) Heat +1, (2) Investigation roll (NEW roll – never use the crime die),
+--        (3) Based on investigation result, apply punishment or dismiss.
+-- We never reuse the crime roll; investigation always uses its own physical die roll.
+--
+-- params: initiatorColor, vocationLevel (optional), crimeGainsVIN (optional), targetColor (optional)
+--         Do NOT pass the crime roll – it is ignored; we roll again for investigation.
+function RunCrimeInvestigation(params)
+  params = params or {}
+  local initiatorColor = normalizeColor(params.initiatorColor or params.color)
+  if not initiatorColor or initiatorColor == "White" then return end
+  local vocationLevel = tonumber(params.vocationLevel) or (state.levels and state.levels[initiatorColor]) or 1
+  local crimeGainsVIN = math.max(0, tonumber(params.crimeGainsVIN) or 0)
+  local targetColor = params.targetColor and normalizeColor(params.targetColor)
+
+  local pawn = findHeatPawn()
+  if not pawn or not pawn.call then
+    log("RunCrimeInvestigation: Heat pawn (WLB_POLICE) not found – skipping heat/investigation")
+    return
+  end
+  -- Step 1: Heat +1 (crime was successful)
+  pcall(function() pawn.call("AddHeat", 1) end)
+  local modifier = 0
+  pcall(function() modifier = pawn.call("GetInvestigationModifier") or 0 end)
+
+  -- Step 2: Investigation roll – must be a NEW roll (separate from the crime die)
+  safeBroadcastAll("🔍 Heat +1. Now roll the die again for Investigation (separate from crime roll). Modifier: +" .. tostring(modifier), {0.7, 0.8, 1})
+  rollPhysicalDieAndRead(function(investigationRoll, err)
+    local roll = investigationRoll  -- use only this roll; never the crime die
+    if err or not roll then roll = math.random(1, 6) end
+    local result = roll + (tonumber(modifier) or 0)
+    safeBroadcastAll("🔍 Investigation result: 1d6=" .. tostring(roll) .. " + " .. tostring(modifier) .. " = " .. tostring(result), {0.8, 0.9, 1})
+
+    -- Step 3: Apply outcome (punishment or dismiss)
+    if result <= 2 then
+      safeBroadcastAll("Investigation: No evidence found. Case dismissed.", {0.85, 0.85, 0.85})
+      return
+    end
+
+    if result >= 3 and result <= 4 then
+      safeBroadcastAll("Investigation: Official Warning – " .. initiatorColor .. " pays 200 VIN, loses 1 Satisfaction.", {1, 0.85, 0.3})
+      pcall(function() moneySpend(initiatorColor, 200) end)
+      satAdd(initiatorColor, -1)
+      return
+    end
+
+    if result >= 5 and result <= 6 then
+      local fine = 300 * vocationLevel
+      safeBroadcastAll("Investigation: Formal Charge – " .. initiatorColor .. " pays " .. tostring(fine) .. " VIN, loses 2 Satisfaction, loses 1 AP (moved to inactive this turn).", {1, 0.7, 0.2})
+      pcall(function() moneySpend(initiatorColor, fine) end)
+      satAdd(initiatorColor, -2)
+      local ap = findApCtrlForColor(initiatorColor)
+      if ap and ap.call then
+        pcall(function() ap.call("moveAP", { to = "INACTIVE", amount = 1 }) end)
+      end
+      return
+    end
+
+    -- result >= 7: Tier 3 – Severe
+    local fine = 500 * vocationLevel
+    safeBroadcastAll("Investigation: Major Conviction – " .. initiatorColor .. " pays " .. tostring(fine) .. " VIN, loses 4 Satisfaction, loses 2 AP (moved to inactive this turn), and must return stolen gains.", {1, 0.5, 0.2})
+    pcall(function() moneySpend(initiatorColor, fine) end)
+    satAdd(initiatorColor, -4)
+    local ap = findApCtrlForColor(initiatorColor)
+    if ap and ap.call then
+      pcall(function() ap.call("moveAP", { to = "INACTIVE", amount = 2 }) end)
+    end
+    if crimeGainsVIN > 0 then
+      pcall(function() moneySpend(initiatorColor, crimeGainsVIN) end)
+      if targetColor and targetColor ~= "" then
+        pcall(function() moneyAdd(targetColor, crimeGainsVIN) end)
+        safeBroadcastAll("Restitution: " .. tostring(crimeGainsVIN) .. " VIN returned to " .. targetColor .. ".", {0.7, 1, 0.7})
+      end
+    end
+  end)
 end
 
 function VOC_StartGangsterRobinHood(params)
@@ -4158,36 +4264,76 @@ function VOC_StartGangsterRobinHood(params)
     return false
   end
 
-  safeBroadcastAll("🎲 Rolling die for Robin Hood Job...", {1,1,0.6})
-  rollPhysicalDieAndRead(function(die, err)
-    if err then
-      warn("Die roll failed: "..tostring(err).." - using fallback")
-      die = math.random(1, 6)
-      safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
-    else
-      safeBroadcastAll("🎲 Die result: "..die, {0.8,0.9,1})
+  -- First: choose whom to rob (target). Then roll die to see if successful.
+  local ok = startTargetSelection({
+    initiator = color,
+    actionId = "GANG_SPECIAL_ROBIN",
+    title = "ROBIN HOOD JOB",
+    subtitle = "Choose the corrupt businessman (against whom you perform this action). Then you will roll the die for success.",
+    requireChildren = false,
+    callback = function(targetColor)
+      safeBroadcastAll("🎲 Rolling die for Robin Hood Job vs "..targetColor.."...", {1,1,0.6})
+      rollPhysicalDieAndRead(function(die, err)
+        if err then
+          warn("Die roll failed: "..tostring(err).." - using fallback")
+          die = math.random(1, 6)
+          safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
+        else
+          safeBroadcastAll("🎲 Die result: "..die, {0.8,0.9,1})
+        end
+
+        if die <= 2 then
+          -- Plan leaks: initiator pays 200 VIN to bank, lose 2 Satisfaction
+          moneySpend(color, 200)
+          satAdd(color, -2)
+          safeBroadcastAll("Robin Hood Job: Plan leaks → "..color.." pays 200 VIN to bank & loses -2 Satisfaction.", {1,0.7,0.2})
+        elseif die <= 4 then
+          -- Success: steal up to 500 from chosen target, donate to orphanage; +4 Satisfaction
+          local maxSteal = 500
+          local satGain = 4
+          local targetMoney = (type(getMoney) == "function" and getMoney(targetColor)) or 0
+          local amountToSteal = math.min(maxSteal, targetMoney)
+          if amountToSteal > 0 then
+            moneySpend(targetColor, amountToSteal)
+          end
+          satAdd(color, satGain)
+          if amountToSteal > 0 then
+            safeBroadcastAll("Robin Hood Job: "..color.." stole "..tostring(amountToSteal).." VIN from "..targetColor.." and donated to orphanage. +"..tostring(satGain).." Satisfaction.", {0.7,1,0.7})
+          else
+            safeBroadcastAll("Robin Hood Job: "..targetColor.." had no money to steal. "..color.." still gains +"..tostring(satGain).." Satisfaction (donation in spirit).", {0.7,1,0.7})
+          end
+        else
+          -- Big success: steal up to 1000 from chosen target, donate to orphanage; +7 Satisfaction
+          local maxSteal = 1000
+          local satGain = 7
+          local targetMoney = (type(getMoney) == "function" and getMoney(targetColor)) or 0
+          local amountToSteal = math.min(maxSteal, targetMoney)
+          if amountToSteal > 0 then
+            moneySpend(targetColor, amountToSteal)
+          end
+          satAdd(color, satGain)
+          if amountToSteal > 0 then
+            safeBroadcastAll("Robin Hood Job: "..color.." stole "..tostring(amountToSteal).." VIN from "..targetColor.." and donated to orphanage. +"..tostring(satGain).." Satisfaction.", {0.7,1,0.7})
+          else
+            safeBroadcastAll("Robin Hood Job: "..targetColor.." had no money to steal. "..color.." still gains +"..tostring(satGain).." Satisfaction (donation in spirit).", {0.7,1,0.7})
+          end
+        end
+      end)
+    end,
+  })
+
+  if not ok then
+    -- Target selection UI not available (e.g. UI nil or targetSelectionOverlay missing in Global). Refund 2 AP.
+    local ap = findApCtrlForColor(color)
+    if ap and ap.call then
+      pcall(function() ap.call("moveAP", { to = "E", amount = -1 }) end)
+      Wait.time(function()
+        if ap and ap.call then pcall(function() ap.call("moveAP", { to = "E", amount = -1 }) end) end
+      end, 0.5)
     end
-    
-    if die <= 2 then
-      -- Pay 200 VIN to bank
-      moneySpend(color, 200)
-      satAdd(color, -2)
-      safeBroadcastAll("Robin Hood Job: Plan leaks → "..color.." pays 200 VIN to bank & loses -2 Satisfaction.", {1,0.7,0.2})
-    elseif die <= 4 then
-      -- Steal+donate up to 500 VIN (gain money, then donate it)
-      moneyAdd(color, 500)
-      -- TODO: Donate to bank/charity (for now just gain the money)
-      satAdd(color, 4)
-      safeBroadcastAll("Robin Hood Job: Steal+donate up to 500 VIN → "..color.." gains +4 Satisfaction.", {0.7,1,0.7})
-    else
-      -- Steal+donate up to 1000 VIN
-      moneyAdd(color, 1000)
-      -- TODO: Donate to bank/charity (for now just gain the money)
-      satAdd(color, 7)
-      safeBroadcastAll("Robin Hood Job: Steal+donate up to 1000 VIN → "..color.." gains +7 Satisfaction.", {0.7,1,0.7})
-    end
-  end)
-  
+    safeBroadcastToColor("Robin Hood Job: Target selection UI not available. 2 AP refunded. Ensure Global UI has targetSelectionOverlay and btnTargetYellow/Blue/Red/Green.", color, {1,0.85,0.3})
+    return false
+  end
   return true
 end
 
@@ -4417,18 +4563,16 @@ local function getVocationActions(vocation, level)
   log("getVocationActions: vocation="..tostring(vocation)..", level="..tostring(level))
   
   if vocation == VOC_SOCIAL_WORKER then
-    -- Show buttons based on level: level 1 shows button 1, level 2 shows buttons 1-2, level 3 shows all 1-3
-    if level >= 1 then
+    -- Show only the action that matches the player's current level (Level 1 → Practical workshop only, etc.)
+    if level == 1 then
       log("getVocationActions: Adding Social Worker Level 1 action (Practical workshop)")
       table.insert(actions, {buttonIndex = 1, label = "Practical workshop", actionId = "SW_L1_PRACTICAL_WORKSHOP"})
-    end
-    if level >= 2 then
+    elseif level == 2 then
       log("getVocationActions: Adding Social Worker Level 2 action (Community wellbeing)")
-      table.insert(actions, {buttonIndex = 2, label = "Community wellbeing", actionId = "SW_L2_COMMUNITY_WELLBEING"})
-    end
-    if level >= 3 then
+      table.insert(actions, {buttonIndex = 1, label = "Community wellbeing", actionId = "SW_L2_COMMUNITY_WELLBEING"})
+    elseif level == 3 then
       log("getVocationActions: Adding Social Worker Level 3 action (Expose social case)")
-      table.insert(actions, {buttonIndex = 3, label = "Expose social case", actionId = "SW_L3_EXPOSE_CASE"})
+      table.insert(actions, {buttonIndex = 1, label = "Expose social case", actionId = "SW_L3_EXPOSE_CASE"})
     end
     -- Special actions removed for now
     
@@ -4446,15 +4590,13 @@ local function getVocationActions(vocation, level)
     -- Special actions removed for now
     
   elseif vocation == VOC_PUBLIC_SERVANT then
-    -- Show buttons based on level
-    if level >= 1 then
+    -- Show only the action that matches the player's current level (Junior Clerk → Income Tax only, etc.)
+    if level == 1 then
       table.insert(actions, {buttonIndex = 1, label = "Income Tax Campaign", actionId = "PS_L1_INCOME_TAX"})
-    end
-    if level >= 2 then
-      table.insert(actions, {buttonIndex = 2, label = "Hi-Tech Tax Campaign", actionId = "PS_L2_HITECH_TAX"})
-    end
-    if level >= 3 then
-      table.insert(actions, {buttonIndex = 3, label = "Property Tax Campaign", actionId = "PS_L3_PROPERTY_TAX"})
+    elseif level == 2 then
+      table.insert(actions, {buttonIndex = 1, label = "Hi-Tech Tax Campaign", actionId = "PS_L2_HITECH_TAX"})
+    elseif level == 3 then
+      table.insert(actions, {buttonIndex = 1, label = "Property Tax Campaign", actionId = "PS_L3_PROPERTY_TAX"})
     end
     -- Special actions removed for now
     
@@ -4483,15 +4625,13 @@ local function getVocationActions(vocation, level)
     -- Special actions removed for now
     
   elseif vocation == VOC_GANGSTER then
-    -- Show buttons based on level
-    if level >= 1 then
+    -- Show only the Crime button that matches the player's current level (Gangster 1 → Lv1 only, etc.)
+    if level == 1 then
       table.insert(actions, {buttonIndex = 1, label = "Crime vs Player Lv1", actionId = "GANG_L1_CRIME"})
-    end
-    if level >= 2 then
-      table.insert(actions, {buttonIndex = 2, label = "Crime vs Player Lv2", actionId = "GANG_L2_CRIME"})
-    end
-    if level >= 3 then
-      table.insert(actions, {buttonIndex = 3, label = "Crime vs Player Lv3", actionId = "GANG_L3_CRIME"})
+    elseif level == 2 then
+      table.insert(actions, {buttonIndex = 1, label = "Crime vs Player Lv2", actionId = "GANG_L2_CRIME"})
+    elseif level == 3 then
+      table.insert(actions, {buttonIndex = 1, label = "Crime vs Player Lv3", actionId = "GANG_L3_CRIME"})
     end
     -- Special actions removed for now
   end
@@ -5015,9 +5155,10 @@ local function showSelectionUI(color, points, showSciencePointsLabelParam)
 end
 
 -- Show the Vocation Summary UI panel
-local function showSummaryUI(color, vocation, previewOnly)
+-- forColor: when viewer is White, use this color's level for action buttons (e.g. from clicked tile's board)
+local function showSummaryUI(color, vocation, previewOnly, forColor)
   log("=== showSummaryUI CALLED ===")
-  log("color: " .. tostring(color) .. ", vocation: " .. tostring(vocation) .. ", previewOnly: " .. tostring(previewOnly))
+  log("color: " .. tostring(color) .. ", vocation: " .. tostring(vocation) .. ", previewOnly: " .. tostring(previewOnly) .. ", forColor: " .. tostring(forColor))
   
   if not UI then
     log("ERROR: UI system not available - UI is nil")
@@ -5162,34 +5303,37 @@ local function showSummaryUI(color, vocation, previewOnly)
     end
 
     -- Configure vocation action buttons:
-    -- - If White is viewing: show ALL buttons for testing (use level 3 to show all actions)
-    -- - If owner is viewing: show buttons based on their actual level
-    -- - Otherwise: hide buttons
+    -- - Use the LEVEL OF THE PLAYER WHO OWNS THIS VOCATION (so the button matches their card level).
+    -- - When White is viewing: if we know the owner, use owner's level; else level 3 for testing.
+    -- - When owner is viewing: use viewer's level (the person looking at the screen).
     local shouldShowActions = false
     local levelToUse = 1
     
     if viewerColor == "White" then
-      -- White viewing for testing - show ALL level buttons (1, 2, 3)
-      levelToUse = 3  -- Level 3 shows all buttons for testing
-      shouldShowActions = true
-      log("showSummaryUI: White viewer - showing ALL level buttons (1, 2, 3) for testing")
-      if ownerColor then
-        log("showSummaryUI: Owner is "..tostring(ownerColor).." at level "..tostring(state.levels and state.levels[ownerColor] or "nil"))
+      -- White (e.g. host) viewing: use forColor's level if provided (e.g. tile on that board was clicked),
+      -- else owner's level, else level 3 for testing.
+      forColor = forColor and normalizeColor(forColor)
+      if forColor and state.levels and state.levels[forColor] then
+        levelToUse = state.levels[forColor] or 1
+        shouldShowActions = true
+        log("showSummaryUI: White viewer - using forColor "..tostring(forColor).." level="..tostring(levelToUse))
+      elseif ownerColor then
+        levelToUse = state.levels[ownerColor] or 1
+        shouldShowActions = true
+        log("showSummaryUI: White viewer - using owner "..tostring(ownerColor).." level="..tostring(levelToUse))
       else
-        log("showSummaryUI: No owner found")
+        levelToUse = 3
+        shouldShowActions = true
+        log("showSummaryUI: White viewer - no forColor/owner, showing level 3 for testing")
       end
     elseif ownerColor then
       -- Check if viewer is the owner OR if no owner color was found but viewer has this vocation
       local isOwner = (viewerColor == ownerColor) or (state.vocations[viewerColor] == vocation)
       if isOwner then
-        -- Owner viewing their own vocation - show based on their actual level
-        log("showSummaryUI: Owner checking level for "..tostring(ownerColor or viewerColor))
-        if state.levels then
-          log("showSummaryUI: state.levels["..tostring(ownerColor or viewerColor).."] = "..tostring(state.levels[ownerColor or viewerColor]))
-        end
-        levelToUse = state.levels[ownerColor or viewerColor] or 1
+        -- Owner viewing their own vocation - use VIEWER's level (the person at the screen)
+        levelToUse = state.levels[viewerColor] or 1
         shouldShowActions = true
-        log("showSummaryUI: Owner viewing own vocation - level="..levelToUse..", owner="..tostring(ownerColor)..", viewer="..tostring(viewerColor)..", isOwner="..tostring(isOwner))
+        log("showSummaryUI: Owner viewing own vocation - level="..tostring(levelToUse).." (viewer="..tostring(viewerColor)..")")
       else
         log("showSummaryUI: Viewer is not owner - hiding buttons (owner="..tostring(ownerColor)..", viewer="..tostring(viewerColor)..")")
       end
@@ -5598,7 +5742,8 @@ function VOC_ShowExplanationForPlayer(params)
   -- Prefer Global UI summary panel (on-screen, no physical card). When from "Show explanation" use previewOnly so only Exit is shown.
   if showSummaryUI and UI then
     local previewOnly = not not (params and params.previewOnly)
-    local ok = showSummaryUI(color, vocation, previewOnly)
+    local forColor = params and params.forColor and normalizeColor(params.forColor)
+    local ok = showSummaryUI(color, vocation, previewOnly, forColor)
     if ok then
       log("VOC_ShowExplanationForPlayer: showed summary UI for " .. vocation .. " to " .. color)
       return true
@@ -5636,6 +5781,7 @@ end
 
 -- Global: called when the invisible LMB button on a vocation tile (on player board) is left-clicked.
 -- Shows the same explanation UI as "Show explanation" (read-only). Works even when the tile is locked.
+-- When White (host) clicks, we pass forColor from the tile's board tag so the correct character level is shown.
 function VOC_VocationTileClicked(obj, player_color, alt_click)
   if not obj or not obj.hasTag or type(obj.hasTag) ~= "function" then return end
   local vocation = nil
@@ -5645,7 +5791,14 @@ function VOC_VocationTileClicked(obj, player_color, alt_click)
   if not vocation then return end
   player_color = normalizeColor(player_color)
   if not player_color then return end
-  VOC_ShowExplanationForPlayer({ vocation = vocation, color = player_color, previewOnly = true })
+  -- When White is clicking, determine which board's tile this is so we show that character's level
+  local forColor = nil
+  if player_color == "White" then
+    for _, c in ipairs(COLORS) do
+      if obj.hasTag(colorTag(c)) then forColor = c; break end
+    end
+  end
+  VOC_ShowExplanationForPlayer({ vocation = vocation, color = player_color, previewOnly = true, forColor = forColor })
 end
 
 -- =========================================================

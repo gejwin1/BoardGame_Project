@@ -1036,6 +1036,14 @@ local function doBuyExecute(level, acting, finalPrice, voucherTokensToRemove)
   end, 0.3)
 end
 
+-- Called by EventsController when auction winner has already paid; assign L2 card to winner (no money taken here).
+function Auction_AssignL2(params)
+  params = params or {}
+  local color = params.color and normalizeColor(params.color) or nil
+  if not color or not isPlayableColor(color) then return end
+  doBuyExecute("L2", color, 0, 0)
+end
+
 local function showVoucherChoiceOnDeck(level)
   local deck = S.decks[level]
   if not isAlive(deck) then return end

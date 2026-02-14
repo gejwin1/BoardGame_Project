@@ -51,7 +51,6 @@ local UIY = 0.25
 -- Tags (existing)
 local TAG_EVT_CONTROLLER_A = "WLB_EVT_CONTROLLER"
 local TAG_EVT_CONTROLLER_B = "WLB_EVT_CTRL"
-local EVENTS_CONTROLLER_GUID = "1339d3"
 
 local TAG_STATS        = "WLB_STATS_CTRL"
 local TAG_MONEY        = "WLB_MONEY"
@@ -236,11 +235,6 @@ local function getEvtController()
   if #listA > 0 then return listA[1] end
   local listB = safeGetObjectsWithTag(TAG_EVT_CONTROLLER_B)
   if #listB > 0 then return listB[1] end
-  -- Fallback: Events Controller by GUID so Auction_OnTurnStart and other evtCall targets work
-  if EVENTS_CONTROLLER_GUID and getObjectFromGUID then
-    local obj = getObjectFromGUID(EVENTS_CONTROLLER_GUID)
-    if obj then return obj end
-  end
   return nil
 end
 
@@ -731,24 +725,12 @@ local function tintForColor(color)
   return {1,1,1}
 end
 
--- Notify all PLAYER boards (not e.g. Shops Board) to refresh UI (e.g. school buttons when round 5→6).
--- Only objects with WLB_BOARD and a player color tag (WLB_COLOR_*) get rebuildUI, to avoid
--- calling rebuildUI on the Shops Board or other non-player boards that may have WLB_BOARD.
-local PLAYER_COLORS = { "Yellow", "Blue", "Red", "Green" }
+-- Notify all player boards to refresh UI (e.g. school buttons when round 5→6). Event-driven: no polling.
 local function notifyPlayerBoardsRoundChanged()
   local list = getObjectsWithTag(TAG_BOARD) or {}
   for _, obj in ipairs(list) do
-    if obj and obj.hasTag and obj.call then
-      local isPlayerBoard = false
-      for _, c in ipairs(PLAYER_COLORS) do
-        if obj.hasTag(COLOR_TAG_PREFIX .. c) then
-          isPlayerBoard = true
-          break
-        end
-      end
-      if isPlayerBoard then
-        pcall(function() obj.call("rebuildUI") end)
-      end
+    if obj and obj.call then
+      pcall(function() obj.call("rebuildUI") end)
     end
   end
 end
@@ -1061,7 +1043,6 @@ local function setActiveByTurnIndex()
 
   globalCall("WLB_ON_TURN_CHANGED", { newColor = c, prevColor = prev })
 
-  -- Call for Auction: close JOINING and start BIDDING when initiator's turn comes again
   evtCall("Auction_OnTurnStart", { activeColor = c, finalOrder = W.finalOrder })
 
   onTurnStart_ApplyAddiction(c)
@@ -1776,6 +1757,28 @@ local function startGame()
 end
 
 -- =========================================================
+-- [S11E] API for external callers (EventController, etc.)
+-- =========================================================
+function API_GetPlayerColors(params)
+  if not W or not W.finalOrder or type(W.finalOrder) ~= "table" or #W.finalOrder < 2 then
+    return {}
+  end
+  local out = {}
+  for i = 1, #W.finalOrder do
+    out[i] = W.finalOrder[i]
+  end
+  return out
+end
+
+function API_GetActiveColor(params)
+  if not W or not W.finalOrder or type(W.finalOrder) ~= "table" or #W.finalOrder == 0 then
+    return nil
+  end
+  local idx = math.max(1, math.min(W.turnIndex or 1, #W.finalOrder))
+  return W.finalOrder[idx]
+end
+
+-- =========================================================
 -- [S12] PERSISTENCE
 -- =========================================================
 function onSave()
@@ -1801,11 +1804,6 @@ function onLoad(saved)
 
   drawUI()
   print("[WLB TURN] loaded | step="..tostring(W.step).." mode="..tostring(W.startMode))
-end
-
--- Public API for other systems (e.g. VocationsController)
-function API_GetPlayerColors(params)
-  return shallowCopy(W.colors or {})
 end
 
 -- =========================================================

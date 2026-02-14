@@ -148,6 +148,20 @@
               position="0,220" width="1500" height="50" alignment="MiddleCenter" />
       </Panel>
       
+      <!-- Vocation action buttons (Crime, Robin Hood, etc. – shown when owner views their vocation) -->
+      <Panel id="vocationActionButtons" width="1400" height="90" position="0,320" rectAlignment="MiddleCenter" active="false">
+        <Button id="btnAction1" text="" fontSize="32" position="-560,0" width="260" height="80" 
+                onClick="UI_VocationAction1" color="#5a5a6a" fontColor="#ffffff" active="false" />
+        <Button id="btnAction2" text="" fontSize="32" position="-280,0" width="260" height="80" 
+                onClick="UI_VocationAction2" color="#5a5a6a" fontColor="#ffffff" active="false" />
+        <Button id="btnAction3" text="" fontSize="32" position="0,0" width="260" height="80" 
+                onClick="UI_VocationAction3" color="#5a5a6a" fontColor="#ffffff" active="false" />
+        <Button id="btnAction4" text="" fontSize="32" position="280,0" width="260" height="80" 
+                onClick="UI_VocationAction4" color="#5a5a6a" fontColor="#ffffff" active="false" />
+        <Button id="btnAction5" text="" fontSize="32" position="560,0" width="260" height="80" 
+                onClick="UI_VocationAction5" color="#5a5a6a" fontColor="#ffffff" active="false" />
+      </Panel>
+      
       <!-- Action Buttons – below explanation image (selection flow only: Back/Confirm) -->
       <Panel id="actionButtons" width="1000" height="100" position="0,415">
         <Button id="btnBack" text="← Back" fontSize="44" 
@@ -310,6 +324,78 @@
 
       <Text id="interactionTimer" text="Time left: 30s" fontSize="32" color="#ffffaa"
             position="520,300" width="260" height="50" alignment="MiddleRight" />
+
+    </Panel>
+  </Panel>
+
+  <!-- ========================================================= -->
+  <!-- TARGET SELECTION OVERLAY – e.g. Gangster Crime "choose target" -->
+  <!-- Shown by startTargetSelection(); buttons call handleTargetSelection via Global -->
+  <!-- ========================================================= -->
+  <Panel id="targetSelectionOverlay" width="1800" height="1100" color="#000000cc"
+         position="0,0" rectAlignment="MiddleCenter" active="false">
+
+    <Panel id="targetSelectionPanel" width="900" height="500" color="#2a2a2aff"
+           position="0,0" rectAlignment="MiddleCenter">
+
+      <Text id="targetSelectionTitle" text="SELECT TARGET PLAYER" fontSize="56" color="#ffffff"
+            position="0,-180" width="800" height="70" alignment="MiddleCenter" />
+
+      <Text id="targetSelectionSubtitle" text="Choose which player to target:" fontSize="38" color="#cccccc"
+            position="0,-110" width="800" height="50" alignment="MiddleCenter" />
+
+      <Panel id="targetSelectionButtons" width="800" height="120" position="0,0">
+        <Button id="btnTargetYellow" text="Yellow" fontSize="40" position="-300,0" width="180" height="90"
+                onClick="UI_SelectTarget_Yellow" color="#d4af37" fontColor="#000000" active="false" />
+        <Button id="btnTargetBlue" text="Blue" fontSize="40" position="-100,0" width="180" height="90"
+                onClick="UI_SelectTarget_Blue" color="#4a90e2" fontColor="#ffffff" active="false" />
+        <Button id="btnTargetRed" text="Red" fontSize="40" position="100,0" width="180" height="90"
+                onClick="UI_SelectTarget_Red" color="#e24a4a" fontColor="#ffffff" active="false" />
+        <Button id="btnTargetGreen" text="Green" fontSize="40" position="300,0" width="180" height="90"
+                onClick="UI_SelectTarget_Green" color="#2d6a4f" fontColor="#ffffff" active="false" />
+      </Panel>
+
+      <Button id="btnTargetCancel" text="Cancel" fontSize="36" position="0,120" width="200" height="70"
+              onClick="UI_CancelTargetSelection" color="#555555" fontColor="#ffffff" />
+    </Panel>
+  </Panel>
+
+  <!-- ========================================================= -->
+  <!-- AUCTION OVERLAY – Bid/Pass only here (blocks other actions) -->
+  <!-- Shown at top of screen when bidding starts; no card buttons -->
+  <!-- ========================================================= -->
+  <Panel id="auctionOverlay" width="1920" height="1080" color="#000000dd"
+         position="0,0" rectAlignment="MiddleCenter" active="false">
+
+    <Panel id="auctionPanel" width="1000" height="550" color="#1a1a2aff"
+           position="0,0" rectAlignment="MiddleCenter">
+
+      <Text id="auctionTitle" text="Auction – L2" fontSize="56" color="#ffffff"
+            position="0,-220" width="900" height="70" alignment="MiddleCenter" />
+
+      <Text id="auctionPrice" text="Current price: 1500 WIN" fontSize="44" color="#ffffaa"
+            position="0,-140" width="900" height="55" alignment="MiddleCenter" />
+
+      <Text id="auctionBidder" text="Current bidder: —" fontSize="40" color="#cccccc"
+            position="0,-70" width="900" height="50" alignment="MiddleCenter" />
+
+      <Text id="auctionLeader" text="Leader: —" fontSize="36" color="#aaaaaa"
+            position="0,-10" width="900" height="45" alignment="MiddleCenter" />
+
+      <Text id="auctionTimer" text="Time limit: 20 seconds" fontSize="32" color="#888888"
+            position="0,50" width="900" height="40" alignment="MiddleCenter" />
+
+      <Panel id="auctionButtons" width="700" height="100" position="0,130">
+        <Button id="auctionBtnBid" text="Bid (+100 WIN)" fontSize="42"
+                position="-180,0" width="320" height="90"
+                onClick="UI_AuctionBid" color="#2d6a4f" fontColor="#ffffff" />
+        <Button id="auctionBtnPass" text="Pass" fontSize="42"
+                position="180,0" width="240" height="90"
+                onClick="UI_AuctionPass" color="#6a2d2d" fontColor="#ffffff" />
+      </Panel>
+
+      <Text id="auctionHint" text="Only the current bidder may click Bid or Pass. Complete the auction here." fontSize="28" color="#aaaaaa"
+            position="0,210" width="900" height="35" alignment="MiddleCenter" />
 
     </Panel>
   </Panel>

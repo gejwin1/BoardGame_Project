@@ -29,6 +29,10 @@ local DEBUG = true
 
 local EVENT_BOARD_GUID  = "d031d9"
 local EVENT_ENGINE_GUID = "7b92b3"
+-- Optional: GUID of the object that runs the Global script (for auction UI panel). If empty, tag WLB_GLOBAL is used to find it; if neither, only card buttons are used.
+local EVT_GLOBAL_GUID   = ""
+local TAG_EVT_GLOBAL    = "WLB_GLOBAL"
+local AUCTION_BIDDER_TIMER_SEC = 20
 
 -- Deck/card tags
 local TAG_EVT_CARD   = "WLB_EVT_CARD"
@@ -118,6 +122,8 @@ local EXTRA_BY_SLOT = { [1]=0, [2]=1, [3]=1, [4]=2, [5]=2, [6]=3, [7]=3 }
 local TAG_AP_CTRL      = "WLB_AP_CTRL"
 local TAG_SHOP_ENGINE  = "WLB_SHOP_ENGINE"
 local COLOR_TAG_PREFIX = "WLB_COLOR_"
+local TAG_MONEY        = "WLB_MONEY"
+local TAG_BOARD        = "WLB_BOARD"
 
 -- === SECTION 1.1: small helpers =============================================
 
@@ -164,6 +170,30 @@ local uiState = {
 local nextBusy = false
 local desiredDeckRot = nil
 local obligatoryLock = false
+
+-- === SECTION 1.3: AUCTION STATE (Call for Auction card AD_47) ===============
+local AUCTION_JOIN_DEPOSIT = 500
+local AUCTION_MIN_PRICE = 1500
+local AUCTION_INCREMENT = 100
+
+local auctionState = {
+  active = false,
+  state = nil,           -- "JOINING" | "BIDDING" | "RESOLVED"
+  initiatorColor = nil,
+  eventCardGuid = nil,
+  propertyLevel = "L2",
+  participants = {},     -- [color] = true
+  deposits = {},         -- [color] = 500
+  currentPrice = AUCTION_MIN_PRICE,
+  increment = AUCTION_INCREMENT,
+  currentBidderColor = nil,
+  leaderColor = nil,
+  activeBidders = {},    -- ordered list of colors still in bidding
+  finalOrder = nil,      -- from TurnController for bidder order
+  bidderTimerId = nil,   -- Wait.time id for 20s auto-pass
+  bidderTickId = nil,    -- 1s repeat for UI countdown
+  bidderTurnStartTime = nil,  -- os.clock() when current bidder's turn started
+}
 
 -- === SECTION 2: PERSISTENCE ==================================================
 
@@ -241,11 +271,69 @@ local function deckWorldPos() return toWorld(TRACK_LOCAL.deck) end
 local function usedWorldPos() return toWorld(TRACK_LOCAL.used) end
 local function slotWorldPos(i) return toWorld(TRACK_LOCAL.slots[i]) end
 
+-- Auction card (Call for Auction): fixed local position on the board, x=10 for hovering spot
+local AUCTION_CARD_LOCAL = { x = 10, y = 0.592, z = 1.522 }
+local function auctionCardWorldPos()
+  return toWorld(AUCTION_CARD_LOCAL)
+end
+
 -- === SECTION 3.1: generic helpers ============================================
 
 local function objByGUID(g)
   if not g or g == "" then return nil end
   return getObjectFromGUID(g)
+end
+
+-- Auction: find money controller for a color (board with getMoney or WLB_MONEY tile)
+local function auctionFindMoney(color)
+  if not color or color == "" then return nil end
+  local ct = COLOR_TAG_PREFIX .. (color:sub(1,1):upper() .. color:sub(2):lower())
+  for _, o in ipairs(getAllObjects()) do
+    if o and o.hasTag and o.hasTag(ct) then
+      if o.hasTag(TAG_BOARD) and o.call then
+        local ok = pcall(function() return o.call("getMoney") end)
+        if ok then return o end
+      end
+      if o.hasTag(TAG_MONEY) then return o end
+    end
+  end
+  return nil
+end
+
+local function auctionGetMoney(color)
+  local m = auctionFindMoney(color)
+  if not m or not m.call then return 0 end
+  local ok, v = pcall(function() return m.call("getMoney") end)
+  if ok and type(v) == "number" then return v end
+  ok, v = pcall(function() return m.call("getValue") end)
+  if ok and type(v) == "number" then return v end
+  return 0
+end
+
+local function auctionCanSpend(color, amount)
+  return (auctionGetMoney(color) or 0) >= (tonumber(amount) or 0)
+end
+
+local function auctionSpend(color, amount)
+  amount = tonumber(amount) or 0
+  if amount <= 0 then return true end
+  local m = auctionFindMoney(color)
+  if not m or not m.call then return false end
+  local ok = pcall(function() m.call("addMoney", { amount = -amount }) end)
+  if ok then return true end
+  ok = pcall(function() m.call("API_spend", { amount = amount }) end)
+  return ok
+end
+
+local function auctionAdd(color, amount)
+  amount = tonumber(amount) or 0
+  if amount <= 0 then return true end
+  local m = auctionFindMoney(color)
+  if not m or not m.call then return false end
+  local ok = pcall(function() m.call("addMoney", { amount = amount }) end)
+  if ok then return true end
+  ok = pcall(function() m.call("addMoney", { delta = amount }) end)
+  return ok
 end
 
 local function isCardOrDeck(o)
@@ -1909,7 +1997,11 @@ function evt_onYes(card, player_color, alt_click)
     return "ERROR"
   end
 
-  uiCloseModalSoft(card)
+  -- Clear Yes/No buttons and return card to slot, but keep modalOpen[g] so refreshEventSlotUI
+  -- (e.g. from a pending Wait.time) does not call uiEnsureIdle and reattach the click catcher
+  -- before the engine has run. We clear modal state only after the engine returns.
+  uiClearButtons(card)
+  uiReturnHome(card)
 
   -- Use active turn color if available, otherwise fall back to player_color from button click
   -- Original logic: (Turns and Turns.turn_color and Turns.turn_color ~= "") and Turns.turn_color or player_color
@@ -1943,6 +2035,9 @@ function evt_onYes(card, player_color, alt_click)
         "⛔ You don't have enough AP for the extra cost from a further slot (+"..tostring(extra).." AP).",
         {1,0.6,0.2}
       )
+      uiState.modalOpen[card.getGUID()] = nil
+      karmaChoice = nil
+      modalColor = nil
       uiEnsureIdle(card)
       return "BLOCKED"
     end
@@ -1960,14 +2055,26 @@ function evt_onYes(card, player_color, alt_click)
 
   if not ok then
     warn("Engine call failed for card="..tostring(cardGuid))
+    uiState.modalOpen[card.getGUID()] = nil
+    karmaChoice = nil
+    modalColor = nil
     uiEnsureIdle(card)
     return "ERROR"
   end
 
   if ret == "BLOCKED" or ret == "ERROR" or ret == false or ret == nil then
+    uiState.modalOpen[card.getGUID()] = nil
+    karmaChoice = nil
+    modalColor = nil
     uiEnsureIdle(card)
     return (ret == nil) and "ERROR" or ret
   end
+
+  -- Success: clear modal state so refreshEventSlotUI_later can manage the card
+  local g = card.getGUID()
+  uiState.modalOpen[g] = nil
+  karmaChoice = nil
+  modalColor = nil
 
   -- 3) SUCCESS => charge extra AP now
   -- Event Engine has calculated total AP (base + slot extra) and applied CAR reduction once
@@ -2244,6 +2351,472 @@ function WLB_EVT_NEXT(_) return EVT_AUTO_NEXT_TURN() end
 function WLB_EVT_SLOT_EXTRA_AP(params)
   local i = tonumber(params and params.slot_idx)
   return EXTRA_BY_SLOT[i] or 0
+end
+
+-- === SECTION 12.5: CALL FOR AUCTION (AD_47) ==================================
+local AUCTION_COLORS = {"Yellow", "Blue", "Red", "Green"}
+
+local function auctionCard()
+  if not auctionState.active or not auctionState.eventCardGuid then return nil end
+  return objByGUID(auctionState.eventCardGuid)
+end
+
+local function auctionUpdateDescription()
+  local card = auctionCard()
+  if not card or not card.setDescription then return end
+  local parts = {}
+  for _, c in ipairs(AUCTION_COLORS) do
+    if auctionState.participants[c] then table.insert(parts, c) end
+  end
+  local joined = (#parts > 0) and table.concat(parts, ", ") or "(none)"
+  pcall(function() card.setDescription("Auction L2. Joined: " .. joined) end)
+end
+
+-- owner: optional Object to own the button callbacks (default self). Pass explicitly so delayed callbacks have valid reference.
+local function auctionClearAndAddButtons(buttons, owner)
+  local card = auctionCard()
+  if not card then return end
+  local ctrl = (owner and type(owner.call) == "function") and owner or self
+  pcall(function() card.clearButtons() end)
+  for _, b in ipairs(buttons or {}) do
+    pcall(function()
+      card.createButton({
+        click_function = b.fn,
+        function_owner = ctrl,
+        label = b.label,
+        position = b.pos or {0, 0.35, 0},
+        rotation = {0, 0, 0},
+        width = b.w or 800,
+        height = b.h or 200,
+        font_size = b.font or 120,
+        color = b.color or {0.2, 0.6, 0.2, 0.95},
+        font_color = {1, 1, 1, 1},
+        tooltip = b.tooltip or "",
+      })
+    end)
+  end
+end
+
+local function auctionCancelBidderTimer()
+  if auctionState.bidderTimerId then
+    if Wait.stop then Wait.stop(auctionState.bidderTimerId) end
+    auctionState.bidderTimerId = nil
+  end
+end
+
+local function auctionCancelBidderTick()
+  if auctionState.bidderTickId then
+    if Wait.stop then Wait.stop(auctionState.bidderTickId) end
+    auctionState.bidderTickId = nil
+  end
+end
+
+local function auctionBuildSnapshot()
+  local s = auctionState
+  local participantsList = {}
+  for _, c in ipairs(AUCTION_COLORS) do if s.participants[c] then table.insert(participantsList, c) end end
+  local remaining = AUCTION_BIDDER_TIMER_SEC
+  if s.state == "BIDDING" and s.bidderTurnStartTime and type(os) == "table" and os.clock then
+    local elapsed = os.clock() - s.bidderTurnStartTime
+    remaining = math.max(0, math.floor(AUCTION_BIDDER_TIMER_SEC - elapsed + 0.5))
+  end
+  return {
+    state = s.state,
+    currentPrice = s.currentPrice,
+    currentBidderColor = s.currentBidderColor,
+    leaderColor = s.leaderColor,
+    participants = participantsList,
+    activeBidders = (s.activeBidders and #s.activeBidders) or 0,
+    timerSeconds = remaining,
+    timerMaxSeconds = AUCTION_BIDDER_TIMER_SEC,
+  }
+end
+
+-- Forward declarations so timer callback (different chunk in TTS) can call these
+local auctionNextBidderInOrder, auctionResolve
+
+-- Set by Global script on load via Auction_RegisterGlobal({ guid = self.getGUID() }) so auction UI is found without manual config.
+local auctionRegisteredGlobalGUID = nil
+
+function Auction_RegisterGlobal(params)
+  params = params or {}
+  auctionRegisteredGlobalGUID = (params.guid and params.guid ~= "") and params.guid or nil
+end
+
+-- In TTS, Global script is not on an object – you cannot tag it. Object scripts get a built-in "Global"
+-- reference and call Global.call("functionName", params) to run Global script functions (see TurnController).
+local function auctionGetGlobalObject()
+  if Global and type(Global.call) == "function" then
+    return Global
+  end
+  -- Fallbacks only if Global is not available (e.g. very old TTS or custom setup)
+  if auctionRegisteredGlobalGUID then
+    local g = getObjectFromGUID(auctionRegisteredGlobalGUID)
+    if g and g.call then return g end
+  end
+  if EVT_GLOBAL_GUID and EVT_GLOBAL_GUID ~= "" then
+    local g = getObjectFromGUID(EVT_GLOBAL_GUID)
+    if g and g.call then return g end
+  end
+  for _, o in ipairs(getAllObjects()) do
+    if o and o.hasTag and o.hasTag(TAG_EVT_GLOBAL) and o.call then return o end
+  end
+  return nil
+end
+
+local function auctionUINotifyShow()
+  local g = auctionGetGlobalObject()
+  if g then
+    pcall(function() g.call("UI_AuctionShow", auctionBuildSnapshot()) end)
+  else
+    broadcastToAll("Auction panel: Global script not reachable. Ensure Global script and Global UI (VocationsUI_Global.xml) are in TTS Global script/UI.", {1,0.6,0.2})
+  end
+end
+
+local function auctionUINotifyUpdate()
+  local g = auctionGetGlobalObject()
+  if g then pcall(function() g.call("UI_AuctionUpdate", auctionBuildSnapshot()) end) end
+end
+
+local function auctionUINotifyHide()
+  local g = auctionGetGlobalObject()
+  if g then pcall(function() g.call("UI_AuctionHide") end) end
+end
+
+local function auctionStartBidderTimer()
+  auctionCancelBidderTimer()
+  auctionCancelBidderTick()
+  if auctionState.state ~= "BIDDING" or not auctionState.currentBidderColor then return end
+  auctionState.bidderTurnStartTime = (os and os.clock) and os.clock() or nil
+  local color = auctionState.currentBidderColor
+  auctionState.bidderTimerId = Wait.time(function()
+    auctionState.bidderTimerId = nil
+    auctionCancelBidderTick()
+    if not auctionState.active or auctionState.state ~= "BIDDING" then return end
+    if auctionState.currentBidderColor ~= color then return end
+    broadcastToAll("Auction: " .. color .. " did not act in time – auto Pass.", {0.9,0.7,0.2})
+    auction_doPass(color)
+  end, AUCTION_BIDDER_TIMER_SEC)
+  -- Update UI every second so timer countdown is visible
+  local function tick()
+    if not auctionState.active or auctionState.state ~= "BIDDING" then return end
+    auctionState.bidderTickId = Wait.time(tick, 1)
+    auctionUINotifyUpdate()
+  end
+  auctionState.bidderTickId = Wait.time(tick, 1)
+end
+
+-- Internal: perform pass for a color (used by timer and by UI/card callbacks via auction_pass_btn).
+function auction_doPass(color)
+  if not auctionState.active or auctionState.state ~= "BIDDING" then return end
+  color = (color and type(color)=="string") and (color:sub(1,1):upper()..color:sub(2):lower()) or ""
+  if color ~= auctionState.currentBidderColor then return end
+  local ab = auctionState.activeBidders
+  for i, c in ipairs(ab) do
+    if c == color then table.remove(ab, i); break end
+  end
+  auctionState.currentBidderColor = auctionNextBidderInOrder()
+  auctionUpdateDescription()
+  auctionCancelBidderTimer()
+  auctionCancelBidderTick()
+  broadcastToAll("Auction: " .. color .. " passes. Next: " .. tostring(auctionState.currentBidderColor or "—"), {0.8,0.8,0.8})
+  if #ab <= 1 then
+    auctionResolve()
+  else
+    auctionStartBidderTimer()
+    auctionUINotifyUpdate()
+  end
+end
+
+local function auctionCleanup()
+  auctionCancelBidderTimer()
+  auctionCancelBidderTick()
+  auctionUINotifyHide()
+  local card = auctionCard()
+  if card then
+    pcall(function() card.setLock(false) end)
+    pcall(function() card.clearButtons() end)
+    pcall(function() card.setDescription("") end)
+    teleportToUsed(card, 0)
+  end
+  auctionState.active = false
+  auctionState.state = nil
+  auctionState.initiatorColor = nil
+  auctionState.eventCardGuid = nil
+  auctionState.participants = {}
+  auctionState.deposits = {}
+  auctionState.currentPrice = AUCTION_MIN_PRICE
+  auctionState.currentBidderColor = nil
+  auctionState.leaderColor = nil
+  auctionState.activeBidders = {}
+  auctionState.finalOrder = nil
+  auctionState.bidderTimerId = nil
+  auctionState.bidderTickId = nil
+  auctionState.bidderTurnStartTime = nil
+end
+
+function Auction_Start(params)
+  params = params or {}
+  local initiatorColor = params.initiatorColor or (Turns and Turns.turn_color)
+  local cardGuid = params.cardGuid
+  if not initiatorColor or not cardGuid then
+    broadcastToAll("[Auction] Missing initiatorColor or cardGuid.", {1,0.5,0.2})
+    return
+  end
+  if auctionState.active then
+    broadcastToAll("[Auction] An auction is already in progress.", {1,0.5,0.2})
+    return
+  end
+  local card = objByGUID(cardGuid)
+  if not card or not isCard(card) then
+    broadcastToAll("[Auction] Card not found.", {1,0.5,0.2})
+    return
+  end
+  auctionState.active = true
+  auctionState.state = "JOINING"
+  auctionState.initiatorColor = initiatorColor
+  auctionState.eventCardGuid = cardGuid
+  auctionState.participants = {}
+  auctionState.deposits = {}
+  auctionState.currentPrice = AUCTION_MIN_PRICE
+  auctionState.currentBidderColor = nil
+  auctionState.leaderColor = nil
+  auctionState.activeBidders = {}
+  auctionState.finalOrder = nil
+
+  pcall(function() card.setLock(true) end)
+  -- Remove card from track slot so Next / refill don't move it to used pile
+  local slotIdx = getSlotIndexForCardGuid(cardGuid)
+  if slotIdx then
+    state.track.slots[slotIdx] = nil
+    saveState()
+  end
+  -- Place auction card at local position (AUCTION_CARD_LOCAL: x=10 on board); convert to world only for setPosition
+  local p = auctionCardWorldPos()
+  if p then
+    pcall(function() card.setPosition({p.x, p.y, p.z}) end)
+  end
+  uiState.modalOpen[cardGuid] = nil
+  uiState.homePos[cardGuid] = nil
+  uiClearButtons(card)
+  auctionUpdateDescription()
+  -- Add "Pay 500 & Join" button after a short delay so the card has settled (avoids buttons not sticking)
+  local ctrl = self
+  Wait.time(function()
+    if not auctionState.active or auctionState.state ~= "JOINING" or auctionState.eventCardGuid ~= cardGuid then return end
+    auctionClearAndAddButtons({
+      { fn = "auction_join", label = "Pay 500 & Join", pos = {0, 0.35, 0}, w = 1200, h = 220, font = 140, tooltip = "Pay 500 WIN deposit to join the auction" },
+    }, ctrl)
+  end, 0.3)
+  broadcastToAll("🏠 Call for Auction started. " .. initiatorColor .. " is the initiator. Pay 500 & Join on the card until initiator's next turn.", {0.7,0.9,1})
+end
+
+function auction_join(card, player_color, alt_click)
+  if not auctionState.active or auctionState.state ~= "JOINING" then return end
+  local clicker = (player_color and type(player_color)=="string") and (player_color:sub(1,1):upper()..player_color:sub(2):lower()) or ""
+  if clicker == "" then return end
+  -- Spectator (White): treat as the current turn player joining
+  local joinColor = (clicker == "White") and (Turns and Turns.turn_color and Turns.turn_color ~= "" and (Turns.turn_color:sub(1,1):upper()..Turns.turn_color:sub(2):lower())) or clicker
+  if not joinColor or joinColor == "" then
+    safeBroadcastTo(clicker, "No current turn set. Cannot join auction.", {1,0.6,0.2})
+    return
+  end
+  -- Only the player whose turn it is can join (one join per turn)
+  local turnColor = (Turns and Turns.turn_color and Turns.turn_color ~= "") and (Turns.turn_color:sub(1,1):upper()..Turns.turn_color:sub(2):lower()) or nil
+  if not turnColor or joinColor ~= turnColor then
+    safeBroadcastTo(clicker, "It's not your turn to join the auction. Only the current turn player can click Pay 500 & Join.", {1,0.7,0.2})
+    return
+  end
+  if auctionState.participants[joinColor] then
+    safeBroadcastTo(joinColor, "You already joined the auction.", {1,0.8,0.2})
+    return
+  end
+  -- Initiator must also pay 500 to join (same as others)
+  if not auctionCanSpend(joinColor, AUCTION_JOIN_DEPOSIT) then
+    safeBroadcastTo(joinColor, "You need 500 WIN to join. You don't have enough.", {1,0.6,0.2})
+    return
+  end
+  if not auctionSpend(joinColor, AUCTION_JOIN_DEPOSIT) then
+    safeBroadcastTo(joinColor, "Failed to pay 500 WIN.", {1,0.6,0.2})
+    return
+  end
+  auctionState.participants[joinColor] = true
+  auctionState.deposits[joinColor] = AUCTION_JOIN_DEPOSIT
+  auctionUpdateDescription()
+  broadcastToAll(joinColor .. " joined the auction (500 WIN deposit).", {0.5,1,0.5})
+end
+
+function Auction_OnTurnStart(params)
+  params = params or {}
+  local activeColor = params.activeColor
+  local finalOrder = params.finalOrder
+  if not auctionState.active or auctionState.state ~= "JOINING" then return end
+  -- One full round: when initiator's turn comes again, start BIDDING immediately
+  if not activeColor or activeColor ~= auctionState.initiatorColor then return end
+  auctionState.state = "BIDDING"
+  auctionState.finalOrder = finalOrder
+  local order = (type(finalOrder)=="table" and #finalOrder>0) and finalOrder or AUCTION_COLORS
+  auctionState.activeBidders = {}
+  for _, c in ipairs(order) do
+    if auctionState.participants[c] then
+      table.insert(auctionState.activeBidders, c)
+    end
+  end
+  auctionState.currentPrice = AUCTION_MIN_PRICE
+  auctionState.leaderColor = nil
+  auctionState.currentBidderColor = (#auctionState.activeBidders > 0) and auctionState.activeBidders[1] or nil
+
+  if #auctionState.activeBidders == 1 then
+    auctionState.state = "RESOLVED_ONE"
+    auctionClearAndAddButtons({
+      { fn = "auction_buy_btn", label = "Buy (1500 WIN)", pos = {-0.5, 0.35, 0}, w = 900, h = 180, font = 110, tooltip = "Pay 1000 WIN more (1500 total), get L2" },
+      { fn = "auction_decline_btn", label = "Decline", pos = {0.5, 0.35, 0}, w = 500, h = 180, font = 120, color = {0.7,0.3,0.2,0.95}, tooltip = "Refund 500 WIN, no property" },
+    })
+    broadcastToAll("Auction: Only one participant. Buy L2 for 1500 WIN or decline (refund 500).", {0.7,1,0.7})
+    return
+  end
+
+  -- BIDDING: no buttons on the card – only the board UI panel (top of screen). Clear card so the overlay is the only way to act.
+  auctionClearAndAddButtons({})
+  auctionUpdateDescription()
+  broadcastToAll("Auction: Bidding started. Use the AUCTION PANEL at the top of the screen – Bid or Pass. Current price " .. auctionState.currentPrice .. " WIN. " .. tostring(auctionState.currentBidderColor or "?") .. " to act.", {0.7,1,0.7})
+  auctionUINotifyShow()
+  auctionStartBidderTimer()
+end
+
+function auction_buy_btn(card, player_color, alt_click)
+  if not auctionState.active or auctionState.state ~= "RESOLVED_ONE" then return end
+  player_color = (player_color and type(player_color)=="string") and (player_color:sub(1,1):upper()..player_color:sub(2):lower()) or ""
+  if #auctionState.activeBidders ~= 1 or auctionState.activeBidders[1] ~= player_color then return end
+  local payMore = 1000
+  if not auctionCanSpend(player_color, payMore) then
+    safeBroadcastTo(player_color, "You need 1000 WIN more (1500 total). Cannot buy.", {1,0.6,0.2})
+    return
+  end
+  if not auctionSpend(player_color, payMore) then return end
+  local estate = getObjectFromGUID("fd8ce0")
+  if estate and estate.call then
+    pcall(function() estate.call("Auction_AssignL2", { color = player_color }) end)
+  end
+  broadcastToAll("Auction: " .. player_color .. " buys L2 for 1500 WIN.", {0.5,1,0.5})
+  auctionCleanup()
+end
+
+function auction_decline_btn(card, player_color, alt_click)
+  if not auctionState.active or auctionState.state ~= "RESOLVED_ONE" then return end
+  player_color = (player_color and type(player_color)=="string") and (player_color:sub(1,1):upper()..player_color:sub(2):lower()) or ""
+  if #auctionState.activeBidders ~= 1 or auctionState.activeBidders[1] ~= player_color then return end
+  auctionAdd(player_color, AUCTION_JOIN_DEPOSIT)
+  broadcastToAll("Auction: " .. player_color .. " declined. 500 WIN refunded.", {0.8,0.8,0.8})
+  auctionCleanup()
+end
+
+auctionNextBidderInOrder = function()
+  local order = auctionState.finalOrder
+  if not order or #order == 0 then order = AUCTION_COLORS end
+  local ab = auctionState.activeBidders
+  local current = auctionState.currentBidderColor
+  local idx = nil
+  for i, c in ipairs(order) do
+    if c == current then idx = i; break end
+  end
+  if not idx then return ab[1] end
+  for j = 1, #order do
+    local k = ((idx - 1 + j) % #order) + 1
+    local c = order[k]
+    for _, b in ipairs(ab) do if b == c then return c end end
+  end
+  return nil
+end
+
+auctionResolve = function()
+  auctionState.state = "RESOLVED"
+  local ab = auctionState.activeBidders
+  local winner = auctionState.leaderColor
+  if #ab == 1 then
+    winner = ab[1]
+  elseif #ab == 0 then
+    for c, _ in pairs(auctionState.deposits) do
+      auctionAdd(c, AUCTION_JOIN_DEPOSIT)
+    end
+    broadcastToAll("Auction: Everyone passed. All deposits refunded.", {0.8,0.8,0.8})
+    auctionCleanup()
+    return
+  end
+  if not winner then winner = (#ab > 0) and ab[#ab] or nil end
+  local payAmount = auctionState.currentPrice - AUCTION_JOIN_DEPOSIT
+  if payAmount > 0 and winner then
+    if not auctionCanSpend(winner, payAmount) then
+      broadcastToAll("Auction: Winner " .. winner .. " cannot pay " .. payAmount .. " WIN. Refunding all.", {1,0.6,0.2})
+      for c, _ in pairs(auctionState.deposits) do auctionAdd(c, AUCTION_JOIN_DEPOSIT) end
+      auctionCleanup()
+      return
+    end
+    auctionSpend(winner, payAmount)
+  end
+  -- Refund 500 WIN to every participant who is not the winner (all who had a deposit)
+  for c, _ in pairs(auctionState.deposits) do
+    if c ~= winner then
+      auctionAdd(c, AUCTION_JOIN_DEPOSIT)
+    end
+  end
+  -- Assign L2 property to winner via EstateEngine (money already taken above)
+  local estate = getObjectFromGUID("fd8ce0")
+  if estate and estate.call then
+    pcall(function() estate.call("Auction_AssignL2", { color = winner }) end)
+  else
+    broadcastToAll("Auction: Winner " .. tostring(winner) .. " paid but L2 assignment failed (EstateEngine not found).", {1,0.6,0.2})
+  end
+  broadcastToAll("Auction: " .. tostring(winner) .. " wins L2 for " .. auctionState.currentPrice .. " WIN. Others refunded 500.", {0.5,1,0.5})
+  auctionCleanup()
+end
+
+function auction_bid_btn(card, player_color, alt_click)
+  if not auctionState.active or auctionState.state ~= "BIDDING" then return end
+  player_color = (player_color and type(player_color)=="string") and (player_color:sub(1,1):upper()..player_color:sub(2):lower()) or ""
+  if player_color ~= auctionState.currentBidderColor then
+    safeBroadcastTo(player_color or "White", "Not your turn to bid.", {1,0.7,0.2})
+    return
+  end
+  local newPrice = auctionState.currentPrice + AUCTION_INCREMENT
+  local needExtra = newPrice - AUCTION_JOIN_DEPOSIT
+  local have = auctionGetMoney(player_color) or 0
+  if needExtra > 0 and (have < needExtra) then
+    safeBroadcastTo(player_color, "Insufficient funds. You need " .. needExtra .. " WIN (total " .. newPrice .. " minus 500 deposit). You have " .. tostring(have) .. " WIN.", {1,0.6,0.2})
+    broadcastToAll("Auction: " .. player_color .. " cannot bid – insufficient funds.", {1,0.5,0.2})
+    return
+  end
+  auctionCancelBidderTimer()
+  auctionCancelBidderTick()
+  auctionState.currentPrice = newPrice
+  auctionState.leaderColor = player_color
+  auctionState.currentBidderColor = auctionNextBidderInOrder()
+  auctionUpdateDescription()
+  broadcastToAll("Auction: " .. player_color .. " bids " .. newPrice .. " WIN. Next: " .. tostring(auctionState.currentBidderColor or "—"), {0.7,1,0.7})
+  if auctionState.currentBidderColor == auctionState.leaderColor then
+    auctionResolve()
+  else
+    auctionStartBidderTimer()
+    auctionUINotifyUpdate()
+  end
+end
+
+function auction_pass_btn(card, player_color, alt_click)
+  if not auctionState.active or auctionState.state ~= "BIDDING" then return end
+  player_color = (player_color and type(player_color)=="string") and (player_color:sub(1,1):upper()..player_color:sub(2):lower()) or ""
+  if player_color ~= auctionState.currentBidderColor then return end
+  auction_doPass(player_color)
+end
+
+-- Called by Global UI (and optionally by other objects). Params: { color = "Red" } etc.
+function Auction_OnBid(params)
+  params = params or {}
+  auction_bid_btn(nil, params.color or params.playerColor, false)
+end
+
+function Auction_OnPass(params)
+  params = params or {}
+  auction_pass_btn(nil, params.color or params.playerColor, false)
 end
 
 -- === SECTION 13: LOAD / SAVE =================================================

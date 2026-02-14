@@ -102,6 +102,7 @@ local LOCK_SEC = 8.0
 local pendingDice   = {}      -- [cardGuid] = { color, kind, diceKey, cardId }
 local pendingChoice = {}      -- [cardGuid] = { color, kind, choiceKey, cardId, meta }
 local pendingVECrime = {}     -- [cardGuid] = { color, cardId, targetColor? } for VE crime flow
+local auctionHandoffCardGuids = {}  -- [cardGuid]=true when card was handed to Events Controller for Call for Auction (skip finalizeCard)
 
 -- Store slot extra AP for CAR coordination (set by playCardFromUI, used by playCardById)
 local slotExtraAPForCard = {}  -- [cardGuid] = extra AP amount
@@ -736,6 +737,12 @@ end
 local function finalizeCard(cardObj, kind, color)
   if not cardObj then return end
   local g = cardObj.getGUID()
+  -- Don't finalize if this card was handed off to Events Controller for auction (it's already at auction position)
+  if auctionHandoffCardGuids and auctionHandoffCardGuids[g] then
+    if DEBUG then log("finalizeCard: skipped - card "..tostring(g).." is auction handoff") end
+    auctionHandoffCardGuids[g] = nil
+    return
+  end
   -- Don't finalize if there's a pending crime flow
   if pendingVECrime and pendingVECrime[g] then
     if DEBUG then log("finalizeCard: blocked - pendingVECrime exists for "..tostring(g)) end
@@ -953,7 +960,11 @@ function evt_veCrime(cardObj, player_color, alt_click)
   local g = cardObj.getGUID()
   local pc = pendingChoice[g]
   if not pc or pc.choiceKey ~= "VE_PICK_SIDE" then return end
-  if player_color and player_color ~= pc.color then return end
+  -- Spectator (White): allow action and use card's player (pc.color) as actor; otherwise only that player may click
+  local clickerNorm = (player_color and type(player_color)=="string") and (player_color:sub(1,1):upper()..player_color:sub(2):lower()) or ""
+  if clickerNorm ~= "" and clickerNorm ~= "White" and clickerNorm ~= (pc.color and (pc.color:sub(1,1):upper()..pc.color:sub(2):lower()) or "") then
+    return
+  end
   lockCard(g, LOCK_SEC)
   local cardId = pc.cardId
   -- Convert cardId to typeKey for VE_CRIME_TABLE lookup
@@ -1083,6 +1094,7 @@ local function processCrimeRollResult(roll, data, cardObj, g, targetColor)
   end
   local band = (roll <= 2) and 1 or ((roll <= 4) and 2 or 3)
   local outcome = crimeDef[band]
+  local crimeGainsVIN = 0  -- for Heat & Investigation (Tier 3 restitution)
   if outcome == "nothing" then
     pcall(function() broadcastToAll("Crime: Nothing happens.", {0.8,0.8,0.8}) end)
   elseif outcome == "wounded" then
@@ -1137,6 +1149,7 @@ local function processCrimeRollResult(roll, data, cardObj, g, targetColor)
       local amountToSteal = math.min(steal, targetCurrentMoney)
       
       if amountToSteal > 0 then
+        crimeGainsVIN = amountToSteal
         -- Take money from target
         local targetMoneyObj2 = resolveMoney(targetColor)
         if targetMoneyObj2 then
@@ -1159,6 +1172,19 @@ local function processCrimeRollResult(roll, data, cardObj, g, targetColor)
       end
     else
       pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED and loses 3 Health.", {1,0.6,0.4}) end)
+    end
+  end
+  -- Heat & Investigation (only after successful crime: wounded or wounded_steal)
+  if outcome ~= "nothing" then
+    local voc = findOneByTags({TAG_VOCATIONS_CTRL})
+    if voc and voc.call then
+      pcall(function()
+        voc.call("RunCrimeInvestigation", {
+          initiatorColor = data.color,
+          crimeGainsVIN = crimeGainsVIN,
+          targetColor = targetColor,
+        })
+      end)
     end
   end
   pendingVECrime[g] = nil
@@ -1381,6 +1407,7 @@ local function evt_veTarget(cardObj, targetColor)
     local band = (roll <= 2) and 1 or ((roll <= 4) and 2 or 3)
     local outcome = crimeDef[band]
     local targetColor = data.targetColor
+    local crimeGainsVIN = 0
     if outcome == "nothing" then
       pcall(function() broadcastToAll("Crime: Nothing happens.", {0.8,0.8,0.8}) end)
     elseif outcome == "wounded" then
@@ -1391,9 +1418,23 @@ local function evt_veTarget(cardObj, targetColor)
       local steal = (band == 2 and crimeDef.steal2) or (band == 3 and crimeDef.steal3) or crimeDef.steal or 0
       if steal > 0 then
         applyToPlayer_NoAP(targetColor, { money = -steal }, "VECrimeSteal")
+        crimeGainsVIN = steal
         pcall(function() broadcastToAll("Crime: "..targetColor.." WOUNDED and loses "..tostring(steal).." WIN.", {1,0.6,0.4}) end)
       else
         pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED.", {1,0.6,0.4}) end)
+      end
+    end
+    -- Heat & Investigation (same as processCrimeRollResult: only after successful crime)
+    if outcome ~= "nothing" then
+      local voc = findOneByTags({TAG_VOCATIONS_CTRL})
+      if voc and voc.call then
+        pcall(function()
+          voc.call("RunCrimeInvestigation", {
+            initiatorColor = data.color,
+            crimeGainsVIN = crimeGainsVIN,
+            targetColor = targetColor,
+          })
+        end)
       end
     end
     pendingVECrime[g] = nil
@@ -1426,6 +1467,7 @@ function evt_veCrimeRoll(cardObj, player_color, alt_click)
     local band = (roll <= 2) and 1 or ((roll <= 4) and 2 or 3)
     local outcome = crimeDef[band]
     local targetColor = data.targetColor
+    local crimeGainsVIN = 0
     if outcome == "nothing" then
       pcall(function() broadcastToAll("Crime: Nothing happens.", {0.8,0.8,0.8}) end)
     elseif outcome == "wounded" then
@@ -1436,9 +1478,23 @@ function evt_veCrimeRoll(cardObj, player_color, alt_click)
       local steal = (band == 2 and crimeDef.steal2) or (band == 3 and crimeDef.steal3) or crimeDef.steal or 0
       if steal > 0 then
         applyToPlayer_NoAP(targetColor, { money = -steal }, "VECrimeSteal")
+        crimeGainsVIN = steal
         pcall(function() broadcastToAll("Crime: "..targetColor.." WOUNDED and loses "..tostring(steal).." WIN.", {1,0.6,0.4}) end)
       else
         pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED.", {1,0.6,0.4}) end)
+      end
+    end
+    -- Heat & Investigation (only after successful crime: wounded or wounded_steal)
+    if outcome ~= "nothing" then
+      local voc = findOneByTags({TAG_VOCATIONS_CTRL})
+      if voc and voc.call then
+        pcall(function()
+          voc.call("RunCrimeInvestigation", {
+            initiatorColor = data.color,
+            crimeGainsVIN = crimeGainsVIN,
+            targetColor = targetColor,
+          })
+        end)
       end
     end
     pendingVECrime[g] = nil
@@ -1488,9 +1544,10 @@ local function veChoiceAllowed(cardObj, player_color, veCode)
   end
   local playerColorNorm = normColor(player_color)
   local pcColorNorm = normColor(pc.color)
-  if playerColorNorm ~= pcColorNorm then 
+  -- Spectator (White): allow and treat as acting for pc.color (current turn player)
+  if playerColorNorm ~= "White" and playerColorNorm ~= pcColorNorm then
     if DEBUG then log("veChoiceAllowed: color mismatch - player='"..tostring(player_color).."' ("..tostring(playerColorNorm)..") pc.color='"..tostring(pc.color).."' ("..tostring(pcColorNorm)..")") end
-    return false 
+    return false
   end
   -- VE_CODE_TO_VOCATION might be nil due to chunking - use fallback mapping
   local codeToVoc = VE_CODE_TO_VOCATION
@@ -2310,8 +2367,24 @@ local function handleSpecial(color, cardId, def, cardObj)
   end
 
   if def.special == "AD_AUCTION_SCHEDULE" then
-    -- Auction/property event: no design yet (what should this card do: schedule? bid? property?)
-    safeBroadcastTo(color, "ℹ️ Auction: not implemented yet — no effect. (Design pending.)", {0.7,0.9,1})
+    -- Call for Auction: hand off to Events Controller (card moves to auction area, JOINING phase)
+    local ctrl = getObjectFromGUID(EVENTS_CONTROLLER_GUID)
+    local cardGuid = cardObj and cardObj.getGUID and cardObj.getGUID()
+    if ctrl and ctrl.call and cardGuid then
+      if type(auctionHandoffCardGuids) ~= "table" then auctionHandoffCardGuids = {} end
+      auctionHandoffCardGuids[cardGuid] = true
+      local ok, err = pcall(function()
+        ctrl.call("Auction_Start", { initiatorColor = color, cardGuid = cardGuid })
+      end)
+      if not ok then
+        auctionHandoffCardGuids[cardGuid] = nil
+        safeBroadcastTo(color, "⚠️ Auction start failed: "..tostring(err), {1,0.6,0.2})
+      end
+    else
+      if not ctrl or not ctrl.call then
+        safeBroadcastTo(color, "⚠️ Events Controller not found. Cannot start auction.", {1,0.6,0.2})
+      end
+    end
     return STATUS.DONE
   end
 
@@ -3047,6 +3120,8 @@ local function playCardById(cardId, cardObj, explicitSlotIdx)
     local s = handleSpecial(color, cardId, def, cardObj)
     if s == STATUS.WAIT_CHOICE then return STATUS.WAIT_CHOICE end
     if s == STATUS.BLOCKED then return STATUS.BLOCKED end
+    -- Call for Auction: Events Controller already moved the card to auction position; do not finalize (move to discard)
+    if def.special == "AD_AUCTION_SCHEDULE" and s == STATUS.DONE then return STATUS.DONE end
   end
 
   -- DICE
@@ -3119,8 +3194,14 @@ function playCardFromUI(args)
     return STATUS.ERROR
   end
 
+  -- Use clicking player; in spectator mode (White) use current turn so the card is played as the active player
   if args.player_color and args.player_color ~= "" then
-    activeColor = args.player_color
+    local clicker = (args.player_color):sub(1,1):upper()..(args.player_color):sub(2):lower()
+    if clicker == "White" and Turns and Turns.turn_color and Turns.turn_color ~= "" then
+      activeColor = Turns.turn_color
+    else
+      activeColor = args.player_color
+    end
   end
 
   -- Store slot extra AP for CAR coordination (will be used by playCardById)

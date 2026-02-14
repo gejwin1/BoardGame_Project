@@ -18,6 +18,8 @@ local DEBUG = true
 -- IMPORTANT: Set VOC_CTRL_GUID to the actual GUID of your VocationsController object
 -- To find it: In TTS, right-click VocationsController → Scripting → copy the GUID
 VOC_CTRL_GUID = "37f7a7"   -- VocationsController GUID
+EVENTS_CTRL_GUID = "1339d3" -- EventsController GUID (auction backend)
+HEAT_POLICE_GUID = "ffe844" -- Police Car pawn (Crime / Heat track)
 UI_DIAG_ENABLED = true      -- Set to false to disable UI diagnostics logging
 
 local TAG_COLOR_PREFIX = "WLB_COLOR_"   -- e.g. WLB_COLOR_Red
@@ -131,12 +133,29 @@ end
 -- =========================
 local TAG_PLAYER_STATUS_CTRL = "WLB_PLAYER_STATUS_CTRL"
 
+local TAG_HEAT_POLICE = "WLB_POLICE"  -- Police Car pawn (Crime / Heat track)
+
 function WLB_NEW_GAME()
   log("NEW GAME: resetting AP controllers + clearing blocked memory...")
 
   -- reset blocked memory
   for _,c in ipairs(COLORS) do G.blocked[c] = 0 end
   save()
+
+  -- reset Heat (Crime & Investigation) so police pawn returns to 0
+  -- Use GUID so we always target the scripted Police Car; delay so onLoad has run
+  local heatPawn = getObjectFromGUID(HEAT_POLICE_GUID)
+  if not heatPawn then heatPawn = findOneWithTags(TAG_HEAT_POLICE, nil) end
+  if heatPawn and heatPawn.call then
+    Wait.time(function()
+      local ok, err = pcall(function() heatPawn.call("SetHeat", 0) end)
+      if ok then
+        log(" - Heat reset to 0 (Police Car)")
+      else
+        warn("Heat reset failed: " .. tostring(err))
+      end
+    end, 0.5)
+  end
 
   -- reset child-blocked AP (so no leftover kids from previous game block AP at start)
   local psc = findOneWithTags(TAG_PLAYER_STATUS_CTRL, nil)
@@ -369,6 +388,60 @@ end
 -- Legacy function name (for backward compatibility)
 local function findVocationsController()
   return GetVocCtrl()
+end
+
+-- EventsController (auction backend)
+local function GetEvtCtrl()
+  if not EVENTS_CTRL_GUID or EVENTS_CTRL_GUID == "" then return nil end
+  local o = getObjectFromGUID(EVENTS_CTRL_GUID)
+  return (o and o.call) and o or nil
+end
+
+-- =========================
+-- [SECTION 6b] AUCTION UI (board panel – Bid/Pass visible to all)
+-- =========================
+local AUCTION_OVERLAY_ID = "auctionOverlay"
+
+function UI_AuctionShow(snapshot)
+  if not snapshot or snapshot.state ~= "BIDDING" then return end
+  UI.setAttribute(AUCTION_OVERLAY_ID, "active", "true")
+  UI_AuctionUpdate(snapshot)
+end
+
+function UI_AuctionUpdate(snapshot)
+  if not snapshot then return end
+  UI.setAttribute("auctionPrice", "text", "Current price: " .. tostring(snapshot.currentPrice or 1500) .. " WIN")
+  UI.setAttribute("auctionBidder", "text", "Current bidder: " .. tostring(snapshot.currentBidderColor or "—"))
+  UI.setAttribute("auctionLeader", "text", "Leader: " .. tostring(snapshot.leaderColor or "—"))
+  local sec = snapshot.timerSeconds
+  if type(sec) == "number" and sec >= 0 then
+    UI.setAttribute("auctionTimer", "text", "Time left: " .. tostring(sec) .. " s")
+  else
+    UI.setAttribute("auctionTimer", "text", "Time limit: " .. tostring(snapshot.timerMaxSeconds or 20) .. " seconds")
+  end
+  if snapshot.state == "BIDDING" then
+    UI.setAttribute(AUCTION_OVERLAY_ID, "active", "true")
+  end
+end
+
+function UI_AuctionHide()
+  UI.setAttribute(AUCTION_OVERLAY_ID, "active", "false")
+end
+
+function UI_AuctionBid(player, value, id)
+  local pc = player and player.color or "White"
+  if pc == "White" then return end
+  local evt = GetEvtCtrl()
+  if not evt then log("UI_AuctionBid: EventsController not found") return end
+  pcall(function() evt.call("Auction_OnBid", { color = pc }) end)
+end
+
+function UI_AuctionPass(player, value, id)
+  local pc = player and player.color or "White"
+  if pc == "White" then return end
+  local evt = GetEvtCtrl()
+  if not evt then log("UI_AuctionPass: EventsController not found") return end
+  pcall(function() evt.call("Auction_OnPass", { color = pc }) end)
 end
 
 -- UI Callback: Vocation button clicked (from selection screen)
@@ -854,6 +927,13 @@ function onLoad()
     log(" - VocationsController found: " .. tostring(vocCtrl.getGUID() or "nil"))
   else
     warn("VocationsController not found (missing WLB_VOCATIONS_CTRL tag?)")
+  end
+
+  -- Register this object with EventsController so auction UI (Bid/Pass panel) is found automatically
+  local evtCtrl = GetEvtCtrl()
+  if evtCtrl and self and self.getGUID then
+    pcall(function() evtCtrl.call("Auction_RegisterGlobal", { guid = self.getGUID() }) end)
+    log(" - EventsController: registered Global for auction UI")
   end
   
   log("Commands: /wlbn (new game), /wlbe Red 2 (end turn apply), /wlbd (dump)")
