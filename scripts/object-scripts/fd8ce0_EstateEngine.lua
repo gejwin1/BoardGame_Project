@@ -617,12 +617,24 @@ local function findCostsCalculator()
   return nil
 end
 
+-- Get vocation for a player color (for Social Worker 50% rent discount)
+local function getVocationForColor(c)
+  if not c or c == "" then return nil end
+  local list = getObjectsWithTag("WLB_VOCATIONS_CTRL") or {}
+  local voc = list[1]
+  if not voc or not voc.call then return nil end
+  local ok, vocation = pcall(function() return voc.call("VOC_GetVocation", { color = c }) end)
+  if ok and type(vocation) == "string" then return vocation end
+  return nil
+end
+
 -- Update rental cost in cost calculator when estate changes
 -- IMPORTANT: TurnController adds rental costs every turn at turn start.
 -- This function adjusts costs immediately when estate level changes mid-turn.
 -- Strategy: Simply calculate delta between old and new rental costs, then adjust.
 -- We use S.currentEstateLevel as the source of truth for what level the player currently has.
-local function updateRentalCostInCalculator(color, oldLevel, newLevel)
+-- isRent: true when player just rented (apply Social Worker 50% same-turn); false when bought.
+local function updateRentalCostInCalculator(color, oldLevel, newLevel, isRent)
   color = normalizeColor(color)
   if not color or color == "" then return end
   
@@ -662,6 +674,11 @@ local function updateRentalCostInCalculator(color, oldLevel, newLevel)
   local oldCost = ESTATE_RENTAL_COST[effectiveOldLevel] or 0
   local newCost = ESTATE_RENTAL_COST[newLevel] or 0
   local delta = newCost - oldCost
+  
+  -- Social Worker passive: 50% rent for rented apartment. Apply same-turn when player just rented (isRent=true).
+  if delta > 0 and isRent and getVocationForColor(color) == "SOCIAL_WORKER" then
+    delta = math.floor(delta * 0.5)
+  end
   
   -- Adjust by the delta (this correctly transitions from old cost to new cost)
   if delta ~= 0 then
@@ -945,10 +962,10 @@ local function doRent(level, clickedColor)
     attachReturnOrSellButton(card)
 
     -- Update rental cost in cost calculator (remove old level, add new level)
-    -- Only adjust delta - TurnController handles base L0 costs per turn
+    -- Only adjust delta - TurnController handles base L0 costs per turn. Pass isRent=true for Social Worker 50% same-turn.
     local oldLevel = S.currentEstateLevel[acting] or "L0"  -- Default to L0 if not set
     S.currentEstateLevel[acting] = level
-    updateRentalCostInCalculator(acting, oldLevel, level)
+    updateRentalCostInCalculator(acting, oldLevel, level, true)
 
     -- Update TokenEngine housing level and reposition family tokens to the new apartment's slots (L1–L4)
     local tokenEngine = findTokenEngine()
@@ -1010,11 +1027,10 @@ local function doBuyExecute(level, acting, finalPrice, voucherTokensToRemove)
     attachReturnOrSellButton(card)
 
     -- Update rental cost in cost calculator (remove old level, add new level)
-    -- Note: Buying also requires rental cost payment per turn
-    -- Only adjust delta - TurnController handles base L0 costs per turn
+    -- Note: Buying also requires rental cost payment per turn. Pass isRent=false (no Social Worker discount on buy).
     local oldLevel = S.currentEstateLevel[acting] or "L0"  -- Default to L0 if not set
     S.currentEstateLevel[acting] = level
-    updateRentalCostInCalculator(acting, oldLevel, level)
+    updateRentalCostInCalculator(acting, oldLevel, level, false)
 
     -- Update TokenEngine housing level and reposition family tokens to the new apartment's slots (L1–L4)
     local tokenEngine = findTokenEngine()
@@ -1256,7 +1272,7 @@ function ME_returnOrSellEstate(card, pc)
   -- Only adjust delta - TurnController handles base L0 costs per turn
   local oldLevel = S.currentEstateLevel[acting] or "L0"  -- Default to L0 if somehow not set
   S.currentEstateLevel[acting] = "L0"  -- Revert to grandma's house
-  updateRentalCostInCalculator(acting, oldLevel, "L0")
+  updateRentalCostInCalculator(acting, oldLevel, "L0", false)
 
   -- Update TokenEngine housing level back to L0 and reposition family tokens to board (grandma's house)
   local tokenEngine = findTokenEngine()

@@ -66,6 +66,7 @@ local TAG_MONEY              = "WLB_MONEY"
 local TAG_AP_CTRL            = "WLB_AP_CTRL"
 local TAG_PLAYER_BOARD       = "WLB_BOARD"
 local TAG_COSTS_CALC         = "WLB_COSTS_CALC"
+local TAG_VOCATIONS_CTRL     = "WLB_VOCATIONS_CTRL"
 
 local TAG_COLOR_PREFIX = "WLB_COLOR_"
 
@@ -177,6 +178,8 @@ local S = {
   
   -- Investment tracking: [Color] = { debentures={...}, loan={...}, endowment={...}, estateInvest={...}, stock={...} }
   investments = { Yellow={}, Blue={}, Red={}, Green={} },
+  -- NGO Take Trip (free): while set, "Take this Trip (free)" buttons are on visible Trip cards; cleared when player picks one
+  pendingNGOTakeTripColor = nil,
 }
 
 -- =========================
@@ -2035,17 +2038,18 @@ local CONSUMABLE_DEF = {
   CSHOP_19_PILLS = {cost=200, extraAP=0, kind="PILLS"},
   CSHOP_20_PILLS = {cost=200, extraAP=0, kind="PILLS"},
 
-  CSHOP_21_TRIP = {cost=1000, extraAP=2, kind="NATURE_TRIP"},
-  CSHOP_22_TRIP = {cost=1000, extraAP=2, kind="NATURE_TRIP"},
+  -- Trip/experience cards (NGO "Take Trip (free)" perk): Nature Trip, Family visit, Zero Gravity, Parachute, Bungee, Balloon
+  CSHOP_21_TRIP = {cost=1000, extraAP=2, kind="NATURE_TRIP", countsAsTrip=true},
+  CSHOP_22_TRIP = {cost=1000, extraAP=2, kind="NATURE_TRIP", countsAsTrip=true},
 
-  CSHOP_23_FAMILY = {cost=1000, extraAP=0, kind="FAMILY"},
-  CSHOP_24_FAMILY = {cost=1000, extraAP=0, kind="FAMILY"},
+  CSHOP_23_FAMILY = {cost=1000, extraAP=0, kind="FAMILY", countsAsTrip=true},   -- Family Planning Centre visit
+  CSHOP_24_FAMILY = {cost=1000, extraAP=0, kind="FAMILY", countsAsTrip=true},
 
-  CSHOP_25_BALLOON   = {cost=1000, extraAP=1, kind="SAT", sat=4},
-  CSHOP_25_BALOON    = {cost=1000, extraAP=1, kind="SAT", sat=4}, -- Alias: actual card name has typo (single L)
-  CSHOP_26_GRAVITY   = {cost=3000, extraAP=1, kind="SAT", sat=12},
-  CSHOP_27_BUNGEE    = {cost=1500, extraAP=1, kind="SAT", sat=6},
-  CSHOP_28_PARACHUTE = {cost=2000, extraAP=1, kind="SAT", sat=8},
+  CSHOP_25_BALLOON   = {cost=1000, extraAP=1, kind="SAT", sat=4, countsAsTrip=true},
+  CSHOP_25_BALOON    = {cost=1000, extraAP=1, kind="SAT", sat=4, countsAsTrip=true}, -- Alias: actual card name has typo (single L)
+  CSHOP_26_GRAVITY   = {cost=3000, extraAP=1, kind="SAT", sat=12, countsAsTrip=true}, -- Zero Gravity Flight
+  CSHOP_27_BUNGEE    = {cost=1500, extraAP=1, kind="SAT", sat=6, countsAsTrip=true},
+  CSHOP_28_PARACHUTE = {cost=2000, extraAP=1, kind="SAT", sat=8, countsAsTrip=true},
 }
 
 -- =========================
@@ -2524,12 +2528,15 @@ end
 -- =========================
 -- [S9E] INVESTMENT PROCESSING FUNCTIONS
 -- =========================
-local function processDebenturesPurchase(color, card, amount)
+local function processDebenturesPurchase(color, card, amount, amountToCharge)
   -- DEBENTURES: Pay same amount for 3 turns, get 200% back (100% profit) after 3 turns
+  -- amountToCharge: optional (NGO perk); if provided, charge this instead of amount for first payment
   color = normalizeColor(color)
+  local charge = amount
+  if type(amountToCharge) == "number" and amountToCharge >= 0 then charge = amountToCharge end
   
-  -- Charge initial payment
-  local okMoney = moneySpend(color, amount)
+  -- Charge initial payment (may be 0 with NGO subsidy)
+  local okMoney = moneySpend(color, charge)
   if not okMoney then
     safeBroadcastToColor("⛔ Not enough funds (WIN) for Debentures investment of "..tostring(amount).." WIN", color, {1,0.6,0.2})
     return false
@@ -2620,12 +2627,14 @@ local function processLoanPurchase(color, card, amount)
   return true
 end
 
-local function processStockPurchase(color, card, amount)
-  -- STOCK: Pay investment, then automatically roll first die
+local function processStockPurchase(color, card, amount, amountToCharge)
+  -- STOCK: Pay investment, then automatically roll first die. amountToCharge: optional (NGO perk)
   color = normalizeColor(color)
+  local charge = amount
+  if type(amountToCharge) == "number" and amountToCharge >= 0 then charge = amountToCharge end
   
-  -- Charge investment
-  local okMoney = moneySpend(color, amount)
+  -- Charge investment (may be 0 with NGO subsidy)
+  local okMoney = moneySpend(color, charge)
   if not okMoney then
     safeBroadcastToColor("⛔ Not enough funds (WIN) for Stock investment of "..tostring(amount).." WIN", color, {1,0.6,0.2})
     return false
@@ -2735,12 +2744,15 @@ local function processStockPurchase(color, card, amount)
   return true
 end
 
-local function processEndowmentPurchase(color, card, amount, duration)
+local function processEndowmentPurchase(color, card, amount, duration, amountToCharge)
   -- ENDOWMENT: Pay same amount per year for chosen duration, get profit after duration
+  -- amountToCharge: optional (NGO perk); if provided, charge this instead of amount for first payment
   color = normalizeColor(color)
+  local charge = amount
+  if type(amountToCharge) == "number" and amountToCharge >= 0 then charge = amountToCharge end
   
-  -- Charge first payment (same turn)
-  local okMoney = moneySpend(color, amount)
+  -- Charge first payment (same turn; may be 0 with NGO subsidy)
+  local okMoney = moneySpend(color, charge)
   if not okMoney then
     safeBroadcastToColor("⛔ Not enough funds (WIN) for Endowment investment of "..tostring(amount).." WIN", color, {1,0.6,0.2})
     return false
@@ -2784,16 +2796,18 @@ local function processEndowmentPurchase(color, card, amount, duration)
   return true
 end
 
-local function processEstateInvestPurchase(color, card, level, totalPrice, paymentMethod)
-  -- ESTATEINVEST: Real estate investment with payment options
+local function processEstateInvestPurchase(color, card, level, totalPrice, paymentMethod, subsidy)
+  -- ESTATEINVEST: Real estate investment with payment options. subsidy: optional (NGO perk, up to 1000 VIN)
   color = normalizeColor(color)
+  subsidy = (type(subsidy) == "number" and subsidy > 0) and subsidy or 0
   
   local costsCalc = firstWithTag(TAG_COSTS_CALC)
   
   if paymentMethod == "60pct" then
     -- Pay 60% now
     local payment60pct = math.floor(totalPrice * 0.6)
-    local okMoney = moneySpend(color, payment60pct)
+    local effectivePayment = math.max(0, payment60pct - subsidy)
+    local okMoney = moneySpend(color, effectivePayment)
     if not okMoney then
       safeBroadcastToColor("⛔ Not enough funds (WIN) for 60% payment: "..tostring(payment60pct).." WIN", color, {1,0.6,0.2})
       return false
@@ -2815,7 +2829,8 @@ local function processEstateInvestPurchase(color, card, level, totalPrice, payme
   elseif paymentMethod == "3x30pct" then
     -- Pay 30% now, 30% next turn, 30% third turn
     local payment30pct = math.floor(totalPrice * 0.3)
-    local okMoney = moneySpend(color, payment30pct)
+    local effectivePayment = math.max(0, payment30pct - subsidy)
+    local okMoney = moneySpend(color, effectivePayment)
     if not okMoney then
       safeBroadcastToColor("⛔ Not enough funds (WIN) for first 30% payment: "..tostring(payment30pct).." WIN", color, {1,0.6,0.2})
       return false
@@ -2965,7 +2980,12 @@ function inv_estateinvest_60pct(card, player_color, alt_click)
   local pending = pendingInvestment[g]
   if not pending or pending.kind ~= "ESTATEINVEST" then return end
   pending.paymentMethod = "60pct"
-  local success = processEstateInvestPurchase(pending.color, card, pending.apartmentLevel, pending.apartmentPrice, "60pct")
+  local subsidy = (pending.ngoSubsidy and type(pending.ngoSubsidy) == "number" and pending.ngoSubsidy > 0) and pending.ngoSubsidy or 0
+  if subsidy > 0 then
+    local voc = firstWithTag(TAG_VOCATIONS_CTRL)
+    if voc and voc.call then pcall(function() voc.call("VOC_ConsumeNGOInvestmentPerk", { color = pending.color }) end) end
+  end
+  local success = processEstateInvestPurchase(pending.color, card, pending.apartmentLevel, pending.apartmentPrice, "60pct", subsidy)
   if success then
     -- Purchase succeeded: clear state and buttons
     pendingInvestment[g] = nil
@@ -2983,7 +3003,12 @@ function inv_estateinvest_3x30pct(card, player_color, alt_click)
   local pending = pendingInvestment[g]
   if not pending or pending.kind ~= "ESTATEINVEST" then return end
   pending.paymentMethod = "3x30pct"
-  local success = processEstateInvestPurchase(pending.color, card, pending.apartmentLevel, pending.apartmentPrice, "3x30pct")
+  local subsidy = (pending.ngoSubsidy and type(pending.ngoSubsidy) == "number" and pending.ngoSubsidy > 0) and pending.ngoSubsidy or 0
+  if subsidy > 0 then
+    local voc = firstWithTag(TAG_VOCATIONS_CTRL)
+    if voc and voc.call then pcall(function() voc.call("VOC_ConsumeNGOInvestmentPerk", { color = pending.color }) end) end
+  end
+  local success = processEstateInvestPurchase(pending.color, card, pending.apartmentLevel, pending.apartmentPrice, "3x30pct", subsidy)
   if success then
     -- Purchase succeeded: clear state and buttons
     pendingInvestment[g] = nil
@@ -3138,10 +3163,44 @@ local function attemptBuyCard(card, buyerColor, options)
     cost = math.max(0, math.floor(cost * (1 - 0.25 * discountTokens)))
   end
 
+  -- NGO Crowdfunding: if buying Hi-Tech, apply crowdfund pool (same turn only); player pays only the difference if cost > pool.
+  if row == "H" then
+    local voc = firstWithTag(TAG_VOCATIONS_CTRL)
+    if voc and voc.call then
+      local ok, result = pcall(function() return voc.call("VOC_ApplyCrowdfundPoolForPurchase", { color = buyerColor, cost = cost }) end)
+      if ok and result and type(result) == "table" and result.playerPays ~= nil then
+        cost = tonumber(result.playerPays) or cost
+      end
+    end
+  end
+
+  -- NGO Worker L3: Use Investment (free, up to 1000 VIN) – apply subsidy to initial cost before charging (for row I).
+  local costBeforeSubsidy = cost
+  if row == "I" then
+    local voc = firstWithTag(TAG_VOCATIONS_CTRL)
+    if voc and voc.call then
+      local ok, subsidy = pcall(function() return voc.call("VOC_GetNGOInvestmentSubsidy", { color = buyerColor }) end)
+      if ok and subsidy ~= nil then
+        subsidy = tonumber(subsidy) or 0
+        if subsidy > 0 and cost > 0 then
+          cost = math.max(0, cost - subsidy)
+        end
+      end
+    end
+  end
+
   local okMoney = moneySpend(buyerColor, cost)
   if not okMoney then
     safeBroadcastToColor("⛔ Not enough funds (WIN) to purchase this card.", buyerColor, {1,0.6,0.2})
     return false
+  end
+
+  -- NGO Worker L3: if we applied subsidy to the initial charge (row I), consume the perk now.
+  if row == "I" and cost < costBeforeSubsidy and costBeforeSubsidy > 0 then
+    local voc = firstWithTag(TAG_VOCATIONS_CTRL)
+    if voc and voc.call then
+      pcall(function() voc.call("VOC_ConsumeNGOInvestmentPerk", { color = buyerColor }) end)
+    end
   end
 
   -- Handle Hi-Tech cards (permanent items)
@@ -3182,6 +3241,16 @@ local function attemptBuyCard(card, buyerColor, options)
     if effectResult == "NEED_INPUT" then
       local g = card.getGUID()
       buyerColor = normalizeColor(buyerColor)
+      -- NGO Worker L3: Use Investment (free, up to 1000 VIN) – subsidy applied when they confirm amount
+      local ngoSubsidy = 0
+      local voc = firstWithTag(TAG_VOCATIONS_CTRL)
+      if voc and voc.call then
+        local ok, result = pcall(function() return voc.call("VOC_GetNGOInvestmentSubsidy", { color = buyerColor }) end)
+        if ok and result ~= nil then
+          local num = tonumber(result)
+          if num and num > 0 then ngoSubsidy = num end
+        end
+      end
       
       -- Keep card lifted (don't return to slot yet)
       -- Clear YES/NO buttons but keep card in lifted position
@@ -3206,6 +3275,7 @@ local function attemptBuyCard(card, buyerColor, options)
         counterValue = 0,  -- For DEBENTURES, LOAN, STOCK
         minAmount = 50,    -- Minimum investment
         increment = 50,    -- Increment per click
+        ngoSubsidy = ngoSubsidy,
       }
       
       -- Show counter UI (for DEBENTURES, LOAN, STOCK)
@@ -3216,7 +3286,12 @@ local function attemptBuyCard(card, buyerColor, options)
         -- ENDOWMENT: First choose duration (2/3/4 years), then amount
         local g = card.getGUID()
         buyerColor = normalizeColor(buyerColor)
-        
+        local ngoSubsidyEndow = 0
+        local vocE = firstWithTag(TAG_VOCATIONS_CTRL)
+        if vocE and vocE.call then
+          local okE, resE = pcall(function() return vocE.call("VOC_GetNGOInvestmentSubsidy", { color = buyerColor }) end)
+          if okE and resE ~= nil then ngoSubsidyEndow = tonumber(resE) or 0 end
+        end
         pendingInvestment[g] = {
           color = buyerColor,
           def = def,
@@ -3226,6 +3301,7 @@ local function attemptBuyCard(card, buyerColor, options)
           counterValue = 0,
           minAmount = 50,
           increment = 50,
+          ngoSubsidy = ngoSubsidyEndow,
         }
         
         -- Keep card lifted for duration choice
@@ -3286,7 +3362,12 @@ local function attemptBuyCard(card, buyerColor, options)
         -- ESTATEINVEST: Choose payment method (60% now vs 3×30%) and apartment level
         local g = card.getGUID()
         buyerColor = normalizeColor(buyerColor)
-        
+        local ngoSubsidyEst = 0
+        local vocEst = firstWithTag(TAG_VOCATIONS_CTRL)
+        if vocEst and vocEst.call then
+          local okEst, resEst = pcall(function() return vocEst.call("VOC_GetNGOInvestmentSubsidy", { color = buyerColor }) end)
+          if okEst and resEst ~= nil then ngoSubsidyEst = tonumber(resEst) or 0 end
+        end
         pendingInvestment[g] = {
           color = buyerColor,
           def = def,
@@ -3294,6 +3375,7 @@ local function attemptBuyCard(card, buyerColor, options)
           kind = def.kind,
           paymentMethod = nil,  -- "60pct" or "3x30pct"
           apartmentLevel = nil,  -- "L1", "L2", "L3", "L4"
+          ngoSubsidy = ngoSubsidyEst,
         }
         
         -- Keep card lifted for apartment level choice
@@ -3699,6 +3781,9 @@ function inv_onCounterOK(card, player_color, alt_click)
   local color = normalizeColor(pending.color)
   local amount = pending.counterValue or 0
   local minAmount = pending.minAmount or 50
+  local subsidy = tonumber(pending.ngoSubsidy) or 0
+  if subsidy < 0 then subsidy = 0 end
+  local amountToCharge = math.max(0, amount - subsidy)
   
   if amount < minAmount then
     safeBroadcastToColor("⛔ Minimum investment is "..tostring(minAmount).." WIN", color, {1,0.6,0.2})
@@ -3708,7 +3793,11 @@ function inv_onCounterOK(card, player_color, alt_click)
   -- Process investment based on kind
   local success = false
   if pending.kind == "DEBENTURES" then
-    success = processDebenturesPurchase(color, card, amount)
+    success = processDebenturesPurchase(color, card, amount, amountToCharge)
+    if success and subsidy > 0 then
+      local voc = firstWithTag(TAG_VOCATIONS_CTRL)
+      if voc and voc.call then pcall(function() voc.call("VOC_ConsumeNGOInvestmentPerk", { color = color }) end) end
+    end
     if success then
       -- Clear pending state and buttons only on success
       pendingInvestment[g] = nil
@@ -3727,7 +3816,11 @@ function inv_onCounterOK(card, player_color, alt_click)
       -- Keep counter UI active so player can adjust amount
     end
   elseif pending.kind == "STOCK" then
-    success = processStockPurchase(color, card, amount)
+    success = processStockPurchase(color, card, amount, amountToCharge)
+    if success and subsidy > 0 then
+      local voc = firstWithTag(TAG_VOCATIONS_CTRL)
+      if voc and voc.call then pcall(function() voc.call("VOC_ConsumeNGOInvestmentPerk", { color = color }) end) end
+    end
     if success then
       -- Clear pending state (buttons handled by processStockPurchase)
       pendingInvestment[g] = nil
@@ -3742,7 +3835,11 @@ function inv_onCounterOK(card, player_color, alt_click)
       safeBroadcastToColor("⛔ Invalid duration for ENDOWMENT", color, {1,0.6,0.2})
       return
     end
-    success = processEndowmentPurchase(color, card, amount, duration)
+    success = processEndowmentPurchase(color, card, amount, duration, amountToCharge)
+    if success and subsidy > 0 then
+      local voc = firstWithTag(TAG_VOCATIONS_CTRL)
+      if voc and voc.call then pcall(function() voc.call("VOC_ConsumeNGOInvestmentPerk", { color = color }) end) end
+    end
     if success then
       -- Clear pending state and buttons only on success
       pendingInvestment[g] = nil
@@ -4657,6 +4754,153 @@ function UI_add1000(_, player_color, alt_click)
   else
     safeBroadcastAll("⛔ DEBUG +1000 WIN: MoneyCtrl/API not working for "..tostring(target), {1,0.4,0.4})
   end
+end
+
+-- =========================
+-- [S14B] NGO WORKER PERKS: Take Trip (free), Investment subsidy
+-- =========================
+-- Fallback defs when card display name is not an exact CONSUMABLE_DEF key (e.g. "Zero Gravity Flight", "A Visit to the Family Planning Centre")
+local NATURE_TRIP_FALLBACK_DEF = { cost = 1000, extraAP = 2, kind = "NATURE_TRIP", countsAsTrip = true }
+local FAMILY_FALLBACK_DEF      = { cost = 1000, extraAP = 0, kind = "FAMILY", countsAsTrip = true }
+local function tripFallbackDefForName(name)
+  if not name or name == "" then return nil end
+  local u = string.upper(name)
+  if string.find(u, "TRIP") or string.find(name, "Trip") then return NATURE_TRIP_FALLBACK_DEF end
+  if string.find(u, "FAMILY") or string.find(u, "PLANNING") or string.find(u, "VISIT") then return FAMILY_FALLBACK_DEF end
+  if string.find(u, "GRAVITY") or string.find(u, "ZERO") then return { cost = 3000, extraAP = 1, kind = "SAT", sat = 12, countsAsTrip = true } end
+  if string.find(u, "PARACHUTE") then return { cost = 2000, extraAP = 1, kind = "SAT", sat = 8, countsAsTrip = true } end
+  if string.find(u, "BUNGEE") then return { cost = 1500, extraAP = 1, kind = "SAT", sat = 6, countsAsTrip = true } end
+  if string.find(u, "BALLOON") or string.find(u, "BALOON") then return { cost = 1000, extraAP = 1, kind = "SAT", sat = 4, countsAsTrip = true } end
+  if string.find(u, "FLIGHT") then return { cost = 3000, extraAP = 1, kind = "SAT", sat = 12, countsAsTrip = true } end
+  return nil
+end
+
+-- True if def (or name) counts as a "Trip" for NGO Take Trip (free) perk.
+local function defCountsAsTrip(def, name)
+  if def and (def.countsAsTrip or def.kind == "NATURE_TRIP" or def.kind == "FAMILY") then return true end
+  if def and def.kind == "SAT" and (def.countsAsTrip or (name and (string.find(string.upper(name or ""), "GRAVITY") or string.find(string.upper(name or ""), "PARACHUTE") or string.find(string.upper(name or ""), "BUNGEE") or string.find(string.upper(name or ""), "BALLOON")))) then return true end
+  return tripFallbackDefForName(name) ~= nil
+end
+
+-- Find all visible Trip cards: consumable row C, any card that counts as a trip (nature trip, family visit, zero gravity, parachute, bungee, balloon, etc.).
+local function findAllVisibleTripCards()
+  local list = {}
+  if not ensureBoard() then return list end
+  local function addIfTrip(o, requireOpenSlot)
+    if not isCard(o) or classifyRowByName(o) ~= "C" then return end
+    if requireOpenSlot and not isShopOpenSlotCard(o) then return end
+    local name = getNameSafe(o)
+    local def = CONSUMABLE_DEF[name]
+    if def and defCountsAsTrip(def, name) then
+      table.insert(list, { card = o, def = def })
+      return
+    end
+    local fallback = tripFallbackDefForName(name)
+    if fallback then
+      table.insert(list, { card = o, def = fallback })
+    end
+  end
+  for _, o in ipairs(getAllObjects()) do
+    addIfTrip(o, true)
+  end
+  if #list == 0 then
+    for _, o in ipairs(getAllObjects()) do
+      addIfTrip(o, false)
+    end
+  end
+  return list
+end
+
+-- Remove "Take this Trip (free)" buttons from all visible Trip cards (after player picked one or cancel)
+local function clearNGOTakeTripButtons()
+  local list = findAllVisibleTripCards()
+  for _, entry in ipairs(list) do
+    local card = entry.card
+    if card and card.clearButtons then
+      pcall(function() card.clearButtons() end)
+    end
+  end
+  S.pendingNGOTakeTripColor = nil
+end
+
+-- NGO Worker L2: Show "Take this Trip (free)" on each visible Trip card; player picks one, then we apply effect and mark used.
+function API_showNGOTakeTripChoice(params)
+  params = params or {}
+  local color = (type(params) == "table" and (params.color or params.player_color)) or params
+  if type(color) ~= "string" or color == "" then return false end
+  color = normalizeColor(color)
+  local list = findAllVisibleTripCards()
+  if #list == 0 then return false end
+  S.pendingNGOTakeTripColor = color
+  for _, entry in ipairs(list) do
+    local card = entry.card
+    if card and card.createButton then
+      local g = card.getGUID()
+      if not UI.homePos[g] then
+        local p = card.getPosition()
+        UI.homePos[g] = { x = p[1] or p.x, y = p[2] or p.y, z = p[3] or p.z }
+      end
+      pcall(function()
+        -- Position high and at front of card (Y=0.7, Z=1.15) so button is on top and easy to click, not under other buttons
+        card.createButton({
+          click_function = "shop_ngoTakeThisTrip",
+          function_owner = self,
+          label = "Take this Trip\n(free)",
+          position = {0, 0.7, 1.15},
+          rotation = {0, 0, 0},
+          width = 1200,
+          height = 420,
+          font_size = 130,
+          color = {0.3, 0.85, 0.4, 0.95},
+          font_color = {1, 1, 1, 1},
+          tooltip = "NGO Take Trip (free) – use this card, no cost",
+        })
+      end)
+    end
+  end
+  return true
+end
+
+-- Called when player clicks "Take this Trip (free)" on a Trip card: apply effect for that card only, mark perk used, clear other Trip buttons.
+function shop_ngoTakeThisTrip(card, player_color, alt_click)
+  if not (card and card.tag == "Card") then return end
+  local color = S.pendingNGOTakeTripColor
+  if not color or color == "" then
+    clearNGOTakeTripButtons()
+    return
+  end
+  local name = getNameSafe(card)
+  local def = CONSUMABLE_DEF[name]
+  if not def or not defCountsAsTrip(def, name) then
+    def = tripFallbackDefForName(name)
+  end
+  if not def then
+    clearNGOTakeTripButtons()
+    return
+  end
+  clearNGOTakeTripButtons()
+  local g = card.getGUID()
+  if not UI.homePos[g] then
+    local p = card.getPosition()
+    UI.homePos[g] = { x = p[1] or p.x, y = p[2] or p.y, z = p[3] or p.z }
+  end
+  local effectResult = applyConsumableEffect(color, card, def)
+  if effectResult == "WAIT_DICE" then
+    safeBroadcastToColor("🌿 Trip (free): Roll the die, then click ROLL DICE on this card", color, {0.7,1,0.7})
+  else
+    -- Effect applied immediately (SAT, etc.) – discard card to used pile like normal purchase
+    Wait.time(function()
+      if card and card.tag == "Card" then
+        stashPurchasedCard(card)
+      end
+      refreshShopOpenUI_later(0.25)
+    end, 0.3)
+  end
+  local voc = firstWithTag(TAG_VOCATIONS_CTRL)
+  if voc and voc.call then
+    pcall(function() voc.call("VOC_MarkNGOTakeTripUsed", { color = color }) end)
+  end
+  broadcastToAll("🌿 " .. color .. " used NGO Take Trip (free) — took one Trip from the shop. (Once per level.)", {0.6,1,0.7})
 end
 
 -- =========================
