@@ -363,7 +363,8 @@ function resetNewGame()
 end
 
 function addCost(params)
-  local c = resolveColor(params, true)
+  -- Require explicit color so we never add cost to the wrong (e.g. active) player by mistake
+  local c = resolveColor(params, false)
   if not c then return 0 end
   local delta = 0
   local bucket = nil

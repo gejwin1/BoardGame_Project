@@ -476,6 +476,7 @@ local function onTurnStart_AddRentalCosts(color)
   -- Rental costs apply to all owned apartments (rented or bought)
   -- Use same method as EstateEngine to ensure consistency
   local totalRentalCost = ESTATE_RENTAL_COST.L0  -- Default: 50 WIN (grandma's house)
+  local isRentedApartment = false  -- True if L1–L4 and card has ESTATE_MODE_RENT (Social Worker pays 50%)
   
   -- Search for estate cards with player's color tag AND ESTATE_OWNED tag
   -- Must also have ESTATE_CARD tag to ensure it's an actual estate card
@@ -495,7 +496,8 @@ local function onTurnStart_AddRentalCosts(color)
           local cost = ESTATE_RENTAL_COST[level]
           if cost then
             totalRentalCost = cost  -- Use apartment's rental cost
-            log("Rental cost: Found "..level.." apartment for "..color..", cost="..tostring(cost))
+            isRentedApartment = (o.hasTag(TAG_ESTATE_MODE_RENT) == true)
+            log("Rental cost: Found "..level.." apartment for "..color..", cost="..tostring(cost)..", rented="..tostring(isRentedApartment))
             break  -- Player should only have one apartment
           end
         end
@@ -503,8 +505,19 @@ local function onTurnStart_AddRentalCosts(color)
     end
   end
   
+  -- Social Worker passive: pays only 50% of rent for any apartment (L0 grandma's house or L1–L4 rented)
+  if totalRentalCost > 0 then
+    local voc = findOneByTags("WLB_VOCATIONS_CTRL")
+    if voc and voc.call then
+      local ok, vocation = pcall(function() return voc.call("VOC_GetVocation", { color = color }) end)
+      if ok and vocation == "SOCIAL_WORKER" then
+        totalRentalCost = math.floor(totalRentalCost * 0.5)
+        log("Rental cost: Social Worker 50% discount applied for "..color..", rent now "..tostring(totalRentalCost))
+      end
+    end
+  end
+  
   -- Add rental cost to cost calculator
-  -- Check if rental cost was already added this turn (per-color guard)
   if rentalCostAddedThisTurn[color] == true then
     log("Rental cost already added this turn for "..color..", skipping duplicate")
     return
@@ -512,7 +525,6 @@ local function onTurnStart_AddRentalCosts(color)
   
   local costsCalc = findOneByTags(TAG_COSTS_CALC)
   if costsCalc and costsCalc.call then
-    -- Check current cost to avoid double-adding if already initialized
     local currentCost = 0
     local okCheck, currentCostResult = pcall(function()
       return costsCalc.call("getCost", {color=color})
@@ -521,9 +533,6 @@ local function onTurnStart_AddRentalCosts(color)
       currentCost = currentCostResult
     end
     
-    -- Only add if the current cost doesn't already include rental cost
-    -- (This prevents double-adding if costs were initialized elsewhere)
-    -- We add rental cost regardless, as it's a per-turn recurring cost
     local ok = pcall(function()
       costsCalc.call("addCost", {color=color, amount=totalRentalCost})
     end)

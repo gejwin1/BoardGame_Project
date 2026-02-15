@@ -802,6 +802,119 @@ local function addWoundedStatus(color)
   return ok
 end
 
+-- Social Worker L1: Use Good Karma — grant one Good Karma token to the player, once per game.
+local function VOC_StartSocialWorkerUseGoodKarma(params)
+  params = params or {}
+  local color = params.color
+  local actorColor = normalizeColor(params.effectsTarget or color)
+  if not actorColor or actorColor == "White" then
+    safeBroadcastToColor("Invalid player for Use Good Karma.", color or "White", {1,0.6,0.2})
+    return false
+  end
+  if state.vocations[actorColor] ~= VOC_SOCIAL_WORKER or (state.levels[actorColor] or 1) < 1 then
+    safeBroadcastToColor("Social Worker level 1 required for Use Good Karma.", color or "White", {1,0.6,0.2})
+    return false
+  end
+  state.swGoodKarmaUsed = state.swGoodKarmaUsed or {}
+  if state.swGoodKarmaUsed[actorColor] then
+    safeBroadcastToColor("Use Good Karma can only be used once per game. Already used.", actorColor, {1,0.6,0.2})
+    return false
+  end
+  local psc = findPlayerStatusController()
+  if not psc or not psc.call then
+    safeBroadcastToColor("Player Status Controller not found. Cannot add Good Karma.", actorColor, {1,0.6,0.2})
+    return false
+  end
+  local ok = pcall(function()
+    return psc.call("PS_Event", { op = "ADD_STATUS", color = actorColor, statusTag = "WLB_STATUS_GOOD_KARMA" })
+  end)
+  if not ok then
+    safeBroadcastToColor("Failed to add Good Karma token.", actorColor, {1,0.6,0.2})
+    return false
+  end
+  state.swGoodKarmaUsed[actorColor] = true
+  -- Do not call saveState here: UI/callbacks may run in a chunk where self/saveState is nil. UI_VocationAction will call VOC_SaveState after return.
+  broadcastToAll("✨ " .. actorColor .. " used Social Worker Good Karma — gained one Good Karma token. (Once per game.)", {1,0.84,0.0})
+  return true
+end
+
+local TAG_VOUCH_C = "WLB_STATUS_VOUCH_C"
+local TAG_VOUCH_H = "WLB_STATUS_VOUCH_H"
+
+-- Social Worker L2: Once per game, grant 4 consumable voucher tokens (100% = one free consumable).
+function VOC_StartSocialWorkerConsumableFree(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+  local actorColor = params.effectsTarget or color
+  if actorColor == "White" then
+    safeBroadcastToColor("Invalid player for free consumable perk.", color or "White", {1,0.6,0.2})
+    return false
+  end
+  if state.vocations[actorColor] ~= VOC_SOCIAL_WORKER or (state.levels[actorColor] or 1) < 2 then
+    safeBroadcastToColor("Social Worker Level 2 required for free consumable perk.", actorColor, {1,0.6,0.2})
+    return false
+  end
+  state.swConsumablePerkUsed = state.swConsumablePerkUsed or {}
+  if state.swConsumablePerkUsed[actorColor] then
+    safeBroadcastToColor("Free consumable perk can only be used once per game. Already used.", actorColor, {1,0.6,0.2})
+    return false
+  end
+  local psc = findPlayerStatusController()
+  if not psc or not psc.call then
+    safeBroadcastToColor("Player Status Controller not found. Cannot grant vouchers.", actorColor, {1,0.6,0.2})
+    return false
+  end
+  for _ = 1, 4 do
+    local ok = pcall(function() return psc.call("PS_Event", { op = "ADD_STATUS", color = actorColor, statusTag = TAG_VOUCH_C }) end)
+    if not ok then
+      safeBroadcastToColor("Failed to add consumable voucher token.", actorColor, {1,0.6,0.2})
+      return false
+    end
+  end
+  state.swConsumablePerkUsed[actorColor] = true
+  pcall(function() self.call("VOC_SaveState", {}) end)
+  broadcastToAll("✨ " .. actorColor .. " used Social Worker free consumable perk — gained 4 consumable vouchers (one free consumable). (Once per game.)", {1,0.84,0.0})
+  return true
+end
+
+-- Social Worker L3: Once per game, grant 4 hi-tech voucher tokens (100% = one free hi-tech).
+function VOC_StartSocialWorkerHitechFree(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+  local actorColor = params.effectsTarget or color
+  if actorColor == "White" then
+    safeBroadcastToColor("Invalid player for free hi-tech perk.", color or "White", {1,0.6,0.2})
+    return false
+  end
+  if state.vocations[actorColor] ~= VOC_SOCIAL_WORKER or (state.levels[actorColor] or 1) < 3 then
+    safeBroadcastToColor("Social Worker Level 3 required for free hi-tech perk.", actorColor, {1,0.6,0.2})
+    return false
+  end
+  state.swHitechPerkUsed = state.swHitechPerkUsed or {}
+  if state.swHitechPerkUsed[actorColor] then
+    safeBroadcastToColor("Free hi-tech perk can only be used once per game. Already used.", actorColor, {1,0.6,0.2})
+    return false
+  end
+  local psc = findPlayerStatusController()
+  if not psc or not psc.call then
+    safeBroadcastToColor("Player Status Controller not found. Cannot grant vouchers.", actorColor, {1,0.6,0.2})
+    return false
+  end
+  for _ = 1, 4 do
+    local ok = pcall(function() return psc.call("PS_Event", { op = "ADD_STATUS", color = actorColor, statusTag = TAG_VOUCH_H }) end)
+    if not ok then
+      safeBroadcastToColor("Failed to add hi-tech voucher token.", actorColor, {1,0.6,0.2})
+      return false
+    end
+  end
+  state.swHitechPerkUsed[actorColor] = true
+  pcall(function() self.call("VOC_SaveState", {}) end)
+  broadcastToAll("✨ " .. actorColor .. " used Social Worker free hi-tech perk — gained 4 hi-tech vouchers (one free hi-tech). (Once per game.)", {1,0.84,0.0})
+  return true
+end
+
 -- Steal money from target player
 -- Chunk-safe: die callback may run in another TTS chunk where getMoney/moneySpend/moneyAdd are nil; use _G.VOC_CTRL fallback.
 local function stealMoney(fromColor, toColor, amount)
@@ -1612,10 +1725,11 @@ resolveInteractionEffects_impl = function()
   -- Check if this interaction needs a die roll
   local needsDieRoll = false
   -- Robin Hood (GANG_SPECIAL_ROBIN) is NOT in this list: it uses VOC_StartGangsterRobinHood which does target selection first, then die. Never resolve it here (no target).
+  -- NGO_L3_ADVOCACY has no die roll: other players choose YES/NO, then effects apply immediately
   local dieRollActions = {
     "CELEB_L1_STREET_PERF", "CELEB_L2_MEET_GREET", "CELEB_L3_CHARITY_STREAM",
     "PS_L1_INCOME_TAX", "PS_L2_HITECH_TAX", "PS_L3_PROPERTY_TAX",
-    "NGO_L1_CHARITY", "NGO_L2_CROWDFUND", "NGO_L3_ADVOCACY",
+    "NGO_L1_CHARITY", "NGO_L2_CROWDFUND",
     "ENT_L1_FLASH_SALE", "ENT_L2_TRAINING", "ENT_SPECIAL_EXPANSION",
     "GANG_L1_CRIME", "GANG_L2_CRIME", "GANG_L3_CRIME"
   }
@@ -1627,7 +1741,7 @@ resolveInteractionEffects_impl = function()
   end
 
   if needsDieRoll then
-    -- Roll die first, then resolve
+    -- Roll die first, then resolve via .call() to avoid chunking (resolveInteractionEffectsWithDie can be nil in async callback)
     safeBroadcastAll("🎲 Rolling die for "..id.."...", {1,1,0.6})
     rollPhysicalDieAndRead(function(die, err)
       if err then
@@ -1637,7 +1751,14 @@ resolveInteractionEffects_impl = function()
       else
         safeBroadcastAll("🎲 Die result: "..die, {0.8,0.9,1})
       end
-      resolveInteractionEffectsWithDie(id, initiator, die)
+      local me = self
+      if me and me.call then
+        pcall(function() me.call("ResolveInteractionEffectsWithDie", { id = id, initiator = initiator, die = die }) end)
+      elseif type(resolveInteractionEffectsWithDie) == "function" then
+        resolveInteractionEffectsWithDie(id, initiator, die)
+      else
+        warn("ResolveInteractionEffectsWithDie: no self.call and resolver nil (chunking)")
+      end
     end)
     return
   end
@@ -2062,33 +2183,37 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
   -- NGO Worker Level 3 – Advocacy Pressure Campaign
   elseif id == "NGO_L3_ADVOCACY" then
     local participants = {}
+    local ignoreCount = 0
     for c, choice in pairs(interaction.responses) do
       if choice == "JOIN" then
         table.insert(participants, c)
+      elseif choice == "IGNORE" then
+        ignoreCount = ignoreCount + 1
       end
     end
-    
-    -- YES (JOIN): Pay 300 VIN, gain +2 Satisfaction
+
+    -- YES (Support): Pay 300 VIN, gain +2 Satisfaction
     for _, c in ipairs(participants) do
       if moneySpend(c, 300) then
         satAdd(c, 2)
       end
     end
-    
-    -- NO (IGNORE): Lose -1 Satisfaction
+
+    -- NO (Ignore): Lose -1 Satisfaction
     for c, choice in pairs(interaction.responses) do
       if choice == "IGNORE" then
         satAdd(c, -1)
       end
     end
-    
-    -- Initiator: +1 SAT per participant, +1 Skill once per campaign
+
+    -- Initiator: +1 SAT per participant; +1 Skill once per campaign if at least one player ignored
     satAdd(initiator, #participants)
-    if #participants > 0 then
+    if ignoreCount > 0 then
       addSkills(initiator, 1)
+      safeBroadcastAll("Advocacy Campaign: "..initiator.." ran the event. "..#participants.." supported, "..ignoreCount.." ignored → +1 Skill (once per campaign).", {0.7,1,0.7})
+    else
+      safeBroadcastAll("Advocacy Campaign: "..initiator.." ran the event. "..#participants.." participant(s) supported.", {0.7,1,0.7})
     end
-    
-    safeBroadcastAll("Advocacy Campaign: "..initiator.." ran the event. "..#participants.." participant(s).", {0.7,1,0.7})
 
   -- NGO Worker Special – International Crisis Appeal
   elseif id == "NGO_SPECIAL_CRISIS" then
@@ -2299,6 +2424,18 @@ handleInteractionResponse = function(color, choice, actorColor)
   end
 end
 
+-- Callable entry point for Join/Ignore so UI callbacks (invoked via .call from Global) can reach handleInteractionResponse
+-- without chunking issues (handleInteractionResponse can be nil in the chunk where UI_Interaction_* live).
+function HandleInteractionResponse(params)
+  if not params or not params.buttonColor then return end
+  local fn = handleInteractionResponse
+  if type(fn) == "function" then
+    fn(params.buttonColor, params.choice or "JOIN", params.actorColor)
+  else
+    warn("HandleInteractionResponse: handleInteractionResponse not available (chunking)")
+  end
+end
+
 -- =========================================================
 -- STATE PERSISTENCE
 -- =========================================================
@@ -2315,6 +2452,13 @@ local function loadState()
       state.noSpecialAwardThisYear = data.noSpecialAwardThisYear or state.noSpecialAwardThisYear
       state.levelUpRound = data.levelUpRound or state.levelUpRound
       state.taxWaiverUsedAtLevel = data.taxWaiverUsedAtLevel or state.taxWaiverUsedAtLevel
+      state.swGoodKarmaUsed = data.swGoodKarmaUsed or state.swGoodKarmaUsed or {}
+      state.ngoGoodKarmaUsedPerLevel = data.ngoGoodKarmaUsedPerLevel or state.ngoGoodKarmaUsedPerLevel or {}
+      state.ngoTakeTripUsedPerLevel = data.ngoTakeTripUsedPerLevel or state.ngoTakeTripUsedPerLevel or {}
+      state.ngoUseInvestmentUsedPerLevel = data.ngoUseInvestmentUsedPerLevel or state.ngoUseInvestmentUsedPerLevel or {}
+      state.ngoInvestmentSubsidyActive = data.ngoInvestmentSubsidyActive or state.ngoInvestmentSubsidyActive or {}
+      state.swConsumablePerkUsed = data.swConsumablePerkUsed or state.swConsumablePerkUsed or {}
+      state.swHitechPerkUsed = data.swHitechPerkUsed or state.swHitechPerkUsed or {}
       -- Backfill: if a player has a vocation but no levelUpRound (old save), treat as round 1
       for _, c in ipairs(COLORS) do
         if state.vocations[c] and (state.levelUpRound[c] == nil or state.levelUpRound[c] == 0) then
@@ -2337,8 +2481,20 @@ local function saveState()
     noSpecialAwardThisYear = state.noSpecialAwardThisYear,
     levelUpRound = state.levelUpRound,
     taxWaiverUsedAtLevel = state.taxWaiverUsedAtLevel,
+    swGoodKarmaUsed = state.swGoodKarmaUsed or {},
+    ngoGoodKarmaUsedPerLevel = state.ngoGoodKarmaUsedPerLevel or {},
+    ngoTakeTripUsedPerLevel = state.ngoTakeTripUsedPerLevel or {},
+    ngoUseInvestmentUsedPerLevel = state.ngoUseInvestmentUsedPerLevel or {},
+    ngoInvestmentSubsidyActive = state.ngoInvestmentSubsidyActive or {},
+    swConsumablePerkUsed = state.swConsumablePerkUsed or {},
+    swHitechPerkUsed = state.swHitechPerkUsed or {},
   }
   self.script_state = JSON.encode(data)
+end
+
+-- Callable so UI/callbacks in other chunks can persist state (saveState is local and may be nil there).
+function VOC_SaveState()
+  saveState()
 end
 
 -- =========================================================
@@ -2593,6 +2749,15 @@ function VOC_ResetForNewGame(params)
   state.noSpecialAwardThisYear = { Yellow = false, Blue = false, Red = false, Green = false }
   state.levelUpRound = { Yellow = nil, Blue = nil, Red = nil, Green = nil }
   state.taxWaiverUsedAtLevel = { Yellow = nil, Blue = nil, Red = nil, Green = nil }
+  state.swGoodKarmaUsed = {}
+  state.ngoGoodKarmaUsedPerLevel = {}
+  state.ngoTakeTripUsedPerLevel = {}
+  state.ngoUseInvestmentUsedPerLevel = {}
+  state.ngoInvestmentSubsidyActive = {}
+  state.swConsumablePerkUsed = {}
+  state.swHitechPerkUsed = {}
+  state.crowdfundPool = {}
+  state.crowdfundPoolTurnColor = {}
   state.currentPickerColor = nil
   selectionState.activeColor = nil
   selectionState.shownSummary = nil
@@ -3392,8 +3557,8 @@ function VOC_StartCelebrityMeetGreet(params)
     initiator = color,
     title = "MEET & GREET",
     subtitle = "Celebrity Level 2 – Cost for you: Spend 1 AP & 200 VIN",
-    joinCostText = "Others may join by spending 1 AP & 200 VIN.",
-    effectText = "Each participant gains +1 Knowledge & +1 Satisfaction. Celebrity gains +3 or +5 Satisfaction (D6 roll). If no one joins, Celebrity loses -2 or -4 Satisfaction.",
+    joinCostText = "Others may join by spending 1 AP.",
+    effectText = "Each participant gains +1 Knowledge & +1 Satisfaction. Celebrity gains +3 or +5 Satisfaction (D6 roll). If no one joins, Celebrity loses 2 or 4 Satisfaction.",
     joinCostAP = 1,
   })
   return true
@@ -3999,30 +4164,179 @@ function VOC_StartNGOCharity(params)
   return true
 end
 
+-- NGO Worker L1: Take Good Karma (free) — grant one Good Karma token, once per level.
+function VOC_StartNGOTakeGoodKarma(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+  local actorColor = params.effectsTarget or color
+  if actorColor == "White" then
+    safeBroadcastToColor("Invalid player for Take Good Karma.", color or "White", {1,0.6,0.2})
+    return false
+  end
+  if state.vocations[actorColor] ~= VOC_NGO_WORKER then
+    safeBroadcastToColor("Only NGO Worker can use Take Good Karma.", actorColor, {1,0.7,0.2})
+    return false
+  end
+  local level = state.levels[actorColor] or 1
+  if level < 1 then
+    safeBroadcastToColor("NGO Worker Level 1 required for Take Good Karma.", actorColor, {1,0.7,0.2})
+    return false
+  end
+  state.ngoGoodKarmaUsedPerLevel = state.ngoGoodKarmaUsedPerLevel or {}
+  if not state.ngoGoodKarmaUsedPerLevel[actorColor] then state.ngoGoodKarmaUsedPerLevel[actorColor] = {} end
+  if state.ngoGoodKarmaUsedPerLevel[actorColor][level] then
+    safeBroadcastToColor("Take Good Karma (free) can only be used once per level. Already used this level.", actorColor, {1,0.6,0.2})
+    return false
+  end
+  local psc = findPlayerStatusController()
+  if not psc or not psc.call then
+    safeBroadcastToColor("Player Status Controller not found. Cannot add Good Karma.", actorColor, {1,0.6,0.2})
+    return false
+  end
+  local ok = pcall(function()
+    return psc.call("PS_Event", { op = "ADD_STATUS", color = actorColor, statusTag = "WLB_STATUS_GOOD_KARMA" })
+  end)
+  if not ok then
+    safeBroadcastToColor("Failed to add Good Karma token.", actorColor, {1,0.6,0.2})
+    return false
+  end
+  state.ngoGoodKarmaUsedPerLevel[actorColor][level] = true
+  broadcastToAll("✨ " .. actorColor .. " used NGO Take Good Karma (free) — gained one Good Karma token. (Once per level.)", {1,0.84,0.0})
+  return true
+end
+
+-- NGO Worker L2: Take Trip (free) — take one visible Trip card from the shop, no cost/AP, full benefits (rest + die for SAT). Once per level.
+function VOC_StartNGOTakeTrip(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+  local actorColor = params.effectsTarget or color
+  if actorColor == "White" then
+    safeBroadcastToColor("Invalid player for Take Trip.", color or "White", {1,0.6,0.2})
+    return false
+  end
+  if state.vocations[actorColor] ~= VOC_NGO_WORKER then
+    safeBroadcastToColor("Only NGO Worker can use Take Trip (free).", actorColor, {1,0.7,0.2})
+    return false
+  end
+  local level = state.levels[actorColor] or 1
+  if level < 2 then
+    safeBroadcastToColor("NGO Worker Level 2 required for Take Trip (free).", actorColor, {1,0.7,0.2})
+    return false
+  end
+  state.ngoTakeTripUsedPerLevel = state.ngoTakeTripUsedPerLevel or {}
+  if not state.ngoTakeTripUsedPerLevel[actorColor] then state.ngoTakeTripUsedPerLevel[actorColor] = {} end
+  if state.ngoTakeTripUsedPerLevel[actorColor][level] then
+    safeBroadcastToColor("Take Trip (free) can only be used once per level. Already used this level.", actorColor, {1,0.6,0.2})
+    return false
+  end
+  local shopList = getObjectsWithTag("WLB_SHOP_ENGINE") or {}
+  local shop = shopList[1]
+  if not shop or not shop.call then
+    safeBroadcastToColor("Shop Engine not found. Cannot take Trip.", actorColor, {1,0.6,0.2})
+    return false
+  end
+  -- Show "Take this Trip (free)" on each visible Trip card; perk is marked used when they pick one (Shop calls VOC_MarkNGOTakeTripUsed)
+  local ok, result = pcall(function() return shop.call("API_showNGOTakeTripChoice", { color = actorColor }) end)
+  if not ok or not result then
+    safeBroadcastToColor("No Trip card visible in the shop consumable row. Put a Trip card (e.g. Nature Trip) in an open slot and try again.", actorColor, {1,0.6,0.2})
+    return false
+  end
+  broadcastToAll("🌿 " .. actorColor .. " — Choose one Trip card in the shop (click \"Take this Trip (free)\" on the card you want).", {0.6,1,0.7})
+  return true
+end
+
+-- Called by ShopEngine when player picks a Trip card for NGO Take Trip (free); marks perk as used for current level.
+function VOC_MarkNGOTakeTripUsed(params)
+  local color = normalizeColor(params and params.color)
+  if not color then return end
+  local level = state.levels[color] or 1
+  state.ngoTakeTripUsedPerLevel = state.ngoTakeTripUsedPerLevel or {}
+  if not state.ngoTakeTripUsedPerLevel[color] then state.ngoTakeTripUsedPerLevel[color] = {} end
+  state.ngoTakeTripUsedPerLevel[color][level] = true
+end
+
+-- NGO Worker L3: Use Investment (free, up to 1000 VIN) — activate perk; then when player clicks an Investment in the shop, first 1000 VIN is free. Once per level.
+function VOC_StartNGOUseInvestment(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+  local actorColor = params.effectsTarget or color
+  if actorColor == "White" then
+    safeBroadcastToColor("Invalid player for Use Investment.", color or "White", {1,0.6,0.2})
+    return false
+  end
+  if state.vocations[actorColor] ~= VOC_NGO_WORKER then
+    safeBroadcastToColor("Only NGO Worker can use Use Investment (free, up to 1000 VIN).", actorColor, {1,0.7,0.2})
+    return false
+  end
+  local level = state.levels[actorColor] or 1
+  if level < 3 then
+    safeBroadcastToColor("NGO Worker Level 3 required for Use Investment (free).", actorColor, {1,0.7,0.2})
+    return false
+  end
+  state.ngoUseInvestmentUsedPerLevel = state.ngoUseInvestmentUsedPerLevel or {}
+  if not state.ngoUseInvestmentUsedPerLevel[actorColor] then state.ngoUseInvestmentUsedPerLevel[actorColor] = {} end
+  if state.ngoUseInvestmentUsedPerLevel[actorColor][level] then
+    safeBroadcastToColor("Use Investment (free, up to 1000 VIN) can only be used once per level. Already used this level.", actorColor, {1,0.6,0.2})
+    return false
+  end
+  state.ngoInvestmentSubsidyActive = state.ngoInvestmentSubsidyActive or {}
+  state.ngoInvestmentSubsidyActive[actorColor] = 1000  -- Amount in VIN; level stored for consume
+  broadcastToAll("💰 " .. actorColor .. " activated NGO Use Investment (free, up to 1000 VIN). Click an Investment card in the shop to use it; first 1000 VIN free. (Once per level.)", {0.8,0.9,1})
+  return true
+end
+
+-- Called by ShopEngine when processing an Investment purchase: return subsidy amount (1000) if NGO perk is active for this color.
+function VOC_GetNGOInvestmentSubsidy(params)
+  local color = normalizeColor(params and params.color)
+  if not color then return 0 end
+  state.ngoInvestmentSubsidyActive = state.ngoInvestmentSubsidyActive or {}
+  local amount = state.ngoInvestmentSubsidyActive[color]
+  amount = tonumber(amount)
+  if amount and amount > 0 then return amount end
+  return 0
+end
+
+-- Called by ShopEngine after applying NGO investment subsidy for this color; marks perk as used for current level.
+function VOC_ConsumeNGOInvestmentPerk(params)
+  local color = normalizeColor(params and params.color)
+  if not color then return end
+  local level = state.levels[color] or 1
+  state.ngoInvestmentSubsidyActive = state.ngoInvestmentSubsidyActive or {}
+  state.ngoInvestmentSubsidyActive[color] = nil
+  state.ngoUseInvestmentUsedPerLevel = state.ngoUseInvestmentUsedPerLevel or {}
+  if not state.ngoUseInvestmentUsedPerLevel[color] then state.ngoUseInvestmentUsedPerLevel[color] = {} end
+  state.ngoUseInvestmentUsedPerLevel[color][level] = true
+end
+
 function VOC_StartNGOCrowdfunding(params)
   params = params or {}
   local color = normalizeColor(params.color) or getActorColor()
   if not color then return false, "Invalid color" end
+  -- When White triggers (testing), use effectsTarget as the actual actor for AP and messages
+  local actorColor = params.effectsTarget or color
 
   -- White bypasses vocation checks for testing
-  if color ~= "White" and state.vocations[color] ~= VOC_NGO_WORKER then
-    safeBroadcastToColor("Only NGO Worker can use this action.", color, {1,0.7,0.2})
+  if actorColor ~= "White" and state.vocations[actorColor] ~= VOC_NGO_WORKER then
+    safeBroadcastToColor("Only NGO Worker can use this action.", actorColor, {1,0.7,0.2})
     return false
   end
 
-  local level = state.levels[color] or 1
+  local level = state.levels[actorColor] or 1
   -- White bypasses level checks for testing
-  if color ~= "White" and level < 2 then
-    safeBroadcastToColor("Crowdfunding Campaign requires NGO Worker Level 2.", color, {1,0.7,0.2})
+  if actorColor ~= "White" and level < 2 then
+    safeBroadcastToColor("Crowdfunding Campaign requires NGO Worker Level 2.", actorColor, {1,0.7,0.2})
     return false
   end
 
-  if not canSpendAP(color, 2) then
-    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) to start Crowdfunding.", color, {1,0.6,0.2})
+  if not canSpendAP(actorColor, 2) then
+    safeBroadcastToColor("⛔ Not enough AP (need 2 AP) to start Crowdfunding.", actorColor, {1,0.6,0.2})
     return false
   end
-  if not spendAP(color, 2, "NGO_L2_CROWDFUND") then
-    safeBroadcastToColor("⛔ Failed to deduct 2 AP.", color, {1,0.6,0.2})
+  if not spendAP(actorColor, 2, "NGO_L2_CROWDFUND") then
+    safeBroadcastToColor("⛔ Failed to deduct 2 AP.", actorColor, {1,0.6,0.2})
     return false
   end
 
@@ -4035,30 +4349,109 @@ function VOC_StartNGOCrowdfunding(params)
     else
       safeBroadcastAll("🎲 Die result: "..die, {0.8,0.9,1})
     end
-    
+
     if die <= 2 then
       safeBroadcastAll("Crowdfunding Campaign: Nothing happens.", {0.9,0.9,0.9})
     elseif die <= 4 then
-      -- Each player pays 250 VIN
+      local totalRaised = 0
       for _, c in ipairs(COLORS) do
-        if c ~= color and isPlayableColor(c) then
-          moneySpend(c, 250)
+        if c ~= actorColor and isPlayableColor(c) then
+          local before = getMoney(c) or 0
+          if moneySpend(c, 250) then
+            local after = getMoney(c) or 0
+            totalRaised = totalRaised + (before - after)
+          end
         end
       end
-      safeBroadcastAll("Crowdfunding Campaign: Each player pays 250 VIN.", {0.7,1,0.7})
-    else
-    -- Each player pays 400 VIN; initiator must spend this on High-Tech item
-    for _, c in ipairs(COLORS) do
-      if c ~= color and isPlayableColor(c) then
-        moneySpend(c, 400)
+      if totalRaised > 0 then
+        moneyAdd(actorColor, totalRaised)
       end
-    end
-    moneyAdd(color, 400)
-    -- TODO: Track spending requirement (initiator must spend this on High-Tech item)
-    safeBroadcastAll("Crowdfunding Campaign: Each player pays 400 VIN. "..color.." must spend this on High-Tech item.", {0.7,1,0.7})
+      safeBroadcastAll("Crowdfunding Campaign: Each player pays up to 250 VIN to "..actorColor.." (only if they have it). Total raised: "..totalRaised.." VIN. No pool for Hi-Tech this turn.", {0.7,1,0.7})
+    else
+      for _, c in ipairs(COLORS) do
+        if c ~= actorColor and isPlayableColor(c) then
+          moneySpend(c, 400)
+        end
+      end
+      -- Store pool for this player; valid only this turn. When they buy a High-Tech item, pool is applied (excess lost; if cost > pool they pay difference).
+      state.crowdfundPool = state.crowdfundPool or {}
+      state.crowdfundPoolTurnColor = state.crowdfundPoolTurnColor or {}
+      local currentTurn = (Turns and Turns.turn_color and Turns.turn_color ~= "") and normalizeColor(Turns.turn_color) or actorColor
+      state.crowdfundPool[actorColor] = 400
+      state.crowdfundPoolTurnColor[actorColor] = currentTurn
+      broadcastToAll("💰 Crowdfunding: Money raised for " .. actorColor .. ": 400 VIN. Use it this turn on a High-Tech purchase (excess lost; if item costs more, you pay the difference).", {0.7,1,0.7})
     end
   end)
-  
+
+  return true
+end
+
+-- Called by ShopEngine when a player buys a High-Tech item. If this player has an active crowdfund pool (same turn), apply it: pool covers up to cost; excess lost; if cost > pool, return amount player must pay. Only valid the turn after using Crowdfunding.
+function VOC_ApplyCrowdfundPoolForPurchase(params)
+  params = params or {}
+  local color = normalizeColor(params.color)
+  local cost = tonumber(params.cost) or 0
+  if not color or cost < 0 then
+    return { amountFromPool = 0, playerPays = cost }
+  end
+  state.crowdfundPool = state.crowdfundPool or {}
+  state.crowdfundPoolTurnColor = state.crowdfundPoolTurnColor or {}
+  local currentTurn = (Turns and Turns.turn_color and Turns.turn_color ~= "") and normalizeColor(Turns.turn_color) or nil
+  if not currentTurn or state.crowdfundPoolTurnColor[color] ~= currentTurn then
+    return { amountFromPool = 0, playerPays = cost }
+  end
+  local pool = tonumber(state.crowdfundPool[color]) or 0
+  if pool <= 0 then
+    return { amountFromPool = 0, playerPays = cost }
+  end
+  local amountFromPool = math.min(pool, cost)
+  local playerPays = math.max(0, cost - pool)
+  state.crowdfundPool[color] = nil
+  state.crowdfundPoolTurnColor[color] = nil
+  if amountFromPool > 0 then
+    local msg = "💰 Crowdfunding pool applied for " .. color .. ": " .. amountFromPool .. " VIN from pool."
+    if playerPays > 0 then
+      msg = msg .. " " .. playerPays .. " VIN from own money."
+    else
+      msg = msg .. " (Full cost covered by pool.)"
+    end
+    broadcastToAll(msg, {0.7,1,0.7})
+  end
+  return { amountFromPool = amountFromPool, playerPays = playerPays }
+end
+
+function VOC_StartNGOVoluntaryWork(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+  local actorColor = params.effectsTarget or color
+
+  if actorColor ~= "White" and state.vocations[actorColor] ~= VOC_NGO_WORKER then
+    safeBroadcastToColor("Only NGO Worker can use Voluntary Work.", actorColor, {1,0.7,0.2})
+    return false
+  end
+
+  local level = state.levels[actorColor] or 1
+  local apCost, satGain
+  if level == 1 then
+    apCost, satGain = 2, 1
+  elseif level == 2 then
+    apCost, satGain = 3, 2
+  else
+    apCost, satGain = 1, 1  -- level 3
+  end
+
+  if not canSpendAP(actorColor, apCost) then
+    safeBroadcastToColor("⛔ Not enough AP (need "..tostring(apCost).." AP) for Voluntary Work.", actorColor, {1,0.6,0.2})
+    return false
+  end
+  if not spendAP(actorColor, apCost, "NGO_VOLUNTARY_WORK") then
+    safeBroadcastToColor("⛔ Failed to deduct AP.", actorColor, {1,0.6,0.2})
+    return false
+  end
+
+  satAdd(actorColor, satGain)
+  safeBroadcastAll("Voluntary Work: "..actorColor.." spent "..tostring(apCost).." AP and gained +"..tostring(satGain).." Satisfaction.", {0.7,1,0.7})
   return true
 end
 
@@ -4066,36 +4459,39 @@ function VOC_StartNGOAdvocacy(params)
   params = params or {}
   local color = normalizeColor(params.color) or getActorColor()
   if not color then return false, "Invalid color" end
+  -- When White triggers (testing), use effectsTarget as the actual actor for AP and initiator (so initiator does not appear in join UI)
+  local actorColor = params.effectsTarget or color
 
   -- White bypasses vocation checks for testing
-  if color ~= "White" and state.vocations[color] ~= VOC_NGO_WORKER then
-    safeBroadcastToColor("Only NGO Worker can use this action.", color, {1,0.7,0.2})
+  if actorColor ~= "White" and state.vocations[actorColor] ~= VOC_NGO_WORKER then
+    safeBroadcastToColor("Only NGO Worker can use this action.", actorColor, {1,0.7,0.2})
     return false
   end
 
-  local level = state.levels[color] or 1
+  local level = state.levels[actorColor] or 1
   -- White bypasses level checks for testing
-  if color ~= "White" and level < 3 then
-    safeBroadcastToColor("Advocacy Pressure Campaign requires NGO Worker Level 3.", color, {1,0.7,0.2})
+  if actorColor ~= "White" and level < 3 then
+    safeBroadcastToColor("Advocacy Pressure Campaign requires NGO Worker Level 3.", actorColor, {1,0.7,0.2})
     return false
   end
 
-  if not canSpendAP(color, 3) then
-    safeBroadcastToColor("⛔ Not enough AP (need 3 AP) to start Advocacy Campaign.", color, {1,0.6,0.2})
+  if not canSpendAP(actorColor, 3) then
+    safeBroadcastToColor("⛔ Not enough AP (need 3 AP) to start Advocacy Campaign.", actorColor, {1,0.6,0.2})
     return false
   end
-  if not spendAP(color, 3, "NGO_L3_ADVOCACY") then
-    safeBroadcastToColor("⛔ Failed to deduct 3 AP.", color, {1,0.6,0.2})
+  if not spendAP(actorColor, 3, "NGO_L3_ADVOCACY") then
+    safeBroadcastToColor("⛔ Failed to deduct 3 AP.", actorColor, {1,0.6,0.2})
     return false
   end
 
+  -- initiator = actorColor so the player who used the action is excluded from the join UI (targets exclude initiator)
   startInteraction({
     id = "NGO_L3_ADVOCACY",
-    initiator = color,
+    initiator = actorColor,
     title = "ADVOCACY PRESSURE CAMPAIGN",
     subtitle = "NGO Worker Level 3 – Cost for you: Spend 3 AP",
     joinCostText = "Other players choose YES or NO:",
-    effectText = "YES: Pay 300 VIN and gain +2 Satisfaction. NO: Lose -1 Satisfaction. You gain +1 Satisfaction per participant & +1 Skill once per campaign.",
+    effectText = "YES: Pay 300 VIN and gain +2 Satisfaction. NO: Lose -1 Satisfaction. You gain +1 Satisfaction per participant. You gain +1 Skill (once per campaign) if at least one chooses NO.",
     joinCostAP = 0,  -- Money cost only for YES
   })
   return true
@@ -4949,37 +5345,41 @@ local uiState = {
 -- =========================================================
 
 -- Get available actions for a vocation at a specific level
+-- Optional ownerColor: when set, "Use Good Karma" is hidden if already used this game for that owner.
 -- Returns array of {buttonIndex, label, actionId} where buttonIndex is 1-5
-local function getVocationActions(vocation, level)
+local function getVocationActions(vocation, level, ownerColor)
   local actions = {}
-  log("getVocationActions: vocation="..tostring(vocation)..", level="..tostring(level))
+  log("getVocationActions: vocation="..tostring(vocation)..", level="..tostring(level)..", ownerColor="..tostring(ownerColor))
   
   if vocation == VOC_SOCIAL_WORKER then
-    -- Show only the action that matches the player's current level (Level 1 → Practical workshop only, etc.)
+    -- Level 1: two buttons (community event + Use Good Karma, once per game)
     if level == 1 then
-      log("getVocationActions: Adding Social Worker Level 1 action (Practical workshop)")
-      table.insert(actions, {buttonIndex = 1, label = "Practical workshop", actionId = "SW_L1_PRACTICAL_WORKSHOP"})
+      table.insert(actions, {buttonIndex = 1, label = "Community Event: Practical workshop", actionId = "SW_L1_PRACTICAL_WORKSHOP"})
+      local used = (state.swGoodKarmaUsed or {})[ownerColor]
+      if not used then
+        table.insert(actions, {buttonIndex = 2, label = "Use Good Karma", actionId = "SW_L1_USE_GOOD_KARMA"})
+      end
     elseif level == 2 then
-      log("getVocationActions: Adding Social Worker Level 2 action (Community wellbeing)")
-      table.insert(actions, {buttonIndex = 1, label = "Community wellbeing", actionId = "SW_L2_COMMUNITY_WELLBEING"})
+      table.insert(actions, {buttonIndex = 1, label = "Community Wellbeing Session", actionId = "SW_L2_COMMUNITY_WELLBEING"})
+      if not (state.swConsumablePerkUsed or {})[ownerColor] then
+        table.insert(actions, {buttonIndex = 2, label = "Once per game: one consumable from shop free", actionId = "SW_L2_CONSUMABLE_FREE"})
+      end
     elseif level == 3 then
-      log("getVocationActions: Adding Social Worker Level 3 action (Expose social case)")
       table.insert(actions, {buttonIndex = 1, label = "Expose social case", actionId = "SW_L3_EXPOSE_CASE"})
+      if not (state.swHitechPerkUsed or {})[ownerColor] then
+        table.insert(actions, {buttonIndex = 2, label = "Once per game: one hi-tech from shop free", actionId = "SW_L3_HITECH_FREE"})
+      end
     end
-    -- Special actions removed for now
     
   elseif vocation == VOC_CELEBRITY then
-    -- Show buttons based on level
-    if level >= 1 then
+    -- One button per level (level action only; show only current level's action)
+    if level == 1 then
       table.insert(actions, {buttonIndex = 1, label = "Live Street Performance", actionId = "CELEB_L1_STREET_PERF"})
+    elseif level == 2 then
+      table.insert(actions, {buttonIndex = 1, label = "Meet & Greet", actionId = "CELEB_L2_MEET_GREET"})
+    elseif level == 3 then
+      table.insert(actions, {buttonIndex = 1, label = "Extended Charity Stream", actionId = "CELEB_L3_CHARITY_STREAM"})
     end
-    if level >= 2 then
-      table.insert(actions, {buttonIndex = 2, label = "Meet & Greet", actionId = "CELEB_L2_MEET_GREET"})
-    end
-    if level >= 3 then
-      table.insert(actions, {buttonIndex = 3, label = "Charity Stream", actionId = "CELEB_L3_CHARITY_STREAM"})
-    end
-    -- Special actions removed for now
     
   elseif vocation == VOC_PUBLIC_SERVANT then
     -- Level action + level perk(s). For testing: at level 1 all three perks are available.
@@ -4998,39 +5398,54 @@ local function getVocationActions(vocation, level)
     end
 
   elseif vocation == VOC_NGO_WORKER then
-    -- Show buttons based on level
-    if level >= 1 then
-      table.insert(actions, {buttonIndex = 1, label = "Start Charity", actionId = "NGO_L1_CHARITY"})
+    -- Social campaign (1) + level perk (2) + Voluntary work (3) per level
+    if level == 1 then
+      table.insert(actions, {buttonIndex = 1, label = "Charity campaign", actionId = "NGO_L1_CHARITY"})
+      local ngoUsed = (state.ngoGoodKarmaUsedPerLevel or {})[ownerColor]
+      if not (ngoUsed and ngoUsed[1]) then
+        table.insert(actions, {buttonIndex = 2, label = "Take Good Karma (free)", actionId = "NGO_L1_TAKE_GOOD_KARMA"})
+      end
+      table.insert(actions, {buttonIndex = 3, label = "Voluntary work", actionId = "NGO_VOLUNTARY_WORK"})
+    elseif level == 2 then
+      table.insert(actions, {buttonIndex = 1, label = "Crowdfunding campaign", actionId = "NGO_L2_CROWDFUND"})
+      local ngoTripUsed = (state.ngoTakeTripUsedPerLevel or {})[ownerColor]
+      if not (ngoTripUsed and ngoTripUsed[2]) then
+        table.insert(actions, {buttonIndex = 2, label = "Take Trip (free)", actionId = "NGO_L2_TAKE_TRIP"})
+      end
+      table.insert(actions, {buttonIndex = 3, label = "Voluntary work", actionId = "NGO_VOLUNTARY_WORK"})
+    elseif level == 3 then
+      table.insert(actions, {buttonIndex = 1, label = "Advocacy / pressure campaign", actionId = "NGO_L3_ADVOCACY"})
+      local ngoInvUsed = (state.ngoUseInvestmentUsedPerLevel or {})[ownerColor]
+      if not (ngoInvUsed and ngoInvUsed[3]) then
+        table.insert(actions, {buttonIndex = 2, label = "Use Investment (free, up to 1000 VIN)", actionId = "NGO_L3_USE_INVESTMENT"})
+      end
+      table.insert(actions, {buttonIndex = 3, label = "Voluntary work", actionId = "NGO_VOLUNTARY_WORK"})
     end
-    if level >= 2 then
-      table.insert(actions, {buttonIndex = 2, label = "Crowdfunding", actionId = "NGO_L2_CROWDFUND"})
-    end
-    if level >= 3 then
-      table.insert(actions, {buttonIndex = 3, label = "Advocacy Campaign", actionId = "NGO_L3_ADVOCACY"})
-    end
-    -- Special actions removed for now
     
   elseif vocation == VOC_ENTREPRENEUR then
-    -- Show buttons based on level
-    if level >= 1 then
-      table.insert(actions, {buttonIndex = 1, label = "Flash Sale", actionId = "ENT_L1_FLASH_SALE"})
+    -- Level 1: two buttons; Level 2: two buttons; Level 3: one button (per level, not cumulative)
+    if level == 1 then
+      table.insert(actions, {buttonIndex = 1, label = "Flash Sale Promotion", actionId = "ENT_L1_FLASH_SALE"})
+      table.insert(actions, {buttonIndex = 2, label = "Talk to shop owner", actionId = "ENT_L1_TALK_TO_SHOP_OWNER"})
+    elseif level == 2 then
+      table.insert(actions, {buttonIndex = 1, label = "Commercial training course", actionId = "ENT_L2_TRAINING"})
+      table.insert(actions, {buttonIndex = 2, label = "Use your network", actionId = "ENT_L2_USE_NETWORK_REROLL"})
+    elseif level == 3 then
+      table.insert(actions, {buttonIndex = 1, label = "Reposition event cards", actionId = "ENT_L3_REPOSITION_EVENTS"})
     end
-    if level >= 2 then
-      table.insert(actions, {buttonIndex = 2, label = "Training Course", actionId = "ENT_L2_TRAINING"})
-    end
-    -- Level 3 has no action (only passive perks)
-    -- Special actions removed for now
     
   elseif vocation == VOC_GANGSTER then
-    -- Show only the Crime button that matches the player's current level (Gangster 1 → Lv1 only, etc.)
+    -- Two buttons per level: crime action (vs shop/false money/lockdown) + crime against player
     if level == 1 then
-      table.insert(actions, {buttonIndex = 1, label = "Crime vs Player Lv1", actionId = "GANG_L1_CRIME"})
+      table.insert(actions, {buttonIndex = 1, label = "Crime action: Steal hi-tech from shop", actionId = "GANG_L1_STEAL_HITECH_SHOP"})
+      table.insert(actions, {buttonIndex = 2, label = "Crime against player (Lv1)", actionId = "GANG_L1_CRIME"})
     elseif level == 2 then
-      table.insert(actions, {buttonIndex = 1, label = "Crime vs Player Lv2", actionId = "GANG_L2_CRIME"})
+      table.insert(actions, {buttonIndex = 1, label = "Crime action: False money production", actionId = "GANG_L2_FALSE_MONEY"})
+      table.insert(actions, {buttonIndex = 2, label = "Crime against player (Lv2)", actionId = "GANG_L2_CRIME"})
     elseif level == 3 then
-      table.insert(actions, {buttonIndex = 1, label = "Crime vs Player Lv3", actionId = "GANG_L3_CRIME"})
+      table.insert(actions, {buttonIndex = 1, label = "Crime action: Enforce citywide lockdown", actionId = "GANG_L3_LOCKDOWN"})
+      table.insert(actions, {buttonIndex = 2, label = "Crime against player (Lv3)", actionId = "GANG_L3_CRIME"})
     end
-    -- Special actions removed for now
   end
   
   return actions
@@ -5069,10 +5484,16 @@ local hideSummaryUI
 local function executeVocationActionById(actionId, params)
   if actionId == "SW_L1_PRACTICAL_WORKSHOP" then
     return VOC_StartSocialWorkerPracticalWorkshop(params)
+  elseif actionId == "SW_L1_USE_GOOD_KARMA" then
+    return VOC_StartSocialWorkerUseGoodKarma(params)
   elseif actionId == "SW_L2_COMMUNITY_WELLBEING" then
     return VOC_StartSocialWorkerCommunitySession(params)
+  elseif actionId == "SW_L2_CONSUMABLE_FREE" then
+    return VOC_StartSocialWorkerConsumableFree(params)
   elseif actionId == "SW_L3_EXPOSE_CASE" then
     return VOC_StartSocialWorkerExposeCase(params)
+  elseif actionId == "SW_L3_HITECH_FREE" then
+    return VOC_StartSocialWorkerHitechFree(params)
   elseif actionId == "SW_SPECIAL_HOMELESS" then
     return VOC_StartSocialWorkerHomelessShelter(params)
   elseif actionId == "SW_SPECIAL_REMOVAL" then
@@ -5105,10 +5526,18 @@ local function executeVocationActionById(actionId, params)
     return VOC_StartPublicServantBottleneck(params)
   elseif actionId == "NGO_L1_CHARITY" then
     return VOC_StartNGOCharity(params)
+  elseif actionId == "NGO_L1_TAKE_GOOD_KARMA" then
+    return VOC_StartNGOTakeGoodKarma(params)
   elseif actionId == "NGO_L2_CROWDFUND" then
     return VOC_StartNGOCrowdfunding(params)
+  elseif actionId == "NGO_L2_TAKE_TRIP" then
+    return VOC_StartNGOTakeTrip(params)
+  elseif actionId == "NGO_L3_USE_INVESTMENT" then
+    return VOC_StartNGOUseInvestment(params)
   elseif actionId == "NGO_L3_ADVOCACY" then
     return VOC_StartNGOAdvocacy(params)
+  elseif actionId == "NGO_VOLUNTARY_WORK" then
+    return VOC_StartNGOVoluntaryWork(params)
   elseif actionId == "NGO_SPECIAL_CRISIS" then
     return VOC_StartNGOCrisis(params)
   elseif actionId == "NGO_SPECIAL_SCANDAL" then
@@ -5295,7 +5724,12 @@ function UI_VocationAction(params)
     end
   end)
   
-  return executeVocationActionById(actionId, params)
+  local result = executeVocationActionById(actionId, params)
+  -- Persist state after Good Karma actions (avoids "attempt to call nil value" when saveState/self is nil in action's chunk)
+  if result and self and self.call and (actionId == "SW_L1_USE_GOOD_KARMA" or actionId == "NGO_L1_TAKE_GOOD_KARMA") then
+    pcall(function() self.call("VOC_SaveState", {}) end)
+  end
+  return result
 end
 
 -- Called by Event Engine when a player chooses a vocation side on a Vocation Event card.
@@ -5314,7 +5748,11 @@ function RunVocationEventCardAction(params)
     color = color,
     effectsTarget = color,
   }
-  return executeVocationActionById(params.actionId, actionParams)
+  local result = executeVocationActionById(params.actionId, actionParams)
+  if result and self and self.call and (params.actionId == "SW_L1_USE_GOOD_KARMA" or params.actionId == "NGO_L1_TAKE_GOOD_KARMA") then
+    pcall(function() self.call("VOC_SaveState", {}) end)
+  end
+  return result
 end
 
 -- Safe UI setters: missing element IDs should NOT break the whole flow
@@ -5745,7 +6183,7 @@ local function showSummaryUI(color, vocation, previewOnly, forColor)
     end
     
     if shouldShowActions then
-      local actions = getVocationActions(vocation, levelToUse)
+      local actions = getVocationActions(vocation, levelToUse, ownerColor)
       -- Public Servant: hide perk buttons once they already have that card on their board
       if vocation == VOC_PUBLIC_SERVANT and ownerColor then
         local shopEngine = nil
@@ -7441,47 +7879,94 @@ function VOC_StartSelection_UI(params)
 end
 
 -- =========================================================
+-- RESOLVE INTERACTION (callable from die callback to avoid chunking)
+-- =========================================================
+function ResolveInteractionEffectsWithDie(params)
+  if not params or not params.id then return end
+  local id, initiator, die = params.id, params.initiator, params.die
+  if type(resolveInteractionEffectsWithDie) == "function" then
+    resolveInteractionEffectsWithDie(id, initiator, die)
+  else
+    warn("ResolveInteractionEffectsWithDie: resolver not available")
+  end
+end
+
+-- =========================================================
 -- INTERACTION UI CALLBACKS (JOIN / IGNORE)
 -- =========================================================
 
 function UI_Interaction_YellowJoin(params)
   local actor = params and params.playerColor
-  handleInteractionResponse("Yellow", "JOIN", actor)
+  if self and self.call then
+    pcall(function() self.call("HandleInteractionResponse", { buttonColor = "Yellow", choice = "JOIN", actorColor = actor }) end)
+  elseif type(handleInteractionResponse) == "function" then
+    handleInteractionResponse("Yellow", "JOIN", actor)
+  else
+    warn("UI_Interaction_YellowJoin: HandleInteractionResponse not available")
+  end
 end
 
 function UI_Interaction_YellowIgnore(params)
   local actor = params and params.playerColor
-  handleInteractionResponse("Yellow", "IGNORE", actor)
+  if self and self.call then
+    pcall(function() self.call("HandleInteractionResponse", { buttonColor = "Yellow", choice = "IGNORE", actorColor = actor }) end)
+  elseif type(handleInteractionResponse) == "function" then
+    handleInteractionResponse("Yellow", "IGNORE", actor)
+  end
 end
 
 function UI_Interaction_BlueJoin(params)
   local actor = params and params.playerColor
-  handleInteractionResponse("Blue", "JOIN", actor)
+  if self and self.call then
+    pcall(function() self.call("HandleInteractionResponse", { buttonColor = "Blue", choice = "JOIN", actorColor = actor }) end)
+  elseif type(handleInteractionResponse) == "function" then
+    handleInteractionResponse("Blue", "JOIN", actor)
+  end
 end
 
 function UI_Interaction_BlueIgnore(params)
   local actor = params and params.playerColor
-  handleInteractionResponse("Blue", "IGNORE", actor)
+  if self and self.call then
+    pcall(function() self.call("HandleInteractionResponse", { buttonColor = "Blue", choice = "IGNORE", actorColor = actor }) end)
+  elseif type(handleInteractionResponse) == "function" then
+    handleInteractionResponse("Blue", "IGNORE", actor)
+  end
 end
 
 function UI_Interaction_RedJoin(params)
   local actor = params and params.playerColor
-  handleInteractionResponse("Red", "JOIN", actor)
+  if self and self.call then
+    pcall(function() self.call("HandleInteractionResponse", { buttonColor = "Red", choice = "JOIN", actorColor = actor }) end)
+  elseif type(handleInteractionResponse) == "function" then
+    handleInteractionResponse("Red", "JOIN", actor)
+  end
 end
 
 function UI_Interaction_RedIgnore(params)
   local actor = params and params.playerColor
-  handleInteractionResponse("Red", "IGNORE", actor)
+  if self and self.call then
+    pcall(function() self.call("HandleInteractionResponse", { buttonColor = "Red", choice = "IGNORE", actorColor = actor }) end)
+  elseif type(handleInteractionResponse) == "function" then
+    handleInteractionResponse("Red", "IGNORE", actor)
+  end
 end
 
 function UI_Interaction_GreenJoin(params)
   local actor = params and params.playerColor
-  handleInteractionResponse("Green", "JOIN", actor)
+  if self and self.call then
+    pcall(function() self.call("HandleInteractionResponse", { buttonColor = "Green", choice = "JOIN", actorColor = actor }) end)
+  elseif type(handleInteractionResponse) == "function" then
+    handleInteractionResponse("Green", "JOIN", actor)
+  end
 end
 
 function UI_Interaction_GreenIgnore(params)
   local actor = params and params.playerColor
-  handleInteractionResponse("Green", "IGNORE", actor)
+  if self and self.call then
+    pcall(function() self.call("HandleInteractionResponse", { buttonColor = "Green", choice = "IGNORE", actorColor = actor }) end)
+  elseif type(handleInteractionResponse) == "function" then
+    handleInteractionResponse("Green", "IGNORE", actor)
+  end
 end
 
 -- =========================================================
