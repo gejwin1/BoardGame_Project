@@ -880,6 +880,23 @@ local function apGetRestCount(color)
   return 0
 end
 
+local function apGetWorkCount(color)
+  local ap = findOneByTags(TAG_AP_CTRL, colorTag(color))
+  if not ap then return 0 end
+  local candidates = {
+    function() return ap.call("getCount", {area="W"}) end,
+    function() return ap.call("getCount", {field="W"}) end,
+    function() return ap.call("countArea", {area="W"}) end,
+  }
+  for _, fn in ipairs(candidates) do
+    local ok, res = pcall(fn)
+    if ok and type(res) == "number" then
+      return math.max(0, math.floor(res))
+    end
+  end
+  return 0
+end
+
 local function getRestEquivalentBonus(color)
   local ok, bonus = shopCall("API_getRestEquivalent", {color=color})
   if ok and type(bonus) == "number" then
@@ -1010,6 +1027,19 @@ local function endTurnProcessing(color)
   
   -- Automatically pay costs at end of turn
   onTurnEnd_PayCosts(color)
+
+  -- Overworking satisfaction loss: 0-2 AP work → 0 loss; 3-4 → -1 SAT; 5-6 → -2; 7-8 → -3; 9 → -4. NGO Worker exempt.
+  local workCount = apGetWorkCount(color)
+  local voc = findOneByTags(TAG_VOCATIONS_CTRL)
+  if voc and voc.call and workCount > 0 then
+    local ok, loss = pcall(function() return voc.call("API_GetOverworkSatLoss", { color = color, workAPThisTurn = workCount }) end)
+    if ok and type(loss) == "number" and loss > 0 then
+      local satOk = satAddForColor(color, -loss, "overwork")
+      if satOk then
+        broadcastToAll("⚠️ "..tostring(color)..": Overworking ("..tostring(workCount).." AP work) → -"..tostring(loss).." SAT", {1,0.6,0.2})
+      end
+    end
+  end
 end
 
 local function finalizeAPAfterTurn(color)
@@ -1079,6 +1109,11 @@ local function advanceTurn()
   W.turnIndex = W.turnIndex + 1
 
   if W.turnIndex > #W.finalOrder then
+    -- Round just finished: work obligation + experience tokens (Public Servant 2–4 AP/year)
+    local voc = findOneByTags({TAG_VOCATIONS_CTRL})
+    if voc and voc.call then
+      pcall(function() voc.call("VOC_OnRoundEnd", { round = W.currentRound }) end)
+    end
     W.turnIndex = 1
     if W.currentRound < MAX_ROUND then
       W.currentRound = W.currentRound + 1

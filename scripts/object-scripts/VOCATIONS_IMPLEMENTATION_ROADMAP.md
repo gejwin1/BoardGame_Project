@@ -1,35 +1,62 @@
 # Vocations System - Implementation Roadmap
 
-**Status:** READY TO START IMPLEMENTATION  
-**Last Updated:** 2026-01-XX  
-**Purpose:** Step-by-step implementation plan for Vocations system
+**Status:** IN PROGRESS – Core and Public Servant flows implemented  
+**Last Updated:** 2026-02-14  
+**Purpose:** Step-by-step implementation plan for Vocations system; progress and remaining work.
 
 ---
 
-## 📊 Current Status
+## 📊 Current Status (Refreshed 2026-02-14)
 
-### ✅ Completed (Documentation & Design)
-- ✅ **VOCATIONS_SYSTEM_ANALYSIS.md** - Complete vocation mechanics documented
-- ✅ **PLAYER_INTERACTION_SYSTEM_PROPOSAL.md** - Interaction system designed (for future)
-- ✅ **VOCATION_CARDS_UX_ANALYSIS.md** - UX design confirmed (Panel-First approach)
-- ✅ **VocationsController object** - Created with tag `WLB_VOCATIONS_CTRL`
-- ✅ **Vocation Tiles** - Being finished (one per player with all info)
-- ✅ **Vocation Cards** - Planned (visual + clickable trigger)
+### ✅ Completed (Code & Design)
+- ✅ **VocationsController.lua** – Exists and runs (tag `WLB_VOCATIONS_CTRL`, GUID 37f7a7)
+- ✅ **Vocation selection** – At Adult period start (Youth→Adult round 6; Science Points order)
+- ✅ **Vocation tracking** – Per-player state (vocations, levels, workAP, workAPThisLevel, workAPThisRound, taxWaiverUsedAtLevel, experienceYearsEarned, noSpecialAwardThisYear)
+- ✅ **Work income** – AP spent on WORK → earnings in CostsCalculator; salary from `VOC_GetSalary`; PlayerBoardController_Shared calls salary + addCost(earnings)
+- ✅ **Promotion system** – `VOC_CanPromote` / `VOC_Promote`; standard (K/S/experience years), work_based, award; auto-check at turn start
+- ✅ **Vocation tiles** – Placement, swap on promotion, click → summary UI
+- ✅ **Summary UI** – vocationSummaryPanel, action buttons per level, Public Servant tax waiver status line
+- ✅ **Public Servant (core)** – Level 1/2/3 tax campaigns (Income, Hi-Tech, Property Tax); level perks: Health Monitor, Alarm, Car proxy tiles (GUIDs 657dd1, f9d04d, 1f3658); parking with staggered delays
+- ✅ **Public Servant: 50% consumable discount** – ShopEngine applies half price on consumables only (stacks with vouchers); not Hi-Tech/Investments
+- ✅ **Public Servant: Tax waiver once per level** – Luxury tax & Property tax (event cards) offer PAY / WAIVE TAX; `API_GetPublicServantTaxWaiverStatus`; summary UI shows "Tax can be waived" / "Tax obligation"
+- ✅ **Public Servant: Work obligation 2–4 AP/year** – `VOC_OnRoundEnd`: L1 no experience/can't promote if not 2–4; L2 −1 SAT per AP off, no experience; L3 −2 SAT per AP off, no special award; experience years earned only when 2–4 met
+- ✅ **Experience tokens** – End of round: TokenEngine `TE_AddStatus_ARGS` with `WLB_STATUS_EXPERIENCE`; Public Servant only if 2–4 work AP; others if worked; `workAPThisRound` reset
+- ✅ **Hi-Tech Failure (Event)** – One random hi-tech breaks; 25% repair cost; Event card moves to used immediately; ShopEngine: Repair button on broken card, block use when broken; Event Engine APIs: `API_isHiTechBroken`, `API_getBrokenRepairCost`, `API_repairBrokenHiTech`, `API_clearBrokenHiTechForCard`
+- ✅ **Overworking satisfaction loss** – End of turn: 0–2 AP work → 0; 3–4 → −1 SAT; 5–6 → −2; 7–8 → −3; 9 → −4. NGO Worker exempt. TurnController calls `API_GetOverworkSatLoss` and deducts SAT.
+- ✅ **Script fix** – `VOC_OnRoundEnd` goto scope error removed (replaced `goto next_color` with `if vocation then ... end`)
 
-### ❌ Not Yet Implemented (Code)
-- ❌ **VocationsController.lua** - Script doesn't exist yet (object exists, needs script)
-- ❌ **Vocation selection** - At Adult period start
-- ❌ **Vocation tracking** - Per-player state
-- ❌ **Work income system** - AP spent on WORK → money based on vocation salary
-- ❌ **Promotion system** - Level advancement mechanics
-- ❌ **Vocation actions** - Level-specific and special event actions
-- ❌ **Integration** - With Event Engine, Shop Engine, AP Controller
+### 🔶 Partially Implemented
+- 🔶 **Vocation actions** – Many level actions and perks implemented (see VOCATION_SUMMARIES_AND_BUTTONS.md); some still "To implement" or "Partly implemented" (e.g. Celebrity hi-tech cashback, Social Worker Good Karma grant, rent discount, Gangster victim impact)
+- 🔶 **Award-based promotion** – Level 3 Public Servant (and others with award type) have award condition text; full award tracking not yet implemented
+- 🔶 **Special award blocking** – Public Servant L3: `noSpecialAwardThisYear[color]` set when obligation failed; award system itself TBD
+
+### ❌ Not Yet Implemented / To Do
+- ❌ **Celebrity hi-tech cashback** – Pending refunds next round (30%/50%/70% by level at purchase)
+- ❌ **Celebrity event obligation** – At least 1 (L2) or 2 (L3) event cards per turn; −3 SAT per missing
+- ❌ **Social Worker: Good Karma grant button** – One Good Karma token on click
+- ❌ **Social Worker: 50% rent** – Apply wherever rent is charged
+- ❌ **Social Worker / Entrepreneur** – Once-per-game free consumable / hi-tech (tokens or flag)
+- ❌ **Entrepreneur: Talk to shop owner** – One turn: others pay double in shop
+- ❌ **Gangster** – Hi-tech choice UI and victim impact refinement
+- ❌ **NGO Worker** – Crowdfunding: force buy one hi-tech from open shop after roll; other perks as in VOCATION_SUMMARIES_AND_BUTTONS.md
+- ❌ **Full award system** – For award-based Level 3 promotions and "no special award this year" consumption
+
+---
+
+## 📋 Work completed recently (summary)
+
+- **Public Servant proxy tiles** – Switched to Tiles (GUIDs 657dd1, f9d04d, 1f3658) to avoid merging; parking at (0, −0.5, 0) with staggered delays; `isCardOrTile` used in ShopEngine for placement/buttons.
+- **Public Servant consumable discount** – 50% off consumables only in ShopEngine (stacks with voucher tokens); VocationsController `VOC_GetVocation` used to detect Public Servant.
+- **Tax waiver (Mastery of Administrative Law)** – Once per level; Luxury/Property tax event cards offer PAY vs WAIVE; `API_GetPublicServantTaxWaiverStatus` and summary UI line "Tax can be waived" / "Tax obligation".
+- **Work obligation + experience tokens** – `VOC_OnRoundEnd` (called by TurnController when round advances): Public Servant 2–4 AP/year; L1/L2/L3 penalties; experience token via TokenEngine; `experienceYearsEarned` for promotion; `workAPThisRound` reset; duplicate `goto next_color` fixed (goto scope error).
+- **Hi-Tech Failure** – One random hi-tech breaks; repair cost 25%; Event card finalized immediately; Repair button on broken card; block use when broken; clear broken state when placing proxy.
+- **Overworking satisfaction** – End of turn: work AP 0–2 → 0, 3–4 → −1, 5–6 → −2, 7–8 → −3, 9 → −4 SAT; NGO Worker exempt; TurnController uses `apGetWorkCount` and `API_GetOverworkSatLoss`.
 
 ---
 
 ## 🎯 Implementation Phases (Prioritized)
 
-### **PHASE 1: Foundation - VocationsController Core** (2-3 hours)
+### **PHASE 1: Foundation - VocationsController Core** ✅ DONE
 **Goal:** Create the core tracking system
 
 **Tasks:**
@@ -52,11 +79,11 @@
    - Define salary lookup table per vocation and level
    - Define promotion requirements per vocation and level
 
-**Deliverable:** VocationsController can track and query vocation state
+**Deliverable:** VocationsController can track and query vocation state — **done.**
 
 ---
 
-### **PHASE 2: Vocation Selection at Adult Start** (2-3 hours)
+### **PHASE 2: Vocation Selection at Adult Start** ✅ DONE
 **Goal:** Implement selection mechanics when Adult period begins
 
 **Tasks:**
@@ -76,11 +103,11 @@
    - Allow player to distribute points
    - Calculate Science Points after distribution
 
-**Deliverable:** Players can select vocations at Adult start, system enforces exclusivity
+**Deliverable:** Players can select vocations at Adult start, system enforces exclusivity — **done.**
 
 ---
 
-### **PHASE 3: Vocation Tiles & Cards Integration** (2-3 hours)
+### **PHASE 3: Vocation Tiles & Cards Integration** ✅ DONE
 **Goal:** Connect tiles/cards to VocationsController with click-to-open/close interaction
 
 **Tasks:**
@@ -124,11 +151,11 @@
 - Click tile → Panel opens with full info
 - Click close/outside → Panel closes
 - Tile remains clickable for repeated use
-- **Tiles don't merge into decks** when stored together
+- **Tiles don't merge into decks** when stored together — **done.**
 
 ---
 
-### **PHASE 4: Basic Work Income System** (2-3 hours)
+### **PHASE 4: Basic Work Income System** ✅ DONE
 **Goal:** AP spent on WORK → money based on vocation salary
 
 **Tasks:**
@@ -147,11 +174,11 @@
    - Handle players without vocation (shouldn't happen in Adult)
    - Handle Level 0 (shouldn't exist, but safety check)
 
-**Deliverable:** Players earn money when spending AP on work, based on vocation salary
+**Deliverable:** Players earn money when spending AP on work, based on vocation salary — **done (via CostsCalculator + salary lookup).**
 
 ---
 
-### **PHASE 5: Promotion System** (3-4 hours)
+### **PHASE 5: Promotion System** ✅ DONE
 **Goal:** Players can advance from Level 1 → 2 → 3
 
 **Tasks:**
@@ -172,11 +199,11 @@
    - Track Work AP for work-based promotions (Celebrity)
    - Track Award conditions for award-based promotions
 
-**Deliverable:** Players can promote when requirements are met
+**Deliverable:** Players can promote when requirements are met — **done (including Public Servant experience-years from work obligation).**
 
 ---
 
-### **PHASE 6: Vocation Actions (Basic)** (4-6 hours)
+### **PHASE 6: Vocation Actions (Basic)** 🔶 PARTIAL
 **Goal:** Implement level-specific actions and special events
 
 **Tasks:**
@@ -195,11 +222,11 @@
    - Example: Celebrity "Live Stream" (others can join)
    - Example: Gangster "Crime" (target player choice)
 
-**Deliverable:** Basic vocation actions work, complex ones marked for Interaction System
+**Deliverable:** Basic vocation actions work, complex ones marked for Interaction System — **Public Servant flows done; others partly done (see VOCATION_SUMMARIES_AND_BUTTONS.md).**
 
 ---
 
-### **PHASE 7: Integration with Other Systems** (2-3 hours)
+### **PHASE 7: Integration with Other Systems** 🔶 PARTIAL
 **Goal:** Connect vocations to existing card systems
 
 **Tasks:**
@@ -405,5 +432,5 @@ Before starting, verify these systems exist and work:
 
 ---
 
-**Status:** Ready to begin Phase 1 implementation  
-**Next Action:** Create VocationsController.lua script
+**Status:** Phases 1–5 complete; Phase 6–7 partial. See "Not Yet Implemented / To Do" for next actions.  
+**Next Action:** Optional – Celebrity cashback, Social Worker perks, Entrepreneur "double shop prices", award system, or remaining items in VOCATION_SUMMARIES_AND_BUTTONS.md.

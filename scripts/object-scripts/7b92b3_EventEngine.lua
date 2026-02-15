@@ -118,8 +118,9 @@ local child = { Yellow=nil, Blue=nil, Red=nil, Green=nil }
 -- NEW: per-round unlock of child AP block (0..child.apBlock)
 local childUnlock = { Yellow=0, Blue=0, Red=0, Green=0 }
 
--- Broken hi-tech items: [color] = {cardName1=true, cardName2=true, ...}
+-- Broken hi-tech items: [color] = {cardName1=true, ...}; repair cost when broken: [color][cardName] = cost
 local brokenHiTech = { Yellow={}, Blue={}, Red={}, Green={} }
+local brokenRepairCost = { Yellow={}, Blue={}, Red={}, Green={} }
 
 -- =========================================================
 -- SECTION 1c) UTILS
@@ -452,42 +453,55 @@ local function getApCtrl(color)
   return findOneByTags({TAG_AP_CTRL, colorTag(color)})
 end
 
--- Find Shop Engine and check if player owns CAR (for -1 AP cost reduction)
+-- Find Shop Engine and check if player owns CAR (for -1 AP cost reduction; shop-bought or PS perk)
 local function hasCarReduction(color)
-  if not color then 
+  if not color then
     log("CAR check: no color provided")
-    return false 
+    return false
   end
-  
-  -- Normalize color to match Shop Engine's storage format (capitalize first letter, lowercase rest)
-  local normalizedColor = color
-  if type(color) == "string" and color ~= "" then
-    normalizedColor = color:sub(1,1):upper() .. color:sub(2):lower()
-  end
-  
+
+  local normalizedColor = (color .. ""):sub(1,1):upper() .. (color .. ""):sub(2):lower()
+
   local shopEngine = findOneByTags({TAG_SHOP_ENGINE})
-  if not shopEngine or not shopEngine.call then 
-    warn("CAR check: Shop Engine not found (tag "..TAG_SHOP_ENGINE..")")
-    return false 
+  if not shopEngine or not shopEngine.call then
+    shopEngine = nil
+    for _, o in ipairs(getAllObjects()) do
+      if o and o.hasTag and o.hasTag(TAG_SHOP_ENGINE) and o.call then shopEngine = o break end
+    end
   end
-  
+  if not shopEngine or not shopEngine.call then
+    warn("CAR check: Shop Engine not found (tag "..TAG_SHOP_ENGINE..")")
+    return false
+  end
+
   local ok, hasCar = pcall(function()
-    return shopEngine.call("API_ownsHiTech", {color=normalizedColor, kind="CAR"})
+    return shopEngine.call("API_ownsHiTech", { color = normalizedColor, kind = "CAR" })
   end)
-  
+
   if not ok then
     warn("CAR check: API call failed for "..tostring(normalizedColor).." error="..tostring(hasCar))
     return false
   end
-  
+
   local result = (ok and hasCar == true)
   if result then
     log("CAR check: "..tostring(normalizedColor).." HAS CAR (reduction active)")
   else
     log("CAR check: "..tostring(normalizedColor).." NO CAR (ok="..tostring(ok).." hasCar="..tostring(hasCar)..")")
   end
-  
   return result
+end
+
+-- Anti-burglary Alarm: victim is protected from theft (money/hi-tech) but can still be WOUNDED
+local function targetHasAlarm(targetColor)
+  if not targetColor or targetColor == "" then return false end
+  local normalizedColor = (targetColor .. ""):sub(1,1):upper() .. (targetColor .. ""):sub(2):lower()
+  local shopEngine = findOneByTags({TAG_SHOP_ENGINE})
+  if not shopEngine or not shopEngine.call then return false end
+  local ok, hasAlarm = pcall(function()
+    return shopEngine.call("API_ownsHiTech", { color = normalizedColor, kind = "ALARM" })
+  end)
+  return (ok and hasAlarm == true)
 end
 
 -- Get count of owned hi-tech items for a player (for luxury tax)
@@ -1134,44 +1148,50 @@ local function processCrimeRollResult(roll, data, cardObj, g, targetColor)
         log("processCrimeRollResult: Failed to reduce health for "..tostring(targetColor))
       end
     end
-    
-    -- Steal money: take from target, give to initiator
-    local steal = (band == 2 and crimeDef.steal2) or (band == 3 and crimeDef.steal3) or crimeDef.steal or 0
-    if steal > 0 then
-      -- Get target's current money
-      local targetMoneyObj = resolveMoney(targetColor)
-      local targetCurrentMoney = 0
-      if targetMoneyObj then
-        targetCurrentMoney = moneyGet(targetMoneyObj) or 0
-      end
-      
-      -- Calculate amount to steal (can't steal more than they have)
-      local amountToSteal = math.min(steal, targetCurrentMoney)
-      
-      if amountToSteal > 0 then
-        crimeGainsVIN = amountToSteal
-        -- Take money from target
-        local targetMoneyObj2 = resolveMoney(targetColor)
-        if targetMoneyObj2 then
-          pcall(function() moneyAdd(targetMoneyObj2, -amountToSteal) end)
+
+    -- Anti-burglary Alarm: victim keeps all items and cash; still WOUNDED
+    if targetHasAlarm(targetColor) then
+      crimeGainsVIN = 0
+      pcall(function() broadcastToAll("🔔 Alarm raised! "..targetColor.."'s Anti-burglary Alarm prevented the theft. "..data.color.."'s attempt was noticed; "..targetColor.." is WOUNDED but nothing was stolen.", {0.9,0.85,0.5}) end)
+    else
+      -- Steal money: take from target, give to initiator
+      local steal = (band == 2 and crimeDef.steal2) or (band == 3 and crimeDef.steal3) or crimeDef.steal or 0
+      if steal > 0 then
+        -- Get target's current money
+        local targetMoneyObj = resolveMoney(targetColor)
+        local targetCurrentMoney = 0
+        if targetMoneyObj then
+          targetCurrentMoney = moneyGet(targetMoneyObj) or 0
         end
-        
-        -- Give money to initiator
-        local initiatorMoneyObj = resolveMoney(data.color)
-        if initiatorMoneyObj then
-          pcall(function() moneyAdd(initiatorMoneyObj, amountToSteal) end)
-        end
-        
-        if amountToSteal < steal then
-          pcall(function() broadcastToAll("Crime: "..targetColor.." WOUNDED, loses 3 Health and "..tostring(amountToSteal).." WIN (only had "..tostring(targetCurrentMoney).."). "..data.color.." gains "..tostring(amountToSteal).." WIN.", {1,0.6,0.4}) end)
+
+        -- Calculate amount to steal (can't steal more than they have)
+        local amountToSteal = math.min(steal, targetCurrentMoney)
+
+        if amountToSteal > 0 then
+          crimeGainsVIN = amountToSteal
+          -- Take money from target
+          local targetMoneyObj2 = resolveMoney(targetColor)
+          if targetMoneyObj2 then
+            pcall(function() moneyAdd(targetMoneyObj2, -amountToSteal) end)
+          end
+
+          -- Give money to initiator
+          local initiatorMoneyObj = resolveMoney(data.color)
+          if initiatorMoneyObj then
+            pcall(function() moneyAdd(initiatorMoneyObj, amountToSteal) end)
+          end
+
+          if amountToSteal < steal then
+            pcall(function() broadcastToAll("Crime: "..targetColor.." WOUNDED, loses 3 Health and "..tostring(amountToSteal).." WIN (only had "..tostring(targetCurrentMoney).."). "..data.color.." gains "..tostring(amountToSteal).." WIN.", {1,0.6,0.4}) end)
+          else
+            pcall(function() broadcastToAll("Crime: "..targetColor.." WOUNDED, loses 3 Health and "..tostring(amountToSteal).." WIN. "..data.color.." gains "..tostring(amountToSteal).." WIN.", {1,0.6,0.4}) end)
+          end
         else
-          pcall(function() broadcastToAll("Crime: "..targetColor.." WOUNDED, loses 3 Health and "..tostring(amountToSteal).." WIN. "..data.color.." gains "..tostring(amountToSteal).." WIN.", {1,0.6,0.4}) end)
+          pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED and loses 3 Health but has no money to steal.", {1,0.6,0.4}) end)
         end
       else
-        pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED and loses 3 Health but has no money to steal.", {1,0.6,0.4}) end)
+        pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED and loses 3 Health.", {1,0.6,0.4}) end)
       end
-    else
-      pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED and loses 3 Health.", {1,0.6,0.4}) end)
     end
   end
   -- Heat & Investigation (only after successful crime: wounded or wounded_steal)
@@ -1415,13 +1435,18 @@ local function evt_veTarget(cardObj, targetColor)
       pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED.", {1,0.6,0.4}) end)
     elseif outcome == "wounded_steal" then
       PS_AddStatus(targetColor, STATUS_TAG.WOUNDED)
-      local steal = (band == 2 and crimeDef.steal2) or (band == 3 and crimeDef.steal3) or crimeDef.steal or 0
-      if steal > 0 then
-        applyToPlayer_NoAP(targetColor, { money = -steal }, "VECrimeSteal")
-        crimeGainsVIN = steal
-        pcall(function() broadcastToAll("Crime: "..targetColor.." WOUNDED and loses "..tostring(steal).." WIN.", {1,0.6,0.4}) end)
+      if targetHasAlarm(targetColor) then
+        crimeGainsVIN = 0
+        pcall(function() broadcastToAll("🔔 Alarm raised! "..targetColor.."'s Anti-burglary Alarm prevented the theft. "..data.color.."'s attempt was noticed; "..targetColor.." is WOUNDED but nothing was stolen.", {0.9,0.85,0.5}) end)
       else
-        pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED.", {1,0.6,0.4}) end)
+        local steal = (band == 2 and crimeDef.steal2) or (band == 3 and crimeDef.steal3) or crimeDef.steal or 0
+        if steal > 0 then
+          applyToPlayer_NoAP(targetColor, { money = -steal }, "VECrimeSteal")
+          crimeGainsVIN = steal
+          pcall(function() broadcastToAll("Crime: "..targetColor.." WOUNDED and loses "..tostring(steal).." WIN.", {1,0.6,0.4}) end)
+        else
+          pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED.", {1,0.6,0.4}) end)
+        end
       end
     end
     -- Heat & Investigation (same as processCrimeRollResult: only after successful crime)
@@ -1475,13 +1500,18 @@ function evt_veCrimeRoll(cardObj, player_color, alt_click)
       pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED.", {1,0.6,0.4}) end)
     elseif outcome == "wounded_steal" then
       PS_AddStatus(targetColor, STATUS_TAG.WOUNDED)
-      local steal = (band == 2 and crimeDef.steal2) or (band == 3 and crimeDef.steal3) or crimeDef.steal or 0
-      if steal > 0 then
-        applyToPlayer_NoAP(targetColor, { money = -steal }, "VECrimeSteal")
-        crimeGainsVIN = steal
-        pcall(function() broadcastToAll("Crime: "..targetColor.." WOUNDED and loses "..tostring(steal).." WIN.", {1,0.6,0.4}) end)
+      if targetHasAlarm(targetColor) then
+        crimeGainsVIN = 0
+        pcall(function() broadcastToAll("🔔 Alarm raised! "..targetColor.."'s Anti-burglary Alarm prevented the theft. "..data.color.."'s attempt was noticed; "..targetColor.." is WOUNDED but nothing was stolen.", {0.9,0.85,0.5}) end)
       else
-        pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED.", {1,0.6,0.4}) end)
+        local steal = (band == 2 and crimeDef.steal2) or (band == 3 and crimeDef.steal3) or crimeDef.steal or 0
+        if steal > 0 then
+          applyToPlayer_NoAP(targetColor, { money = -steal }, "VECrimeSteal")
+          crimeGainsVIN = steal
+          pcall(function() broadcastToAll("Crime: "..targetColor.." WOUNDED and loses "..tostring(steal).." WIN.", {1,0.6,0.4}) end)
+        else
+          pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED.", {1,0.6,0.4}) end)
+        end
       end
     end
     -- Heat & Investigation (only after successful crime: wounded or wounded_steal)
@@ -2388,21 +2418,36 @@ local function handleSpecial(color, cardId, def, cardObj)
     return STATUS.DONE
   end
 
-  -- Luxury Tax: Pay 200 per owned hi-tech item
+  -- Luxury Tax: Pay 200 per owned hi-tech item (Public Servant may waive once per level)
   if def.special == "AD_LUXTAX" then
     local itemCount = getOwnedHiTechCount(color)
     local totalTax = itemCount * 200
-    
+
     if itemCount == 0 then
       safeBroadcastTo(color, "💼 Luxury Tax: You own no hi-tech items → 0 WIN tax.", {0.8,0.8,0.8})
       return STATUS.DONE
     end
-    
+
     if not canAfford(color, -totalTax) then
       safeBroadcastTo(color, "⛔ Luxury Tax: You need "..tostring(totalTax).." WIN ("..tostring(itemCount).." items × 200), but don't have enough money.", {1,0.6,0.2})
       return STATUS.BLOCKED
     end
-    
+
+    local voc = findOneByTags({TAG_VOCATIONS_CTRL})
+    local canWaive = (voc and voc.call and (function()
+      local ok, w = pcall(function() return voc.call("API_CanPublicServantWaiveTax", { color = color }) end)
+      return ok and w == true
+    end)())
+    if canWaive then
+      startChoiceOnCard_AB(
+        cardObj, color, def.kind or "instant", "TAX_WAIVER_PS", cardId,
+        "PAY\n(" .. tostring(totalTax) .. " WIN)",
+        "WAIVE TAX",
+        { totalTax = totalTax, taxType = "AD_LUXTAX", label = "Luxury Tax" }
+      )
+      return STATUS.WAIT_CHOICE
+    end
+
     applyToPlayer_NoAP(color, { money = -totalTax }, "AD_LUXTAX")
     safeBroadcastTo(color, "💼 Luxury Tax: Paid "..tostring(totalTax).." WIN ("..tostring(itemCount).." hi-tech items × 200).", {0.7,0.9,1})
     return STATUS.DONE
@@ -2445,86 +2490,95 @@ local function handleSpecial(color, cardId, def, cardObj)
       end
     end
     
-    -- Player can afford: deduct immediately
+    -- Player can afford: offer Public Servant waiver (once per level) or deduct
+    local voc = findOneByTags({TAG_VOCATIONS_CTRL})
+    local canWaive = (voc and voc.call and (function()
+      local ok, w = pcall(function() return voc.call("API_CanPublicServantWaiveTax", { color = color }) end)
+      return ok and w == true
+    end)())
+    if canWaive then
+      startChoiceOnCard_AB(
+        cardObj, color, def.kind or "instant", "TAX_WAIVER_PS", cardId,
+        "PAY\n(" .. tostring(totalTax) .. " WIN)",
+        "WAIVE TAX",
+        { totalTax = totalTax, taxType = "AD_PROPTAX", label = "Property Tax" }
+      )
+      return STATUS.WAIT_CHOICE
+    end
+
     applyToPlayer_NoAP(color, { money = -totalTax }, "AD_PROPTAX")
     safeBroadcastTo(color, "🏠 Property Tax: Paid "..tostring(totalTax).." WIN (Apartment Level L"..tostring(estateLevel).." × 300).", {0.7,0.9,1})
     return STATUS.DONE
   end
 
-  -- Hi-Tech Failure: Randomly break one owned hi-tech item (repair cost 25% of original value)
+  -- Hi-Tech Failure: Randomly break ONE owned hi-tech item (repair cost 25% of original). Card moves to used immediately.
   if def.special == "AD_HI_FAIL" then
     local shopEngine = findOneByTags({TAG_SHOP_ENGINE})
     if not shopEngine or not shopEngine.call then
       safeBroadcastTo(color, "⛔ Hi-Tech Failure: Shop Engine not found.", {1,0.6,0.2})
       return STATUS.ERROR
     end
-    
+
     local ok, ownedList = pcall(function()
       return shopEngine.call("API_getOwnedHiTech", {color=color})
     end)
-    
+
     if not ok or type(ownedList) ~= "table" or #ownedList == 0 then
       safeBroadcastTo(color, "💻 Hi-Tech Failure: You own no hi-tech items → nothing to break.", {0.8,0.8,0.8})
+      if type(finalizeCard) == "function" then finalizeCard(cardObj, "instant", color) end
       return STATUS.DONE
     end
-    
-    -- Randomly select one item to break (exclude already broken items)
+
+    -- Randomly select ONE item to break (exclude already broken)
     local availableItems = {}
     brokenHiTech[color] = brokenHiTech[color] or {}
+    brokenRepairCost[color] = brokenRepairCost[color] or {}
     for _, cardName in ipairs(ownedList) do
       if not brokenHiTech[color][cardName] then
         table.insert(availableItems, cardName)
       end
     end
-    
+
     if #availableItems == 0 then
       safeBroadcastTo(color, "💻 Hi-Tech Failure: All your hi-tech items are already broken.", {0.9,0.9,0.6})
+      if type(finalizeCard) == "function" then finalizeCard(cardObj, "instant", color) end
       return STATUS.DONE
     end
-    
-    -- Random selection
+
     local randomIdx = math.random(1, #availableItems)
     local brokenCardName = availableItems[randomIdx]
-    
-    -- Mark as broken
+
     brokenHiTech[color][brokenCardName] = true
-    
-    -- Get repair cost (25% of original cost from ShopEngine HI_TECH_DEF)
-    local repairCost = 0
+
+    -- Repair cost: 25% of original (ShopEngine API_getHiTechDef returns equivalent cost for perks, e.g. HMONITOR=300 → 75)
+    local repairCost = 75
     local ok2, cost = pcall(function()
-      -- Try to get cost from ShopEngine's HI_TECH_DEF
       local ok3, hiTechDef = pcall(function()
         return shopEngine.call("API_getHiTechDef", {cardName=brokenCardName})
       end)
-      if ok3 and hiTechDef and hiTechDef.cost then
-        return math.floor(hiTechDef.cost * 0.25)  -- 25% of original cost
+      if ok3 and hiTechDef and type(hiTechDef.cost) == "number" and hiTechDef.cost > 0 then
+        return math.floor(hiTechDef.cost * 0.25)
       end
-      -- Fallback: common costs if API not available
-      local commonCosts = { 1200, 1100, 1400, 700, 1000 }
-      local avgCost = 1000  -- Default average cost
-      return math.floor(avgCost * 0.25)  -- 300 default repair cost
+      if ok3 and hiTechDef and hiTechDef.kind == "HMONITOR" then return 75 end
+      if ok3 and hiTechDef and hiTechDef.kind == "ALARM" then return math.floor(700 * 0.25) end
+      if ok3 and hiTechDef and hiTechDef.kind == "CAR" then return math.floor(1200 * 0.25) end
+      return 75
     end)
-    repairCost = (ok2 and type(cost) == "number") and cost or 300  -- Default to 300 if API fails
-    
-    -- Store repair info in pending choice for repair button
-    local cardGuid = cardObj.getGUID()
-    pendingChoice[cardGuid] = {
-      color = color,
-      kind = def.kind or "obligatory",
-      choiceKey = "HI_FAIL_REPAIR",
-      cardId = cardId,
-      meta = { brokenCardName = brokenCardName, repairCost = repairCost }
-    }
-    lockCard(cardGuid, LOCK_SEC)
-    
-    -- Show repair button on card
-    cardUI_clear(cardObj)
-    cardUI_title(cardObj, "REPAIR")
-    cardUI_btn(cardObj, "REPAIR ("..tostring(repairCost).." WIN)", "evt_choiceRepair", -0.5)
-    cardUI_btn(cardObj, "SKIP", "evt_choiceSkip", 0.5)
-    
-    safeBroadcastTo(color, "💻 Hi-Tech Failure: "..tostring(brokenCardName).." is broken! Repair cost: "..tostring(repairCost).." WIN (25% of original).", {1,0.5,0.2})
-    return STATUS.WAIT_CHOICE
+    repairCost = (ok2 and type(cost) == "number" and cost > 0) and cost or 75
+    brokenRepairCost[color][brokenCardName] = repairCost
+
+    safeBroadcastTo(color, "💻 Hi-Tech Failure: "..tostring(brokenCardName).." is broken! Repair cost: "..tostring(repairCost).." WIN (25% of original). Use the Repair button on the broken item.", {1,0.5,0.2})
+
+    -- Refresh Shop Engine hi-tech card buttons so the broken card shows the Repair button
+    pcall(function()
+      if shopEngine and shopEngine.call then
+        shopEngine.call("API_RefreshHiTechButtonsForColor", { color = color })
+      end
+    end)
+
+    -- Move this event card to used pile immediately (no REPAIR/SKIP on event card)
+    if type(finalizeCard) == "function" then finalizeCard(cardObj, "instant", color) end
+    return STATUS.DONE
   end
 
   -- ✅ Babysitter: unlocks child AP block partially (this round)
@@ -2814,6 +2868,21 @@ function evt_choiceA(cardObj, player_color, alt_click)
     return
   end
 
+  if pc.choiceKey == "TAX_WAIVER_PS" then
+    local totalTax = tonumber(pc.meta and pc.meta.totalTax) or 0
+    local taxType = (pc.meta and pc.meta.taxType) or "TAX"
+    if totalTax > 0 and not canAfford(pc.color, -totalTax) then
+      safeBroadcastTo(pc.color, "⛔ You don't have enough money to pay.", {1,0.6,0.2})
+      return
+    end
+    if totalTax > 0 then
+      applyToPlayer_NoAP(pc.color, { money = -totalTax }, taxType)
+      safeBroadcastTo(pc.color, "💼 Tax paid: "..tostring(totalTax).." WIN.", {0.7,0.9,1})
+    end
+    finishChoice(cardObj, pc)
+    return
+  end
+
   if pc.choiceKey == "BABYSITTER_PICK" then
     local costPer = tonumber(pc.meta and pc.meta.costPer) or 50
     if not canAfford(pc.color, -costPer) then
@@ -2855,6 +2924,16 @@ function evt_choiceB(cardObj, player_color, alt_click)
   lockCard(g, LOCK_SEC)
 
   if pc.choiceKey == "VE_PICK_SIDE" then
+    return
+  end
+
+  if pc.choiceKey == "TAX_WAIVER_PS" then
+    local voc = findOneByTags({TAG_VOCATIONS_CTRL})
+    if voc and voc.call then
+      pcall(function() voc.call("API_UsePublicServantTaxWaiver", { color = pc.color }) end)
+    end
+    safeBroadcastTo(pc.color, "📜 Tax waived (Mastery of Administrative Law – once per level).", {0.5,0.9,0.6})
+    finishChoice(cardObj, pc)
     return
   end
 
@@ -3220,6 +3299,68 @@ function getAdjustedSlotExtraAP(args)
   return tonumber(slotExtraAPForCard[cardGuid]) or 0
 end
 
+-- Broken hi-tech: APIs for ShopEngine (check before use, show Repair button, perform repair)
+function API_isHiTechBroken(args)
+  args = args or {}
+  local color = (args.color or args.player_color or ""):sub(1,1):upper()..(args.color or args.player_color or ""):sub(2):lower()
+  local cardName = args.cardName or args.card_name
+  if not color or color == "" or not cardName then return false end
+  brokenHiTech[color] = brokenHiTech[color] or {}
+  return (brokenHiTech[color][cardName] == true)
+end
+
+function API_getBrokenRepairCost(args)
+  args = args or {}
+  local color = (args.color or args.player_color or ""):sub(1,1):upper()..(args.color or args.player_color or ""):sub(2):lower()
+  local cardName = args.cardName or args.card_name
+  if not color or not cardName then return 0 end
+  brokenRepairCost[color] = brokenRepairCost[color] or {}
+  return tonumber(brokenRepairCost[color][cardName]) or 0
+end
+
+function API_repairBrokenHiTech(args)
+  args = args or {}
+  local color = (args.color or args.player_color or ""):sub(1,1):upper()..(args.color or args.player_color or ""):sub(2):lower()
+  local cardName = args.cardName or args.card_name
+  if not color or color == "" or not cardName then return false end
+  brokenHiTech[color] = brokenHiTech[color] or {}
+  brokenRepairCost[color] = brokenRepairCost[color] or {}
+  if not brokenHiTech[color][cardName] then return false end
+  local repairCost = tonumber(brokenRepairCost[color][cardName]) or 0
+  if repairCost <= 0 then
+    brokenHiTech[color][cardName] = nil
+    brokenRepairCost[color][cardName] = nil
+    return true
+  end
+  if not canAfford(color, -repairCost) then return false end
+  applyToPlayer_NoAP(color, { money = -repairCost }, "HI_FAIL_REPAIR")
+  brokenHiTech[color][cardName] = nil
+  brokenRepairCost[color][cardName] = nil
+  return true
+end
+
+-- Clear broken state for one card (e.g. when placing Public Servant proxy so it does not show as broken)
+function API_clearBrokenHiTechForCard(args)
+  args = args or {}
+  local color = (args.color or args.player_color or ""):sub(1,1):upper()..(args.color or args.player_color or ""):sub(2):lower()
+  local cardName = args.cardName or args.card_name
+  if not color or color == "" or not cardName then return false end
+  brokenHiTech[color] = brokenHiTech[color] or {}
+  brokenRepairCost[color] = brokenRepairCost[color] or {}
+  brokenHiTech[color][cardName] = nil
+  brokenRepairCost[color][cardName] = nil
+  return true
+end
+
+-- Clear all broken hi-tech state (e.g. on game reset so new game does not show spurious Repair)
+function API_ClearBrokenState(_)
+  for _, c in ipairs({"Yellow", "Blue", "Red", "Green"}) do
+    brokenHiTech[c] = {}
+    brokenRepairCost[c] = {}
+  end
+  return true
+end
+
 -- Called by VocationsController when canceling VE crime target selection
 -- Refunds both slotExtra AP and crime action AP, and makes card interactable again
 function CancelVECrimeTargetSelection(args)
@@ -3506,25 +3647,28 @@ end
 -- =========================================================
 
 function onSave()
-  -- Save broken hi-tech state
-  return JSON.encode({ brokenHiTech = brokenHiTech })
+  -- Save broken hi-tech state and repair costs
+  return JSON.encode({ brokenHiTech = brokenHiTech, brokenRepairCost = brokenRepairCost })
 end
 
 function onLoad(saved_data)
   print("[WLB EVENT] onLoad OK - engine alive (v1.7.2)")
 
-  -- Load broken hi-tech state
+  -- Load broken hi-tech state and repair costs
   if saved_data and saved_data ~= "" then
     local ok, data = pcall(function() return JSON.decode(saved_data) end)
-    if ok and type(data) == "table" and data.brokenHiTech then
-      brokenHiTech = data.brokenHiTech
+    if ok and type(data) == "table" then
+      if data.brokenHiTech then brokenHiTech = data.brokenHiTech end
+      if data.brokenRepairCost then brokenRepairCost = data.brokenRepairCost end
     end
   end
   
-  -- Ensure all colors exist in brokenHiTech
+  -- Ensure all colors exist in brokenHiTech and brokenRepairCost
   brokenHiTech = brokenHiTech or {}
+  brokenRepairCost = brokenRepairCost or {}
   for _, c in ipairs({"Yellow","Blue","Red","Green"}) do
     brokenHiTech[c] = brokenHiTech[c] or {}
+    brokenRepairCost[c] = brokenRepairCost[c] or {}
   end
 
   local die = getRealDie()

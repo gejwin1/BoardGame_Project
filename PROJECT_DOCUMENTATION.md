@@ -2,7 +2,7 @@
 
 Complete project documentation for the Work-Life Balance board game development.
 
-**Last Updated**: January 28, 2026
+**Last Updated**: February 14, 2026
 
 ---
 
@@ -264,22 +264,25 @@ Players manage:
 
 ### ✅ Implemented
 - Core turn management system
-- Event card system (Youth and Adult) - System works, though some Adult cards not yet programmed (connected with vocations)
-- Shop system with consumables
+- Event card system (Youth and Adult) – system works; most Adult cards implemented (obligatory, taxes, Hi-Tech Failure, etc.)
+- Shop system (consumables, Hi-Tech, investments) with voucher discounts and Public Servant 50% consumable discount
 - Estate/housing system
 - Resource management (Money, AP, Stats, Satisfaction)
 - Status effect system
-- Token management system
-- Win condition (highest satisfaction wins) - Logic is straightforward and implemented
+- Token management system (including Experience tokens)
+- Win condition (highest satisfaction wins)
+- **Vocation system (core)** – selection at Adult start, work income via Costs Calculator, promotion (standard/work/award), tiles, summary UI
+- **Public Servant (full flow)** – tax campaigns (L1/L2/L3), level perks (Health Monitor, Alarm, Car proxy tiles), 50% consumable discount, tax waiver once per level, work obligation 2–4 AP/year, experience tokens at round end
+- **Overworking satisfaction loss** – end of turn: 0–2 AP work → 0, 3–4 → −1, 5–6 → −2, 7–8 → −3, 9 → −4 SAT; NGO Worker exempt
+- **Hi-Tech Failure event** – one random hi-tech breaks, 25% repair cost, Repair button on broken card, block use when broken
 
 ### 🟡 In Progress
-- Vocation system (partially implemented, needs further development)
-- Additional shop card types (almost all cards developed and tested, a few may need testing once vocation system is complete)
-- Additional card effects (some Adult cards waiting for vocation system)
+- Remaining vocation perks and actions (Celebrity cashback, Social Worker Good Karma/rent, Entrepreneur “double shop”, Gangster/NGO refinements)
+- Award-based Level 3 promotions and “no special award this year” (Public Servant L3)
 - Testing and balancing (ongoing process)
 
 ### 🔴 Planned
-- Complete vocation system
+- Full award system for vocation Level 3
 - Comprehensive playtesting
 - Rulebook finalization
 
@@ -946,7 +949,7 @@ These tasks require understanding how the systems work together.
 These tasks require understanding the entire system architecture.
 
 ### 1. Major Features
-- [ ] **Complete Vocation System** - Finish implementing the vocation system
+- [ ] **Complete remaining vocation perks** - Finish Celebrity cashback, Social Worker perks, Entrepreneur “double shop”, award system (vocation core and Public Servant are done)
 - [ ] **Implement Win Condition** - Add win condition logic and UI (highest satisfaction wins)
 - [ ] **Add Hi-Tech Shop Effects** - Complete all Hi-Tech shop card implementations
 - [ ] **Add Investment Shop Effects** - Complete all Investment shop card implementations
@@ -1020,125 +1023,112 @@ These tasks require understanding the entire system architecture.
 
 # Project Status
 
-**Last Updated**: January 28, 2026
+**Last Updated**: February 14, 2026
 
 ## Current Phase
-**Development** - Core systems implemented, adding features and polish
+**Development** – Core and vocation systems implemented; adding remaining vocation perks and polish
 
 ## Overall Completion
 
-### Core Systems: 90% ✅
-- ✅ Turn Management System (v2.9.2)
-- ✅ Event System (Event Engine v1.7.2, Events Controller v3.6.0)
-- ✅ Shop System (Shop Engine v1.3.4)
+### Core Systems: 95% ✅
+- ✅ Turn Management System (v2.9.2) – includes overwork SAT loss at end of turn, round-end vocation hook
+- ✅ Event System (Event Engine, Events Controller)
+- ✅ Shop System (Shop Engine) – consumables, Hi-Tech, investments; voucher + Public Servant 50% consumable discount
 - ✅ Estate System (Estate Engine)
-- ✅ Token System (Token Engine v2.4.0)
+- ✅ Token System (Token Engine) – including Experience tokens (WLB_STATUS_EXPERIENCE)
 - ✅ Resource Controllers (Money, AP, Stats, Satisfaction)
-- ✅ Status System (Player Status Controller v0.3.0)
+- ✅ Status System (Player Status Controller)
+- ✅ VocationsController – selection, work income, promotion, work obligation, experience tokens, tax waiver, Public Servant flows
 
-### UI/UX: 70% 🟡
+### UI/UX: 72% 🟡
 - ✅ Functional UI for all major systems
-- ✅ Button interfaces for player actions
-- ✅ Modal dialogs for purchases and choices
+- ✅ Vocation summary panel and action buttons
+- ✅ Public Servant tax waiver status line (“Tax can be waived” / “Tax obligation”)
 - 🟡 Needs polish and visual improvements
 - 🟡 Translation to English (partially done)
 - 🔴 Some UI elements need refinement
 
-### Content: 60% 🟡
-- ✅ All Youth Event Cards (39 cards) - implemented
-- 🟡 Adult Event Cards (81 cards) - system works, but some cards not yet programmed (connected with vocations)
-- ✅ Consumable Shop Cards (28 cards) - implemented
-- 🟡 Hi-Tech Shop Cards (14 cards) - almost all developed and tested, a few may need testing once vocation system is complete
-- 🟡 Investment Shop Cards (14 cards) - almost all developed and tested, a few may need testing once vocation system is complete
-- 🟡 Vocation System - partially implemented, needs further development
-- 🟡 Some Adult card effects need completion (waiting for vocation system)
+### Content: 72% 🟡
+- ✅ All Youth Event Cards (39 cards)
+- ✅ Adult Event Cards – most implemented (obligatory, Luxury/Property tax with waiver, Hi-Tech Failure, etc.)
+- ✅ Consumable Shop Cards (28 cards) – Public Servant 50% discount applied
+- ✅ Hi-Tech Shop Cards (14 cards) – effects and Repair-for-broken flow
+- ✅ Investment Shop Cards (14 cards)
+- ✅ Vocation system – core and Public Servant complete; other vocations’ actions/perks partly done
+- 🟡 Remaining: Celebrity cashback, Social Worker perks, Entrepreneur “double shop”, award system
 
-### Testing: 30% 🔴
-- 🟡 Basic functionality testing done
-- 🔴 Comprehensive playtesting needed
-- 🔴 Balance testing needed
-- 🔴 Edge case testing needed
-- 🔴 Multi-player testing needed
+### Testing: 35% 🔴
+- 🟡 Basic and feature testing done
+- 🔴 Full playthrough and balance testing needed
+- 🔴 Edge case and multi-player testing needed
 
-### Documentation: 40% 🟡
+### Documentation: 50% 🟡
 - ✅ Technical documentation (component docs)
 - ✅ Script inventory and checklist
 - ✅ Workflow guide
 - ✅ Game design documentation (this document)
+- ✅ Vocations implementation roadmap (refreshed 31 Jan)
 - 🟡 Architecture documentation (in progress)
-- 🔴 Player guide needed
-- 🔴 Complete rulebook needed
+- 🔴 Player guide and complete rulebook needed
 
-## Recent Achievements
+## Recent Achievements (late Jan 2026)
 
 ### Completed
-- ✅ Turn Controller v2.9.2 - Full rewrite with improved stability
-- ✅ Shop Engine v1.3.4 - Complete consumable card system
-- ✅ Event Engine v1.7.2 - Full Youth and Adult card support
-- ✅ All 42 scripted objects documented
-- ✅ Project structure organized
-- ✅ Documentation structure created
+- ✅ **Public Servant (full)** – Tax campaigns L1/L2/L3; perks (Health Monitor, Alarm, Car as tiles); 50% consumable discount; tax waiver once per level; work obligation 2–4 AP/year; experience tokens at round end
+- ✅ **Overworking satisfaction** – End-of-turn SAT loss by work AP (0–2→0, 3–4→−1, 5–6→−2, 7–8→−3, 9→−4); NGO Worker exempt
+- ✅ **Experience tokens** – Round end: TokenEngine gives Experience token; Public Servant only if 2–4 work AP; promotion uses experience years earned
+- ✅ **Hi-Tech Failure** – One random hi-tech breaks; 25% repair cost; Repair button on card; use blocked when broken; Event card moves to used immediately
+- ✅ **Proxy tiles** – Health Monitor, Alarm, Car as Tiles (GUIDs 657dd1, f9d04d, 1f3658); parking with staggered delays; no merge with cards
+- ✅ **Script fix** – VocationsController `VOC_OnRoundEnd` goto scope error fixed
+- ✅ Turn Controller v2.9.2, Shop Engine, Event Engine, all 42 scripted objects documented
 
 ### In Progress
-- 🟡 Vocation system implementation (needs further development)
-- 🟡 Additional shop card types (almost all developed and tested)
-- 🟡 Some Adult event cards (waiting for vocation system)
-- 🟡 Documentation creation
-- 🟡 Bug fixes from initial testing
+- 🟡 Remaining vocation perks (Celebrity cashback/obligation, Social Worker Good Karma/rent, Entrepreneur double shop, etc.)
+- 🟡 Award system for Level 3 and “no special award this year”
+- 🟡 Playtesting and balancing
 
 ## Current Focus Areas
 
-### Priority 1: Documentation
-- Create onboarding documentation
-- Write game design documents
+### Priority 1: Content completion
+- Finish remaining vocation perks and actions (see VOCATION_SUMMARIES_AND_BUTTONS.md)
+- Implement award system for vocation Level 3
+- **Goal**: All vocation and card content functional
+
+### Priority 2: Documentation
+- Keep PROJECT_DOCUMENTATION and roadmap up to date
 - Complete architecture documentation
-- **Goal**: Enable new contributor to understand project quickly
+- **Goal**: Clear picture of done vs. to-do
 
-### Priority 2: Content Completion
-- Complete vocation system (needed for remaining Adult event cards)
-- Finish remaining Adult event cards (connected with vocations)
-- Test remaining shop cards (once vocation system is complete)
-- **Goal**: All game content functional
-
-### Priority 3: Polish
-- UI improvements
-- Error message improvements
-- **Goal**: Professional presentation
-
-### Priority 4: Testing
-- Comprehensive playtesting
-- Balance adjustments
-- Bug fixes
-- **Goal**: Stable, balanced gameplay
+### Priority 3: Polish and testing
+- UI improvements and error messages
+- Comprehensive playtesting and balance
+- **Goal**: Stable, polished gameplay
 
 ## Blockers
 
-**None currently** - Project is progressing smoothly
+**None currently** – Project progressing smoothly
 
 ## Known Limitations
 
-1. **Some Adult event cards incomplete** - Not yet programmed because they're connected with vocations
-2. **Vocation system partial** - Core implemented, needs further development
-3. **Some shop cards** - A few may need testing once vocation system is complete
-4. **Playtesting** - Limited testing so far, ongoing process
+1. **Award-based promotions** – Level 3 Public Servant (and others) have award text; full award tracking not yet implemented.
+2. **Some vocation perks** – Celebrity hi-tech cashback, Social Worker Good Karma grant/rent discount, Entrepreneur “double shop”, etc. still to implement.
+3. **Playtesting** – Broader playtesting and balance passes still needed.
 
 ## Next Milestones
 
-### Short-term (Next 2-4 weeks)
-- [ ] Complete vocation system
-- [ ] Finish remaining Adult event cards (connected with vocations)
-- [ ] Test remaining shop cards
+### Short-term (Next 2–4 weeks)
+- [ ] Implement remaining vocation perks (Celebrity, Social Worker, Entrepreneur, Gangster, NGO as per docs)
+- [ ] Award system for Level 3 vocations and “no special award this year”
 - [ ] Continue playtesting and balancing
 
-### Medium-term (Next 1-3 months)
-- [ ] Complete all card effects
+### Medium-term (Next 1–3 months)
+- [ ] Complete all card effects and edge cases
 - [ ] Comprehensive playtesting
 - [ ] Balance adjustments
 - [ ] Rulebook creation
 
 ### Long-term (Future)
-- [ ] Implement win condition (highest satisfaction wins)
-- [ ] Create player guide
+- [ ] Player guide
 - [ ] Publish complete rulebook
 - [ ] Consider expansions or variants
 

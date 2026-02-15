@@ -66,6 +66,7 @@ local TAG_MONEY              = "WLB_MONEY"
 local TAG_AP_CTRL            = "WLB_AP_CTRL"
 local TAG_PLAYER_BOARD       = "WLB_BOARD"
 local TAG_COSTS_CALC         = "WLB_COSTS_CALC"
+local TAG_VOCATIONS_CTRL     = "WLB_VOCATIONS_CTRL"
 
 local TAG_COLOR_PREFIX = "WLB_COLOR_"
 
@@ -101,6 +102,24 @@ local EXPECT_I = 14
 
 -- Die
 local DIE_GUID = "14d4a4"
+
+-- Event Engine (broken hi-tech: isBroken, repairCost, repair)
+local EVENT_ENGINE_GUID = "7b92b3"
+
+-- Public Servant perk: single Health Monitor Access card (move, do not clone).
+-- GUID 657dd1 = your one copy (Tile recommended to avoid merging). We MOVE it to the Public Servant's
+-- hi-tech zone when they click "Health Monitor Access"; no cloning. Store 657dd1 under the table or in a bag when not in use.
+local TEMPLATE_HEALTH_MONITOR_GUID = "657dd1"
+-- Parking: center below table (x=0, z=0, y=-0.5 = half unit under table).
+local HEALTH_MONITOR_PARKING_POSITION = { x = 0, y = -0.5, z = 0 }
+-- Anti-burglary Alarm perk: Tile (GUID f9d04d) to avoid merging with cards.
+local TEMPLATE_ALARM_GUID = "f9d04d"
+local ALARM_PARKING_POSITION = { x = 0, y = -0.5, z = 0 }
+-- New Car perk: Tile (GUID 1f3658) to avoid merging with cards.
+local TEMPLATE_CAR_GUID = "1f3658"
+local CAR_PARKING_POSITION = { x = 0, y = -0.5, z = 0 }
+local TAG_PERK_PROXY = "WLB_PERK_PROXY"
+local TAG_OWNER_PREFIX = "WLB_OWNER_"
 
 -- =========================
 -- [S1B] SLOT MATRIX (LOCAL@SHOPS_BOARD)
@@ -177,6 +196,13 @@ local S = {
   
   -- Investment tracking: [Color] = { debentures={...}, loan={...}, endowment={...}, estateInvest={...}, stock={...} }
   investments = { Yellow={}, Blue={}, Red={}, Green={} },
+
+  -- Public Servant perk: who currently has the Health Monitor Access tile (657dd1). nil = in parking / unassigned.
+  healthMonitorAccessOwner = nil,
+  -- Public Servant perk: who currently has the Anti-burglary Alarm tile (f9d04d). nil = in parking / unassigned.
+  alarmAccessOwner = nil,
+  -- Public Servant perk: who currently has the New Car tile (1f3658). nil = in parking / unassigned.
+  carAccessOwner = nil,
 }
 
 -- =========================
@@ -233,6 +259,8 @@ end
 local function isCard(o) return o and o.tag=="Card" end
 local function isDeck(o) return o and o.tag=="Deck" end
 local function isCardOrDeck(o) return o and (o.tag=="Card" or o.tag=="Deck") end
+-- Public Servant proxy objects (Health Monitor, Alarm, Car) may be Tiles to avoid merging with cards
+local function isCardOrTile(o) return o and (o.tag=="Card" or o.tag=="Tile") end
 
 local function dist2XZ(a, b)
   local dx = (a.x - b.x)
@@ -251,6 +279,11 @@ local function safeCall(obj, fn, params)
   if not obj or not obj.call then return false, nil end
   local ok, ret = pcall(function() return obj.call(fn, params) end)
   return ok, ret
+end
+
+local function resolveEventEngine()
+  local o = getObjectFromGUID(EVENT_ENGINE_GUID)
+  return (o and o.call) and o or nil
 end
 
 -- Busy-gate: reject UI actions during pipeline operations
@@ -1331,6 +1364,8 @@ local HI_TECH_DEF = {
   HSHOP_06_BABYMONITOR = {cost=1200, extraAP=0, kind="BABYMONITOR"},
   HSHOP_07_BABYMONITOR = {cost=1200, extraAP=0, kind="BABYMONITOR"},
   HSHOP_08_HMONITOR = {cost=300, extraAP=0, kind="HMONITOR"},
+  -- Public Servant perk: free Health Monitor Access (proxy clone, same usage as HMONITOR)
+  PS_HMONITOR_ACCESS = {cost=0, extraAP=0, kind="HMONITOR"},
   
   HSHOP_09_CAR = {cost=1200, extraAP=0, kind="CAR"},
   HSHOP_10_CAR = {cost=1200, extraAP=0, kind="CAR"},
@@ -1353,10 +1388,10 @@ local function findPlayerBoard(color)
 end
 
 local function countOwnedHiTechCards(color)
-  -- Count physical Hi-Tech cards on table for this player (for stacking)
+  -- Count physical Hi-Tech cards/tiles on table for this player (for stacking). Tiles = Public Servant proxies.
   local count = 0
   for _, o in ipairs(getAllObjects()) do
-    if o and o.tag == "Card" and o.hasTag then
+    if o and (o.tag == "Card" or o.tag == "Tile") and o.hasTag then
       if o.hasTag("WLB_HI_TECH") and o.hasTag(colorTag(color)) then
         count = count + 1
       end
@@ -1368,7 +1403,7 @@ end
 -- Attach interactive button to Hi-Tech card when purchased
 -- Defined early so it can be called from giveCardToPlayer
 local function attachHiTechInteractiveButton(card, color)
-  if not card or card.tag ~= "Card" then return end
+  if not card or not isCardOrTile(card) then return end
   local cardName = getNameSafe(card)
   if not cardName then return end
   local def = HI_TECH_DEF[cardName]
@@ -1435,22 +1470,82 @@ local function attachHiTechInteractiveButton(card, color)
     end)
     
   elseif kind == "HMONITOR" then
-    -- HMONITOR: Button to check SICK status and roll die if sick
-    pcall(function()
-      card.createButton({
-        click_function = "hitech_onHMonitorUse",
-        function_owner = self,
-        label = "CHECK\nHEALTH",
-        position = {0, 0.33, 1.0},
-        rotation = {0, 0, 0},
-        width = 800,
-        height = 300,
-        font_size = 130,
-        color = {0.8, 0.2, 0.2},
-        font_color = {1, 1, 1},
-        tooltip = "Click to check if sick (rolls die if sick, once per turn)"
-      })
-    end)
+    -- If broken (Hi-Tech Failure): show Repair button; else show Check health
+    local engine = resolveEventEngine()
+    local isBroken = false
+    local repairCost = 0
+    if engine and engine.call then
+      local ok, broken = pcall(function() return engine.call("API_isHiTechBroken", { color = color, cardName = cardName }) end)
+      if ok and broken then
+        isBroken = true
+        local ok2, cost = pcall(function() return engine.call("API_getBrokenRepairCost", { color = color, cardName = cardName }) end)
+        if ok2 and type(cost) == "number" then repairCost = cost end
+      end
+    end
+    if isBroken then
+      pcall(function()
+        card.createButton({
+          click_function = "hitech_onRepairClick",
+          function_owner = self,
+          label = "REPAIR\n(" .. tostring(repairCost) .. " WIN)",
+          position = {0, 0.33, 1.0},
+          rotation = {0, 0, 0},
+          width = 800,
+          height = 300,
+          font_size = 130,
+          color = {0.6, 0.5, 0.2},
+          font_color = {1, 1, 1},
+          tooltip = "Pay to repair this item (broken by Hi-Tech Failure card)"
+        })
+      end)
+    else
+      pcall(function()
+        card.createButton({
+          click_function = "hitech_onHMonitorUse",
+          function_owner = self,
+          label = "CHECK\nHEALTH",
+          position = {0, 0.33, 1.0},
+          rotation = {0, 0, 0},
+          width = 800,
+          height = 300,
+          font_size = 130,
+          color = {0.8, 0.2, 0.2},
+          font_color = {1, 1, 1},
+          tooltip = "Click to check if sick (rolls die if sick, once per turn)"
+        })
+      end)
+    end
+
+  elseif kind == "ALARM" or kind == "CAR" then
+    -- No use button; when broken show Repair button only
+    local engine = resolveEventEngine()
+    local isBroken = false
+    local repairCost = 0
+    if engine and engine.call then
+      local ok, broken = pcall(function() return engine.call("API_isHiTechBroken", { color = color, cardName = cardName }) end)
+      if ok and broken then
+        isBroken = true
+        local ok2, cost = pcall(function() return engine.call("API_getBrokenRepairCost", { color = color, cardName = cardName }) end)
+        if ok2 and type(cost) == "number" then repairCost = cost end
+      end
+    end
+    if isBroken then
+      pcall(function()
+        card.createButton({
+          click_function = "hitech_onRepairClick",
+          function_owner = self,
+          label = "REPAIR\n(" .. tostring(repairCost) .. " WIN)",
+          position = {0, 0.33, 1.0},
+          rotation = {0, 0, 0},
+          width = 800,
+          height = 300,
+          font_size = 130,
+          color = {0.6, 0.5, 0.2},
+          font_color = {1, 1, 1},
+          tooltip = "Pay to repair this item (broken by Hi-Tech Failure card)"
+        })
+      end)
+    end
   end
 end
 
@@ -1466,12 +1561,13 @@ local function giveCardToPlayer(card, color)
     card.addTag("WLB_HI_TECH")
   end)
   
-  -- Clear UI and unlock the card (it was locked when modal opened via uiLift)
+  -- Clear UI, unlock the card/tile, and ensure it does not stick (Card and Tile; pcall in case Tile has no setSticky)
   pcall(function()
     uiClearButtons(card)
     uiClearDescription(card)
     card.setLock(false)
     card.setHoldable(true)
+    pcall(function() card.setSticky(false) end)
   end)
   
   -- Find player board for this color
@@ -1537,16 +1633,28 @@ local function giveCardToPlayer(card, color)
   
   if worldPos then
     pcall(function()
-      card.setPositionSmooth(worldPos, false, true)
+      if card.tag == "Card" then
+        card.setPositionSmooth(worldPos, false, true)
+      else
+        card.setPosition(worldPos)
+      end
+      pcall(function() card.setSticky(false) end)
     end)
     log("Placed Hi-Tech card for "..tostring(color).." at LOCAL("..tostring(localPos.x)..","..tostring(localPos.y)..","..tostring(localPos.z)..") -> WORLD("..tostring(worldPos.x)..","..tostring(worldPos.y)..","..tostring(worldPos.z)..")")
     
-    -- Attach interactive button after card is placed (delay to ensure card is ready)
+    -- Attach interactive button after card/tile is placed (delay to ensure object is ready)
     Wait.time(function()
-      if card and card.tag == "Card" and attachHiTechInteractiveButton then
-        attachHiTechInteractiveButton(card, color)
+      if card and isCardOrTile(card) then
+        if attachHiTechInteractiveButton then attachHiTechInteractiveButton(card, color) end
+        pcall(function() card.setSticky(false) end)
       end
     end, 0.5)
+    -- Force non-sticky again (Tiles can revert; Public Servant proxy must not stick)
+    Wait.time(function()
+      if card and isCardOrTile(card) then
+        pcall(function() card.setSticky(false) end)
+      end
+    end, 1.5)
   else
     log("Failed to place Hi-Tech card for: "..tostring(color))
     -- Make it holdable as fallback
@@ -1707,7 +1815,7 @@ end
 
 -- Click handler for TV: show modal with 1-4 AP options
 function hitech_onTVUse(card, player_color, alt_click)
-  if not card or card.tag ~= "Card" then return end
+  if not card or not isCardOrTile(card) then return end
   local cardName = getNameSafe(card)
   local color = resolveBuyerColor(player_color)
   
@@ -1796,7 +1904,7 @@ function hitech_onTV_4AP(card, player_color, alt_click) hitech_onTVConfirm(card,
 
 -- Confirm TV usage with specific AP amount
 function hitech_onTVConfirm(card, player_color, apAmount)
-  if not card or card.tag ~= "Card" then return end
+  if not card or not isCardOrTile(card) then return end
   local cardGuid = card.getGUID()
   local pending = pendingTVUse[cardGuid]
   
@@ -1839,7 +1947,7 @@ end
 
 -- Cancel Hi-Tech interaction
 function hitech_onCancel(card, player_color, alt_click)
-  if not card or card.tag ~= "Card" then return end
+  if not card or not isCardOrTile(card) then return end
   local cardGuid = card.getGUID()
   
   -- Clear pending state
@@ -1862,7 +1970,7 @@ end
 
 -- Click handler for COMPUTER
 function hitech_onComputerUse(card, player_color, alt_click)
-  if not card or card.tag ~= "Card" then return end
+  if not card or not isCardOrTile(card) then return end
   local cardName = getNameSafe(card)
   local color = resolveBuyerColor(player_color)
   
@@ -1894,7 +2002,7 @@ end
 
 -- Click handler for DEVICE
 function hitech_onDeviceUse(card, player_color, alt_click)
-  if not card or card.tag ~= "Card" then return end
+  if not card or not isCardOrTile(card) then return end
   local cardName = getNameSafe(card)
   local color = resolveBuyerColor(player_color)
   
@@ -1924,17 +2032,57 @@ function hitech_onDeviceUse(card, player_color, alt_click)
   safeBroadcastToColor("✅ Device used: -1 AP, +1 Skill", color, {0.7,1,0.7})
 end
 
-function hitech_onHMonitorUse(card, player_color, alt_click)
-  if not card or card.tag ~= "Card" then return end
+-- Repair button on broken Hi-Tech card (Health Monitor, Alarm, Car) after Hi-Tech Failure event
+function hitech_onRepairClick(card, player_color, alt_click)
+  if not card or not isCardOrTile(card) then return end
   local cardName = getNameSafe(card)
   local color = resolveBuyerColor(player_color)
-  
+  if not ownsHiTech(color, cardName) then
+    safeBroadcastToColor("⛔ You don't own this card.", color, {1,0.6,0.2})
+    return
+  end
+  local engine = resolveEventEngine()
+  if not engine or not engine.call then
+    safeBroadcastToColor("⚠️ Event Engine not found - cannot repair.", color, {1,0.6,0.2})
+    return
+  end
+  local ok, repaired = pcall(function()
+    return engine.call("API_repairBrokenHiTech", { color = color, cardName = cardName })
+  end)
+  if not ok then
+    safeBroadcastToColor("⚠️ Repair failed.", color, {1,0.6,0.2})
+    return
+  end
+  if repaired then
+    pcall(function() card.clearButtons() end)
+    attachHiTechInteractiveButton(card, color)
+    safeBroadcastToColor("✅ Repaired! You can use the card again.", color, {0.4,0.9,0.4})
+  else
+    safeBroadcastToColor("🛠 Cannot repair: not enough WIN or item is not broken.", color, {1,0.6,0.2})
+  end
+end
+
+function hitech_onHMonitorUse(card, player_color, alt_click)
+  if not card or not isCardOrTile(card) then return end
+  local cardName = getNameSafe(card)
+  local color = resolveBuyerColor(player_color)
+
   -- Check ownership
   if not ownsHiTech(color, cardName) then
     safeBroadcastToColor("⛔ You don't own this card.", color, {1,0.6,0.2})
     return
   end
-  
+
+  -- Block use if broken (Hi-Tech Failure)
+  local engine = resolveEventEngine()
+  if engine and engine.call then
+    local ok, broken = pcall(function() return engine.call("API_isHiTechBroken", { color = color, cardName = cardName }) end)
+    if ok and broken then
+      safeBroadcastToColor("🛠 Health Monitor is broken. You cannot use it until you repair it (use the Repair button on the card).", color, {1,0.6,0.2})
+      return
+    end
+  end
+
   -- Check active turn
   local active = getActiveTurnColor()
   if color ~= active then
@@ -1986,9 +2134,10 @@ function hitech_onHMonitorUse(card, player_color, alt_click)
       
       -- Apply effect based on roll
       if v >= 3 and v <= 6 then
-        -- Roll 3-6: Cured (remove SICK status)
+        -- Roll 3-6: Cured (remove SICK status and restore 3 Health – sickness had removed 3)
         pscRemoveStatus(color, TAG_STATUS_SICK)
-        safeBroadcastToColor("✅ Health Monitor cured SICK! (roll="..v..")", color, {0.7,1,0.7})
+        statsApply(color, {h=3})
+        safeBroadcastToColor("✅ Health Monitor cured SICK! +3 Health restored (roll="..v..")", color, {0.7,1,0.7})
       else
         -- Roll 1-2: Still sick (status remains)
         safeBroadcastToColor("🩺 Health Monitor failed to cure (roll="..v.."). SICK status remains.", color, {1,0.7,0.3})
@@ -2003,6 +2152,254 @@ function hitech_onHMonitorUse(card, player_color, alt_click)
       return false
     end
   )
+end
+
+-- =========================
+-- [S8D] PUBLIC SERVANT PERK: Health Monitor Access (move single card, same mechanics as HMONITOR)
+-- =========================
+-- Two Health Monitors in the game: (1) One in the shop deck – anyone can buy it. (2) One perk copy
+-- (GUID 657dd1) under the table – only the Public Servant can call it to their board via the button.
+-- We MOVE that one card to the PS's hi-tech zone. No cloning. Only the PS can ever get it; we never
+-- "reassign" it to a different player. On new game we clear owner (and optionally move card to PARKING).
+local PS_HMONITOR_CARD_NAME = "PS_HMONITOR_ACCESS"
+
+local function playerHasHealthMonitorProxy(color)
+  return S.healthMonitorAccessOwner == color
+end
+
+-- Check if this player owns a Health Monitor that was bought from the shop (not the perk)
+local function ownsBoughtHealthMonitor(color)
+  if not S.ownedHiTech[color] then return false end
+  for _, name in ipairs(S.ownedHiTech[color]) do
+    if name == "HSHOP_08_HMONITOR" then return true end
+  end
+  return false
+end
+
+local function placePublicServantHealthMonitorProxy(color)
+  if not color or color == "White" then return false, "Invalid color" end
+  -- Already have the perk card on board
+  if S.healthMonitorAccessOwner == color then
+    safeBroadcastToColor("You already have Health Monitor Access on your board.", color, {0.85, 0.9, 1})
+    return true
+  end
+  -- Block if they already bought a Health Monitor from the shop (no free copy on top)
+  if ownsBoughtHealthMonitor(color) then
+    safeBroadcastToColor("You already own a Health Monitor from the shop. You cannot also receive the free Public Servant perk copy.", color, {1, 0.7, 0.2})
+    return false
+  end
+  -- Perk card can only be used by the Public Servant; it should be unassigned (nil) when they click
+  if S.healthMonitorAccessOwner and S.healthMonitorAccessOwner ~= color then
+    -- Edge case: card was left with another color (e.g. from a previous game state). Clear and assign to this PS.
+    local card = getObjectFromGUID(TEMPLATE_HEALTH_MONITOR_GUID)
+    if card and card.removeTag then
+      pcall(function()
+        card.removeTag(colorTag(S.healthMonitorAccessOwner))
+        card.removeTag(TAG_OWNER_PREFIX .. S.healthMonitorAccessOwner)
+      end)
+    end
+    if S.ownedHiTech[S.healthMonitorAccessOwner] then
+      for i = #S.ownedHiTech[S.healthMonitorAccessOwner], 1, -1 do
+        if S.ownedHiTech[S.healthMonitorAccessOwner][i] == PS_HMONITOR_CARD_NAME then
+          table.remove(S.ownedHiTech[S.healthMonitorAccessOwner], i)
+          break
+        end
+      end
+    end
+  end
+  local card = getObjectFromGUID(TEMPLATE_HEALTH_MONITOR_GUID)
+  if not card then
+    log("placePublicServantHealthMonitorProxy: Card not found (GUID " .. tostring(TEMPLATE_HEALTH_MONITOR_GUID) .. ")")
+    safeBroadcastToColor("Health Monitor Access not found. Park it under the table (GUID 657dd1).", color, {1, 0.5, 0.2})
+    return false
+  end
+  S.healthMonitorAccessOwner = color
+  if not S.ownedHiTech[color] then S.ownedHiTech[color] = {} end
+  table.insert(S.ownedHiTech[color], PS_HMONITOR_CARD_NAME)
+  pcall(function()
+    card.setName(PS_HMONITOR_CARD_NAME)
+    card.setDescription("Public Servant perk: free access to Health Monitor.\nSame use as shop Health Monitor (roll vs SICK).\nCannot be traded or sold.")
+    card.addTag(TAG_PERK_PROXY)
+    card.addTag(TAG_OWNER_PREFIX .. color)
+  end)
+  -- Clear any broken state so the proxy does not show "Repair" when first placed
+  local engine = resolveEventEngine()
+  if engine and engine.call then
+    pcall(function() engine.call("API_clearBrokenHiTechForCard", { color = color, cardName = PS_HMONITOR_CARD_NAME }) end)
+  end
+  giveCardToPlayer(card, color)
+  safeBroadcastToColor("Health Monitor Access moved to your board (Public Servant perk). Use the card like the shop Health Monitor.", color, {0.7, 1, 0.7})
+  return true
+end
+
+function API_placePublicServantHealthMonitorProxy(params)
+  params = params or {}
+  local color = params.color and (params.color .. ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if not color or color == "" then return false end
+  local c = color:sub(1, 1):upper() .. color:sub(2):lower()
+  if c == "Yellow" or c == "Blue" or c == "Red" or c == "Green" then
+    return placePublicServantHealthMonitorProxy(c)
+  end
+  return false
+end
+
+-- Returns true if this player already has the Health Monitor Access card on their board (so UI can hide the button).
+function API_hasHealthMonitorAccess(params)
+  params = params or {}
+  local color = params.color and (params.color .. ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if not color or color == "" then return false end
+  local c = color:sub(1, 1):upper() .. color:sub(2):lower()
+  return (S.healthMonitorAccessOwner == c)
+end
+
+-- =========================
+-- [S8E] PUBLIC SERVANT PERK: Anti-burglary Alarm (move single tile f9d04d, same mechanics as ALARM)
+-- =========================
+local PS_ALARM_CARD_NAME = "HSHOP_11_ALARM"  -- same name as shop so API_ownsHiTech(..., kind="ALARM") works for theft check
+
+local function placePublicServantAlarmProxy(color)
+  if not color or color == "White" then return false, "Invalid color" end
+  if S.alarmAccessOwner == color then
+    safeBroadcastToColor("You already have Anti-burglary Alarm on your board.", color, {0.85, 0.9, 1})
+    return true
+  end
+  if ownsHiTechKind(color, "ALARM") then
+    safeBroadcastToColor("You already own an Anti-burglary Alarm (from the shop or perk). You cannot receive a second copy.", color, {1, 0.7, 0.2})
+    return false
+  end
+  if S.alarmAccessOwner and S.alarmAccessOwner ~= color then
+    local card = getObjectFromGUID(TEMPLATE_ALARM_GUID)
+    if card and card.removeTag then
+      pcall(function()
+        card.removeTag(colorTag(S.alarmAccessOwner))
+        card.removeTag(TAG_OWNER_PREFIX .. S.alarmAccessOwner)
+      end)
+    end
+    if S.ownedHiTech[S.alarmAccessOwner] then
+      for i = #S.ownedHiTech[S.alarmAccessOwner], 1, -1 do
+        if S.ownedHiTech[S.alarmAccessOwner][i] == PS_ALARM_CARD_NAME then
+          table.remove(S.ownedHiTech[S.alarmAccessOwner], i)
+          break
+        end
+      end
+    end
+  end
+  local card = getObjectFromGUID(TEMPLATE_ALARM_GUID)
+  if not card then
+    log("placePublicServantAlarmProxy: Card not found (GUID " .. tostring(TEMPLATE_ALARM_GUID) .. ")")
+    safeBroadcastToColor("Anti-burglary Alarm not found. Park it at parking position (GUID f9d04d).", color, {1, 0.5, 0.2})
+    return false
+  end
+  S.alarmAccessOwner = color
+  if not S.ownedHiTech[color] then S.ownedHiTech[color] = {} end
+  table.insert(S.ownedHiTech[color], PS_ALARM_CARD_NAME)
+  pcall(function()
+    card.setName(PS_ALARM_CARD_NAME)
+    card.setDescription("Public Servant perk: free Anti-burglary Alarm.\nTheft protection (same as shop).\nCannot be traded or sold.")
+    card.addTag(TAG_PERK_PROXY)
+    card.addTag(TAG_OWNER_PREFIX .. color)
+  end)
+  local engine = resolveEventEngine()
+  if engine and engine.call then
+    pcall(function() engine.call("API_clearBrokenHiTechForCard", { color = color, cardName = PS_ALARM_CARD_NAME }) end)
+  end
+  giveCardToPlayer(card, color)
+  safeBroadcastToColor("Anti-burglary Alarm moved to your board (Public Servant perk). Theft protection active.", color, {0.7, 1, 0.7})
+  return true
+end
+
+function API_placePublicServantAlarmProxy(params)
+  params = params or {}
+  local color = params.color and (params.color .. ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if not color or color == "" then return false end
+  local c = color:sub(1, 1):upper() .. color:sub(2):lower()
+  if c == "Yellow" or c == "Blue" or c == "Red" or c == "Green" then
+    return placePublicServantAlarmProxy(c)
+  end
+  return false
+end
+
+function API_hasAlarmAccess(params)
+  params = params or {}
+  local color = params.color and (params.color .. ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if not color or color == "" then return false end
+  local c = color:sub(1, 1):upper() .. color:sub(2):lower()
+  return (S.alarmAccessOwner == c)
+end
+
+-- =========================
+-- [S8F] PUBLIC SERVANT PERK: New Car (move single tile 1f3658, same mechanics as CAR)
+-- =========================
+local PS_CAR_CARD_NAME = "HSHOP_09_CAR"  -- same name as shop so API_ownsHiTech(..., kind="CAR") works
+
+local function placePublicServantCarProxy(color)
+  if not color or color == "White" then return false, "Invalid color" end
+  if S.carAccessOwner == color then
+    safeBroadcastToColor("You already have New Car on your board.", color, {0.85, 0.9, 1})
+    return true
+  end
+  if ownsHiTechKind(color, "CAR") then
+    safeBroadcastToColor("You already own a Car (from the shop or perk). You cannot receive a second copy.", color, {1, 0.7, 0.2})
+    return false
+  end
+  if S.carAccessOwner and S.carAccessOwner ~= color then
+    local card = getObjectFromGUID(TEMPLATE_CAR_GUID)
+    if card and card.removeTag then
+      pcall(function()
+        card.removeTag(colorTag(S.carAccessOwner))
+        card.removeTag(TAG_OWNER_PREFIX .. S.carAccessOwner)
+      end)
+    end
+    if S.ownedHiTech[S.carAccessOwner] then
+      for i = #S.ownedHiTech[S.carAccessOwner], 1, -1 do
+        if S.ownedHiTech[S.carAccessOwner][i] == PS_CAR_CARD_NAME then
+          table.remove(S.ownedHiTech[S.carAccessOwner], i)
+          break
+        end
+      end
+    end
+  end
+  local card = getObjectFromGUID(TEMPLATE_CAR_GUID)
+  if not card then
+    log("placePublicServantCarProxy: Card not found (GUID " .. tostring(TEMPLATE_CAR_GUID) .. ")")
+    safeBroadcastToColor("New Car not found. Park it at parking position (GUID 1f3658).", color, {1, 0.5, 0.2})
+    return false
+  end
+  S.carAccessOwner = color
+  if not S.ownedHiTech[color] then S.ownedHiTech[color] = {} end
+  table.insert(S.ownedHiTech[color], PS_CAR_CARD_NAME)
+  pcall(function()
+    card.setName(PS_CAR_CARD_NAME)
+    card.setDescription("Public Servant perk: free Car.\nSame as shop (free shop/estate entry; Event cards -1 AP).\nCannot be traded or sold.")
+    card.addTag(TAG_PERK_PROXY)
+    card.addTag(TAG_OWNER_PREFIX .. color)
+  end)
+  local engine = resolveEventEngine()
+  if engine and engine.call then
+    pcall(function() engine.call("API_clearBrokenHiTechForCard", { color = color, cardName = PS_CAR_CARD_NAME }) end)
+  end
+  giveCardToPlayer(card, color)
+  safeBroadcastToColor("New Car moved to your board (Public Servant perk). Free shop entry; Event cards -1 AP.", color, {0.7, 1, 0.7})
+  return true
+end
+
+function API_placePublicServantCarProxy(params)
+  params = params or {}
+  local color = params.color and (params.color .. ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if not color or color == "" then return false end
+  local c = color:sub(1, 1):upper() .. color:sub(2):lower()
+  if c == "Yellow" or c == "Blue" or c == "Red" or c == "Green" then
+    return placePublicServantCarProxy(c)
+  end
+  return false
+end
+
+function API_hasCarAccess(params)
+  params = params or {}
+  local color = params.color and (params.color .. ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if not color or color == "" then return false end
+  local c = color:sub(1, 1):upper() .. color:sub(2):lower()
+  return (S.carAccessOwner == c)
 end
 
 -- =========================
@@ -3136,6 +3533,17 @@ local function attemptBuyCard(card, buyerColor, options)
   local discountTokens = (row == "C" or row == "H") and options.discountTokens and options.voucherTag and math.max(0, math.min(4, math.floor(tonumber(options.discountTokens) or 0))) or 0
   if discountTokens > 0 then
     cost = math.max(0, math.floor(cost * (1 - 0.25 * discountTokens)))
+  end
+
+  -- Public Servant: 50% off consumables only (stacks with vouchers). Not for Hi-Tech or Investments.
+  if row == "C" then
+    local voc = firstWithTag(TAG_VOCATIONS_CTRL)
+    if voc and voc.call then
+      local ok, vocation = pcall(function() return voc.call("VOC_GetVocation", { color = buyerColor }) end)
+      if ok and vocation == "PUBLIC_SERVANT" then
+        cost = math.max(0, math.floor(cost * 0.5))
+      end
+    end
   end
 
   local okMoney = moneySpend(buyerColor, cost)
@@ -4472,10 +4880,64 @@ local function pipeline_RESET()
   S.boughtThisTurn = {}
   S.ownedHiTech = { Yellow={}, Blue={}, Red={}, Green={} }
   S.permanentRestEquivalent = { Yellow=0, Blue=0, Red=0, Green=0 }
-  
+  -- Return Health Monitor / Alarm / Car tiles to parking with staggered delays to avoid overlap
+  if S.healthMonitorAccessOwner then
+    local card = getObjectFromGUID(TEMPLATE_HEALTH_MONITOR_GUID)
+    if card and card.removeTag then
+      pcall(function()
+        card.removeTag(colorTag(S.healthMonitorAccessOwner))
+        card.removeTag(TAG_OWNER_PREFIX .. S.healthMonitorAccessOwner)
+      end)
+    end
+    if HEALTH_MONITOR_PARKING_POSITION and type(HEALTH_MONITOR_PARKING_POSITION) == "table" and HEALTH_MONITOR_PARKING_POSITION.x and card then
+      Wait.time(function()
+        if card and card.setPosition then pcall(function() card.setPosition(HEALTH_MONITOR_PARKING_POSITION) end) end
+      end, 0)
+    end
+  end
+  S.healthMonitorAccessOwner = nil
+
+  if S.alarmAccessOwner then
+    local card = getObjectFromGUID(TEMPLATE_ALARM_GUID)
+    if card and card.removeTag then
+      pcall(function()
+        card.removeTag(colorTag(S.alarmAccessOwner))
+        card.removeTag(TAG_OWNER_PREFIX .. S.alarmAccessOwner)
+      end)
+    end
+    if ALARM_PARKING_POSITION and type(ALARM_PARKING_POSITION) == "table" and ALARM_PARKING_POSITION.x and card then
+      Wait.time(function()
+        if card and card.setPosition then pcall(function() card.setPosition(ALARM_PARKING_POSITION) end) end
+      end, 0.6)
+    end
+  end
+  S.alarmAccessOwner = nil
+
+  if S.carAccessOwner then
+    local card = getObjectFromGUID(TEMPLATE_CAR_GUID)
+    if card and card.removeTag then
+      pcall(function()
+        card.removeTag(colorTag(S.carAccessOwner))
+        card.removeTag(TAG_OWNER_PREFIX .. S.carAccessOwner)
+      end)
+    end
+    if CAR_PARKING_POSITION and type(CAR_PARKING_POSITION) == "table" and CAR_PARKING_POSITION.x and card then
+      Wait.time(function()
+        if card and card.setPosition then pcall(function() card.setPosition(CAR_PARKING_POSITION) end) end
+      end, 1.2)
+    end
+  end
+  S.carAccessOwner = nil
+
   -- Reset Hi-Tech usage tracking
   hitechUsageThisTurn = { Yellow={}, Blue={}, Red={}, Green={} }
   pendingTVUse = {}
+
+  -- Clear broken hi-tech state so new game does not show spurious Repair on proxy tiles
+  local eventEngine = resolveEventEngine()
+  if eventEngine and eventEngine.call then
+    pcall(function() eventEngine.call("API_ClearBrokenState", {}) end)
+  end
 
   safeBroadcastAll("🛒 SHOP RESET…", {0.8,0.9,1})
 
@@ -5148,6 +5610,39 @@ function API_getOwnedHiTech(params)
   return {}
 end
 
+-- Get Hi-Tech definition (for repair cost etc.). For perk cards with cost=0, returns equivalent shop cost.
+function API_getHiTechDef(params)
+  local cardName = params and params.cardName
+  if not cardName or type(cardName) ~= "string" then return nil end
+  local def = HI_TECH_DEF[cardName]
+  if not def then return nil end
+  local cost = def.cost or 0
+  if cost == 0 and def.kind then
+    -- Perk cards: use equivalent shop item cost for repair (25% of original)
+    if def.kind == "HMONITOR" then cost = 300
+    elseif def.kind == "ALARM" then cost = 700
+    elseif def.kind == "CAR" then cost = 1200
+    end
+  end
+  return { cost = cost, kind = def.kind }
+end
+
+-- Refresh Hi-Tech card buttons for a color (e.g. after Hi-Tech Failure so broken card shows Repair button).
+-- Called by Event Engine after breaking an item.
+function API_RefreshHiTechButtonsForColor(params)
+  local color = params and (params.color or params.player_color)
+  if type(color) ~= "string" or color == "" then return false end
+  color = normalizeColor(color)
+  local tag = colorTag(color)
+  for _, o in ipairs(getAllObjects()) do
+    if o and (o.tag == "Card" or o.tag == "Tile") and o.hasTag and o.hasTag("WLB_HI_TECH") and o.hasTag(tag) then
+      pcall(function() o.clearButtons() end)
+      attachHiTechInteractiveButton(o, color)
+    end
+  end
+  return true
+end
+
 -- =========================
 -- [S16] SAVE / LOAD
 -- =========================
@@ -5160,7 +5655,10 @@ function onSave()
     lastTurnColor = S.lastTurnColor,
     ownedHiTech = S.ownedHiTech,
     permanentRestEquivalent = S.permanentRestEquivalent,
-    investments = S.investments
+    investments = S.investments,
+    healthMonitorAccessOwner = S.healthMonitorAccessOwner,
+    alarmAccessOwner = S.alarmAccessOwner,
+    carAccessOwner = S.carAccessOwner
   }
   return JSON.encode(stateToSave)
 end
@@ -5207,6 +5705,15 @@ function onLoad(saved_data)
       end
       if data.permanentRestEquivalent then
         S.permanentRestEquivalent = data.permanentRestEquivalent
+      end
+      if data.healthMonitorAccessOwner and type(data.healthMonitorAccessOwner) == "string" and data.healthMonitorAccessOwner ~= "" then
+        S.healthMonitorAccessOwner = normalizeColor(data.healthMonitorAccessOwner)
+      end
+      if data.alarmAccessOwner and type(data.alarmAccessOwner) == "string" and data.alarmAccessOwner ~= "" then
+        S.alarmAccessOwner = normalizeColor(data.alarmAccessOwner)
+      end
+      if data.carAccessOwner and type(data.carAccessOwner) == "string" and data.carAccessOwner ~= "" then
+        S.carAccessOwner = normalizeColor(data.carAccessOwner)
       end
       if data.investments then
         -- Normalize color keys in investments

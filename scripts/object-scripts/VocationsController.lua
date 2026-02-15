@@ -15,6 +15,8 @@ local TAG_BOARD = "WLB_BOARD"
 local TAG_VOCATION_TILE = "WLB_VOCATION_TILE"
 local COLOR_TAG_PREFIX = "WLB_COLOR_"
 local TAG_TURN_CTRL = "WLB_TURN_CTRL"
+local TAG_TOKEN_ENGINE = "WLB_TOKEN_ENGINE"
+local TAG_STATUS_EXPERIENCE = "WLB_STATUS_EXPERIENCE"
 local TAG_STATS_CTRL = "WLB_STATS_CTRL"
 local TAG_AP_CTRL = "WLB_AP_CTRL"
 local TAG_MONEY = "WLB_MONEY"
@@ -475,7 +477,12 @@ local state = {
   levels = { Yellow=1, Blue=1, Red=1, Green=1 },
   workAP = { Yellow=0, Blue=0, Red=0, Green=0 },  -- Cumulative AP spent on work
   workAPThisLevel = { Yellow=0, Blue=0, Red=0, Green=0 },  -- AP spent on work at current level (for Celebrity)
+  workAPThisRound = { Yellow=0, Blue=0, Red=0, Green=0 },  -- Work AP this round (for Public Servant obligation 2–4 AP/year)
+  experienceYearsEarned = { Yellow=0, Blue=0, Red=0, Green=0 },  -- For Public Servant: years at level where obligation was met (counts for promotion)
+  noSpecialAwardThisYear = { Yellow=false, Blue=false, Red=false, Green=false },  -- PS L3: set if failed obligation
   levelUpRound = { Yellow=nil, Blue=nil, Red=nil, Green=nil },  -- Round when player reached current vocation level (for Time/Experience)
+  -- Public Servant: Mastery of Administrative Law – one tax waiver per vocation level (level at which waiver was used, or nil)
+  taxWaiverUsedAtLevel = { Yellow=nil, Blue=nil, Red=nil, Green=nil },
 }
 
 -- =========================================================
@@ -1089,6 +1096,18 @@ local function getCurrentRound()
   local ok, r = pcall(function() return yt.call("getRound") end)
   if ok and type(r) == "number" and r >= 1 then return r end
   return 1
+end
+
+-- Helper to find Token Engine (for experience token)
+local function findTokenEngine()
+  local list = getObjectsWithTag and getObjectsWithTag(TAG_TOKEN_ENGINE) or {}
+  for _, o in ipairs(list) do
+    if o and o.call then return o end
+  end
+  for _, o in ipairs(getAllObjects()) do
+    if o and o.hasTag and o.hasTag(TAG_TOKEN_ENGINE) and o.call then return o end
+  end
+  return nil
 end
 
 -- Helper to find Turn Controller
@@ -2291,7 +2310,11 @@ local function loadState()
       state.levels = data.levels or state.levels
       state.workAP = data.workAP or state.workAP
       state.workAPThisLevel = data.workAPThisLevel or state.workAPThisLevel
+      state.workAPThisRound = data.workAPThisRound or state.workAPThisRound
+      state.experienceYearsEarned = data.experienceYearsEarned or state.experienceYearsEarned
+      state.noSpecialAwardThisYear = data.noSpecialAwardThisYear or state.noSpecialAwardThisYear
       state.levelUpRound = data.levelUpRound or state.levelUpRound
+      state.taxWaiverUsedAtLevel = data.taxWaiverUsedAtLevel or state.taxWaiverUsedAtLevel
       -- Backfill: if a player has a vocation but no levelUpRound (old save), treat as round 1
       for _, c in ipairs(COLORS) do
         if state.vocations[c] and (state.levelUpRound[c] == nil or state.levelUpRound[c] == 0) then
@@ -2309,7 +2332,11 @@ local function saveState()
     levels = state.levels,
     workAP = state.workAP,
     workAPThisLevel = state.workAPThisLevel,
+    workAPThisRound = state.workAPThisRound,
+    experienceYearsEarned = state.experienceYearsEarned,
+    noSpecialAwardThisYear = state.noSpecialAwardThisYear,
     levelUpRound = state.levelUpRound,
+    taxWaiverUsedAtLevel = state.taxWaiverUsedAtLevel,
   }
   self.script_state = JSON.encode(data)
 end
@@ -2561,7 +2588,11 @@ function VOC_ResetForNewGame(params)
   state.levels = { Yellow = 1, Blue = 1, Red = 1, Green = 1 }
   state.workAP = { Yellow = 0, Blue = 0, Red = 0, Green = 0 }
   state.workAPThisLevel = { Yellow = 0, Blue = 0, Red = 0, Green = 0 }
+  state.workAPThisRound = { Yellow = 0, Blue = 0, Red = 0, Green = 0 }
+  state.experienceYearsEarned = { Yellow = 0, Blue = 0, Red = 0, Green = 0 }
+  state.noSpecialAwardThisYear = { Yellow = false, Blue = false, Red = false, Green = false }
   state.levelUpRound = { Yellow = nil, Blue = nil, Red = nil, Green = nil }
+  state.taxWaiverUsedAtLevel = { Yellow = nil, Blue = nil, Red = nil, Green = nil }
   state.currentPickerColor = nil
   selectionState.activeColor = nil
   selectionState.shownSummary = nil
@@ -2650,6 +2681,56 @@ function VOC_GetLevel(params)
   return state.levels[color] or 1
 end
 
+-- Public Servant: Mastery of Administrative Law – one tax waiver per vocation level.
+-- Returns true if this player is Public Servant and has not used their waiver for the current level.
+function API_CanPublicServantWaiveTax(params)
+  local color = normalizeColor(params and params.color)
+  if not color then return false end
+  if state.vocations[color] ~= VOC_PUBLIC_SERVANT then return false end
+  local level = state.levels[color] or 1
+  local usedAt = state.taxWaiverUsedAtLevel[color]
+  return (usedAt == nil or usedAt ~= level)
+end
+
+-- Mark that the Public Servant used their tax waiver for the current level (once per level).
+function API_UsePublicServantTaxWaiver(params)
+  local color = normalizeColor(params and params.color)
+  if not color then return false end
+  if state.vocations[color] ~= VOC_PUBLIC_SERVANT then return false end
+  local level = state.levels[color] or 1
+  state.taxWaiverUsedAtLevel[color] = level
+  return true
+end
+
+-- Returns "Tax can be waived" or "Tax obligation" for the summary UI (Public Servant only). Others return "".
+function API_GetPublicServantTaxWaiverStatus(params)
+  local color = normalizeColor(params and params.color)
+  if not color then return "" end
+  if state.vocations[color] ~= VOC_PUBLIC_SERVANT then return "" end
+  local level = state.levels[color] or 1
+  local usedAt = state.taxWaiverUsedAtLevel[color]
+  if usedAt == nil or usedAt ~= level then
+    return "Tax can be waived"
+  end
+  return "Tax obligation"
+end
+
+-- Overworking satisfaction loss (general rule). NGO Worker is exempt.
+-- workAPThisTurn: 0-2 → 0 sat loss, 3-4 → 1, 5-6 → 2, 7-8 → 3, 9+ → 4.
+-- Returns the number of satisfaction points to deduct (0 if NGO Worker or no loss).
+function API_GetOverworkSatLoss(params)
+  params = params or {}
+  local color = normalizeColor(params.color)
+  if not color then return 0 end
+  if state.vocations[color] == VOC_NGO_WORKER then return 0 end
+  local work = math.max(0, math.floor(tonumber(params.workAPThisTurn) or 0))
+  if work <= 2 then return 0 end
+  if work <= 4 then return 1 end
+  if work <= 6 then return 2 end
+  if work <= 8 then return 3 end
+  return 4
+end
+
 function VOC_GetSalary(params)
   local color = normalizeColor(params.color)
   if not color then return 0 end
@@ -2674,10 +2755,11 @@ function VOC_AddWorkAP(params)
   
   state.workAP[color] = (state.workAP[color] or 0) + amount
   state.workAPThisLevel[color] = (state.workAPThisLevel[color] or 0) + amount
+  state.workAPThisRound[color] = (state.workAPThisRound[color] or 0) + amount
   
   saveState()
   
-  log("Work AP added: " .. color .. " +" .. amount .. " (total: " .. state.workAP[color] .. ", this level: " .. state.workAPThisLevel[color] .. ")")
+  log("Work AP added: " .. color .. " +" .. amount .. " (total: " .. state.workAP[color] .. ", this level: " .. state.workAPThisLevel[color] .. ", this round: " .. (state.workAPThisRound[color] or 0) .. ")")
   
   return true
 end
@@ -2696,11 +2778,178 @@ function VOC_GetWorkAPThisLevel(params)
   return state.workAPThisLevel[color] or 0
 end
 
+-- Experience token tag (must match TokenEngine WLB_STATUS_EXPERIENCE)
+local TAG_STATUS_EXPERIENCE = "WLB_STATUS_EXPERIENCE"
+
+-- Called by TurnController at end of each round (round that just finished). Work obligation for Public Servant; give experience tokens; reset workAPThisRound.
+function VOC_OnRoundEnd(params)
+  params = params or {}
+  local roundJustEnded = tonumber(params.round) or getCurrentRound()
+
+  for _, color in ipairs(COLORS) do
+    state.workAPThisRound[color] = state.workAPThisRound[color] or 0
+  end
+
+  local tokenEngine = findTokenEngine()
+
+  for _, color in ipairs(COLORS) do
+    local vocation = state.vocations[color]
+    if not vocation then
+      -- skip: no vocation
+    else
+    local level = state.levels[color] or 1
+    local workThisRound = state.workAPThisRound[color] or 0
+    local giveExperience = false
+
+    if vocation == VOC_PUBLIC_SERVANT then
+      -- Work obligation: must work 2–4 AP per year
+      local inRange = (workThisRound >= 2 and workThisRound <= 4)
+      if level == 1 then
+        if not inRange then
+          safeBroadcastToColor("📋 Public Servant (L1): You worked " .. tostring(workThisRound) .. " AP this year (need 2–4). No experience token; this year does not count for promotion.", color, {1, 0.85, 0.3})
+        else
+          giveExperience = true
+          state.experienceYearsEarned[color] = (state.experienceYearsEarned[color] or 0) + 1
+        end
+      elseif level == 2 then
+        if not inRange then
+          local off = (workThisRound < 2) and (2 - workThisRound) or (workThisRound - 4)
+          local satLoss = math.max(0, off)
+          if satLoss > 0 then
+            for _ = 1, satLoss do satAdd(color, -1) end
+            safeBroadcastToColor("📋 Public Servant (L2): You worked " .. tostring(workThisRound) .. " AP (need 2–4). -" .. tostring(satLoss) .. " Satisfaction; no experience token this year.", color, {1, 0.85, 0.3})
+          else
+            safeBroadcastToColor("📋 Public Servant (L2): You worked " .. tostring(workThisRound) .. " AP (need 2–4). No experience token this year.", color, {1, 0.85, 0.3})
+          end
+        else
+          giveExperience = true
+          state.experienceYearsEarned[color] = (state.experienceYearsEarned[color] or 0) + 1
+        end
+      elseif level == 3 then
+        if not inRange then
+          local off = (workThisRound < 2) and (2 - workThisRound) or (workThisRound - 4)
+          local satLoss = math.max(0, off) * 2
+          if satLoss > 0 then
+            for _ = 1, satLoss do satAdd(color, -1) end
+            safeBroadcastToColor("📋 Public Servant (L3): You worked " .. tostring(workThisRound) .. " AP (need 2–4). -" .. tostring(satLoss) .. " Satisfaction; cannot gain special award this year.", color, {1, 0.85, 0.3})
+          else
+            safeBroadcastToColor("📋 Public Servant (L3): You worked " .. tostring(workThisRound) .. " AP (need 2–4). Cannot gain special award this year.", color, {1, 0.85, 0.3})
+          end
+          state.noSpecialAwardThisYear[color] = true
+        else
+          giveExperience = true
+        end
+      end
+    else
+      -- Other vocations: give experience token if they worked at all this round (optional: always give; user said "some get tokens whatever they do" – giving to all with vocation who worked)
+      giveExperience = (workThisRound > 0)
+    end
+
+    if giveExperience and tokenEngine and tokenEngine.call then
+      pcall(function() tokenEngine.call("TE_AddStatus_ARGS", { color = color, statusTag = TAG_STATUS_EXPERIENCE }) end)
+      if vocation == VOC_PUBLIC_SERVANT and level <= 2 then
+        safeBroadcastToColor("📋 Experience token received (work obligation met: 2–4 AP this year).", color, {0.5, 1, 0.6})
+      end
+    end
+
+    end -- vocation
+  end
+
+  -- Reset work AP this round and "no special award" flag for next year
+  for _, c in ipairs(COLORS) do
+    state.workAPThisRound[c] = 0
+    state.noSpecialAwardThisYear[c] = false
+  end
+  saveState()
+  return true
+end
+
 function VOC_GetVocationData(params)
   local vocation = params.vocation
   if not vocation then return nil end
   
   return VOCATION_DATA[vocation]
+end
+
+-- Find Token Engine (for giving experience tokens)
+local function findTokenEngine()
+  for _, o in ipairs(getAllObjects()) do
+    if o and o.hasTag and o.hasTag(TAG_TOKEN_ENGINE) and o.call then return o end
+  end
+  return nil
+end
+
+-- Called by TurnController at end of each round (when turn wraps to next round). Work obligation + experience tokens.
+function VOC_OnRoundEnd(params)
+  params = params or {}
+  local roundJustFinished = tonumber(params.round) or getCurrentRound()
+  local tokenEngine = findTokenEngine()
+
+  -- Reset L3 "no special award" so this round we only set it for those who failed
+  for _, c in ipairs(COLORS) do
+    state.noSpecialAwardThisYear[c] = false
+  end
+
+  for _, color in ipairs(COLORS) do
+    local vocation = state.vocations[color]
+    if vocation and color ~= "White" then
+    local level = state.levels[color] or 1
+    local workThisRound = state.workAPThisRound[color] or 0
+    local inRange = (workThisRound >= 2 and workThisRound <= 4)
+    local giveExperience = false
+
+    if vocation == VOC_PUBLIC_SERVANT then
+      -- Work obligation: must work 2–4 AP per year
+      if level == 1 then
+        if not inRange then
+          safeBroadcastToColor("📋 Public Servant (L1): You worked " .. tostring(workThisRound) .. " AP this year (need 2–4). No experience token; this year does not count for promotion.", color, {1, 0.85, 0.4})
+        else
+          giveExperience = true
+          state.experienceYearsEarned[color] = (state.experienceYearsEarned[color] or 0) + 1
+        end
+      elseif level == 2 then
+        if not inRange then
+          local off = (workThisRound < 2) and (2 - workThisRound) or (workThisRound > 4) and (workThisRound - 4) or 0
+          local satLoss = math.max(0, off)
+          if satLoss > 0 then
+            satAdd(color, -satLoss)
+            safeBroadcastToColor("📋 Public Servant (L2): You worked " .. tostring(workThisRound) .. " AP (need 2–4). -" .. tostring(satLoss) .. " Satisfaction; no experience token this year.", color, {1, 0.6, 0.2})
+          else
+            safeBroadcastToColor("📋 Public Servant (L2): You worked " .. tostring(workThisRound) .. " AP (need 2–4). No experience token this year.", color, {1, 0.85, 0.4})
+          end
+        else
+          giveExperience = true
+          state.experienceYearsEarned[color] = (state.experienceYearsEarned[color] or 0) + 1
+        end
+      elseif level == 3 then
+        if not inRange then
+          local off = (workThisRound < 2) and (2 - workThisRound) or (workThisRound > 4) and (workThisRound - 4) or 0
+          local satLoss = math.max(0, off) * 2
+          if satLoss > 0 then satAdd(color, -satLoss) end
+          state.noSpecialAwardThisYear[color] = true
+          safeBroadcastToColor("📋 Public Servant (L3): You worked " .. tostring(workThisRound) .. " AP (need 2–4). " .. (satLoss > 0 and ("-" .. tostring(satLoss) .. " Satisfaction. ") or "") .. "No special award this year.", color, {1, 0.6, 0.2})
+        else
+          giveExperience = true
+          state.noSpecialAwardThisYear[color] = false
+        end
+      end
+    else
+      -- Other vocations: give experience token (they get it regardless of work – "whatever they do")
+      giveExperience = true
+    end
+
+    if giveExperience and tokenEngine and tokenEngine.call then
+      pcall(function()
+        tokenEngine.call("TE_AddStatus_ARGS", { color = color, statusTag = TAG_STATUS_EXPERIENCE })
+      end)
+    end
+
+    state.workAPThisRound[color] = 0
+    end -- vocation and not White
+  end
+
+  saveState()
+  return true
 end
 
 -- =========================================================
@@ -3360,6 +3609,99 @@ function VOC_StartPublicServantIncomeTax(params)
   end)
   
   return true
+end
+
+-- Public Servant perk: place Health Monitor Access (tile 657dd1) on player board; same use as shop Health Monitor
+function VOC_PlacePublicServantHealthMonitorAccess(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+  if color == "White" then
+    safeBroadcastToColor("Choose a player color (e.g. from a board) to place Health Monitor Access.", color, {1, 0.8, 0.3})
+    return false
+  end
+  if state.vocations[color] ~= VOC_PUBLIC_SERVANT then
+    safeBroadcastToColor("Only Public Servant can use Health Monitor Access.", color, {1, 0.7, 0.2})
+    return false
+  end
+  local shopEngine = nil
+  for _, o in ipairs(getAllObjects()) do
+    if o and o.hasTag and o.hasTag("WLB_SHOP_ENGINE") and o.call then
+      shopEngine = o
+      break
+    end
+  end
+  if not shopEngine then
+    safeBroadcastToColor("Shop Engine not found (tag WLB_SHOP_ENGINE). Cannot place Health Monitor Access.", color, {1, 0.5, 0.2})
+    return false
+  end
+  local ok = pcall(function()
+    return shopEngine.call("API_placePublicServantHealthMonitorProxy", { color = color })
+  end)
+  if ok then
+    return true
+  end
+  return false
+end
+
+-- Public Servant Level 2 perk: place Anti-burglary Alarm (tile f9d04d) on player board; same effect as shop ALARM
+function VOC_PlacePublicServantAlarmAccess(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+  if color == "White" then
+    safeBroadcastToColor("Choose a player color (e.g. from a board) to place Anti-burglary Alarm.", color, {1, 0.8, 0.3})
+    return false
+  end
+  if state.vocations[color] ~= VOC_PUBLIC_SERVANT then
+    safeBroadcastToColor("Only Public Servant can use Anti-burglary Alarm perk.", color, {1, 0.7, 0.2})
+    return false
+  end
+  local shopEngine = nil
+  for _, o in ipairs(getAllObjects()) do
+    if o and o.hasTag and o.hasTag("WLB_SHOP_ENGINE") and o.call then
+      shopEngine = o
+      break
+    end
+  end
+  if not shopEngine then
+    safeBroadcastToColor("Shop Engine not found (tag WLB_SHOP_ENGINE). Cannot place Anti-burglary Alarm.", color, {1, 0.5, 0.2})
+    return false
+  end
+  local ok, result = pcall(function()
+    return shopEngine.call("API_placePublicServantAlarmProxy", { color = color })
+  end)
+  return (ok and result == true)
+end
+
+-- Public Servant Level 3 perk: place New Car (tile 1f3658) on player board; same effect as shop CAR
+function VOC_PlacePublicServantCarAccess(params)
+  params = params or {}
+  local color = normalizeColor(params.color) or getActorColor()
+  if not color then return false, "Invalid color" end
+  if color == "White" then
+    safeBroadcastToColor("Choose a player color (e.g. from a board) to place New Car.", color, {1, 0.8, 0.3})
+    return false
+  end
+  if state.vocations[color] ~= VOC_PUBLIC_SERVANT then
+    safeBroadcastToColor("Only Public Servant can use New Car perk.", color, {1, 0.7, 0.2})
+    return false
+  end
+  local shopEngine = nil
+  for _, o in ipairs(getAllObjects()) do
+    if o and o.hasTag and o.hasTag("WLB_SHOP_ENGINE") and o.call then
+      shopEngine = o
+      break
+    end
+  end
+  if not shopEngine then
+    safeBroadcastToColor("Shop Engine not found (tag WLB_SHOP_ENGINE). Cannot place New Car.", color, {1, 0.5, 0.2})
+    return false
+  end
+  local ok, result = pcall(function()
+    return shopEngine.call("API_placePublicServantCarProxy", { color = color })
+  end)
+  return (ok and result == true)
 end
 
 function VOC_StartPublicServantHiTechTax(params)
@@ -4081,11 +4423,22 @@ function VOC_StartGangsterCrime(params)
         else
           safeBroadcastAll("🎲 Die result: "..die, {0.8,0.9,1})
         end
-        
+
+        local function targetHasAlarm(c)
+          local shop = nil
+          for _, o in ipairs(getAllObjects()) do
+            if o and o.hasTag and o.hasTag("WLB_SHOP_ENGINE") and o.call then shop = o break end
+          end
+          if not shop then return false end
+          local ok, has = pcall(function() return shop.call("API_ownsHiTech", { color = c, kind = "ALARM" }) end)
+          return (ok and has == true)
+        end
+
         local stolenMoney = 0
         local canStealItem = false
         local actualStolenAmount = 0  -- for Heat & Investigation restitution (Tier 3)
-        
+        local victimHasAlarm = targetHasAlarm(targetColor)
+
         if level == 1 then
           if die <= 2 then
             safeBroadcastAll("Crime: Failed → nothing happens.", {0.9,0.9,0.9})
@@ -4093,16 +4446,26 @@ function VOC_StartGangsterCrime(params)
           elseif die <= 4 then
             stolenMoney = 300
             addWoundedStatus(targetColor)
-            local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
-            actualStolenAmount = actualAmount or 0
-            safeBroadcastAll("Crime: Partial success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualAmount.." VIN.", {0.7,1,0.7})
+            if victimHasAlarm then
+              actualStolenAmount = 0
+              safeBroadcastAll("🔔 Alarm raised! "..targetColor.."'s Anti-burglary Alarm prevented the theft. "..initiatorColor.."'s attempt was noticed; "..targetColor.." is WOUNDED but nothing was stolen.", {0.9,0.85,0.5})
+            else
+              local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
+              actualStolenAmount = actualAmount or 0
+              safeBroadcastAll("Crime: Partial success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualStolenAmount.." VIN.", {0.7,1,0.7})
+            end
           else
             stolenMoney = 500
-            canStealItem = true
+            canStealItem = not victimHasAlarm
             addWoundedStatus(targetColor)
-            local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
-            actualStolenAmount = actualAmount or 0
-            safeBroadcastAll("Crime: Full success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualAmount.." VIN (or can choose High-Tech item).", {0.7,1,0.7})
+            if victimHasAlarm then
+              actualStolenAmount = 0
+              safeBroadcastAll("🔔 Alarm raised! "..targetColor.."'s Anti-burglary Alarm prevented the theft. "..initiatorColor.."'s attempt was noticed; "..targetColor.." is WOUNDED but nothing was stolen.", {0.9,0.85,0.5})
+            else
+              local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
+              actualStolenAmount = actualAmount or 0
+              safeBroadcastAll("Crime: Full success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualStolenAmount.." VIN (or can choose High-Tech item).", {0.7,1,0.7})
+            end
           end
           satAdd(initiatorColor, die)  -- Satisfaction = amount on D6
         elseif level == 2 then
@@ -4112,16 +4475,26 @@ function VOC_StartGangsterCrime(params)
           elseif die <= 4 then
             stolenMoney = 750
             addWoundedStatus(targetColor)
-            local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
-            actualStolenAmount = actualAmount or 0
-            safeBroadcastAll("Crime: Partial success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualAmount.." VIN.", {0.7,1,0.7})
+            if victimHasAlarm then
+              actualStolenAmount = 0
+              safeBroadcastAll("🔔 Alarm raised! "..targetColor.."'s Anti-burglary Alarm prevented the theft. "..initiatorColor.."'s attempt was noticed; "..targetColor.." is WOUNDED but nothing was stolen.", {0.9,0.85,0.5})
+            else
+              local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
+              actualStolenAmount = actualAmount or 0
+              safeBroadcastAll("Crime: Partial success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualStolenAmount.." VIN.", {0.7,1,0.7})
+            end
           else
             stolenMoney = 1000
-            canStealItem = true
+            canStealItem = not victimHasAlarm
             addWoundedStatus(targetColor)
-            local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
-            actualStolenAmount = actualAmount or 0
-            safeBroadcastAll("Crime: Full success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualAmount.." VIN (or can choose High-Tech item).", {0.7,1,0.7})
+            if victimHasAlarm then
+              actualStolenAmount = 0
+              safeBroadcastAll("🔔 Alarm raised! "..targetColor.."'s Anti-burglary Alarm prevented the theft. "..initiatorColor.."'s attempt was noticed; "..targetColor.." is WOUNDED but nothing was stolen.", {0.9,0.85,0.5})
+            else
+              local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
+              actualStolenAmount = actualAmount or 0
+              safeBroadcastAll("Crime: Full success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualStolenAmount.." VIN (or can choose High-Tech item).", {0.7,1,0.7})
+            end
           end
           satAdd(initiatorColor, die)
         else  -- level 3
@@ -4131,20 +4504,30 @@ function VOC_StartGangsterCrime(params)
           elseif die <= 4 then
             stolenMoney = 1500
             addWoundedStatus(targetColor)
-            local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
-            actualStolenAmount = actualAmount or 0
-            safeBroadcastAll("Crime: Partial success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualAmount.." VIN.", {0.7,1,0.7})
+            if victimHasAlarm then
+              actualStolenAmount = 0
+              safeBroadcastAll("🔔 Alarm raised! "..targetColor.."'s Anti-burglary Alarm prevented the theft. "..initiatorColor.."'s attempt was noticed; "..targetColor.." is WOUNDED but nothing was stolen.", {0.9,0.85,0.5})
+            else
+              local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
+              actualStolenAmount = actualAmount or 0
+              safeBroadcastAll("Crime: Partial success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualStolenAmount.." VIN.", {0.7,1,0.7})
+            end
           else
             stolenMoney = 2000
-            canStealItem = true
+            canStealItem = not victimHasAlarm
             addWoundedStatus(targetColor)
-            local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
-            actualStolenAmount = actualAmount or 0
-            safeBroadcastAll("Crime: Full success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualAmount.." VIN (or can choose High-Tech item).", {0.7,1,0.7})
+            if victimHasAlarm then
+              actualStolenAmount = 0
+              safeBroadcastAll("🔔 Alarm raised! "..targetColor.."'s Anti-burglary Alarm prevented the theft. "..initiatorColor.."'s attempt was noticed; "..targetColor.." is WOUNDED but nothing was stolen.", {0.9,0.85,0.5})
+            else
+              local _, actualAmount = stealMoney(targetColor, initiatorColor, stolenMoney)
+              actualStolenAmount = actualAmount or 0
+              safeBroadcastAll("Crime: Full success → "..targetColor.." gets WOUNDED and "..initiatorColor.." steals "..actualStolenAmount.." VIN (or can choose High-Tech item).", {0.7,1,0.7})
+            end
           end
           satAdd(initiatorColor, die)
         end
-        
+
         -- Heat & Investigation (only after successful crime)
         RunCrimeInvestigation({
           initiatorColor = initiatorColor,
@@ -4152,7 +4535,7 @@ function VOC_StartGangsterCrime(params)
           crimeGainsVIN = actualStolenAmount,
           targetColor = targetColor,
         })
-        
+
         -- Note: High-Tech item selection needs manual player action in the current system
         if canStealItem then
           safeBroadcastToColor("You can choose to steal a High-Tech item instead of the money. (Manual selection required)", color, {1,1,0.6})
@@ -4427,12 +4810,20 @@ function VOC_CanPromote(params)
     if skills < (promotion.skills or 0) then
       table.insert(parts, "Need " .. tostring(promotion.skills) .. " Skills (have " .. tostring(skills) .. ")")
     end
-    local currentRound = getCurrentRound()
-    local roundAtLevel = state.levelUpRound[color] or 1
-    local roundsAtLevel = math.max(0, currentRound - roundAtLevel)
     local needYears = promotion.experience or 0
-    if roundsAtLevel < needYears then
-      table.insert(parts, "Need " .. needYears .. " years at this level (have " .. roundsAtLevel .. " rounds)")
+    if vocation == VOC_PUBLIC_SERVANT then
+      -- Public Servant: only years where work obligation (2–4 AP) was met count
+      local yearsEarned = state.experienceYearsEarned[color] or 0
+      if yearsEarned < needYears then
+        table.insert(parts, "Need " .. needYears .. " years at this level with 2–4 work AP (have " .. yearsEarned .. ")")
+      end
+    else
+      local currentRound = getCurrentRound()
+      local roundAtLevel = state.levelUpRound[color] or 1
+      local roundsAtLevel = math.max(0, currentRound - roundAtLevel)
+      if roundsAtLevel < needYears then
+        table.insert(parts, "Need " .. needYears .. " years at this level (have " .. roundsAtLevel .. " rounds)")
+      end
     end
     if #parts > 0 then return false, failMsg(parts) end
     return true, "All requirements met"
@@ -4515,6 +4906,7 @@ function VOC_Promote(params)
   state.levels[color] = newLevel
   state.levelUpRound[color] = getCurrentRound()
   state.workAPThisLevel[color] = 0
+  state.experienceYearsEarned[color] = 0
   saveState()
   
   local vocationData = VOCATION_DATA[vocation]
@@ -4590,16 +4982,21 @@ local function getVocationActions(vocation, level)
     -- Special actions removed for now
     
   elseif vocation == VOC_PUBLIC_SERVANT then
-    -- Show only the action that matches the player's current level (Junior Clerk → Income Tax only, etc.)
+    -- Level action + level perk(s). For testing: at level 1 all three perks are available.
     if level == 1 then
       table.insert(actions, {buttonIndex = 1, label = "Income Tax Campaign", actionId = "PS_L1_INCOME_TAX"})
+      -- Testing: allow taking any of the three perks at level 1
+      table.insert(actions, {buttonIndex = 2, label = "Health Monitor Access", actionId = "PS_PERK_HEALTH_MONITOR_ACCESS"})
+      table.insert(actions, {buttonIndex = 3, label = "Anti-burglary Alarm", actionId = "PS_PERK_ALARM_ACCESS"})
+      table.insert(actions, {buttonIndex = 4, label = "New Car", actionId = "PS_PERK_CAR_ACCESS"})
     elseif level == 2 then
       table.insert(actions, {buttonIndex = 1, label = "Hi-Tech Tax Campaign", actionId = "PS_L2_HITECH_TAX"})
+      table.insert(actions, {buttonIndex = 2, label = "Anti-burglary Alarm", actionId = "PS_PERK_ALARM_ACCESS"})
     elseif level == 3 then
       table.insert(actions, {buttonIndex = 1, label = "Property Tax Campaign", actionId = "PS_L3_PROPERTY_TAX"})
+      table.insert(actions, {buttonIndex = 2, label = "New Car", actionId = "PS_PERK_CAR_ACCESS"})
     end
-    -- Special actions removed for now
-    
+
   elseif vocation == VOC_NGO_WORKER then
     -- Show buttons based on level
     if level >= 1 then
@@ -4696,6 +5093,12 @@ local function executeVocationActionById(actionId, params)
     return VOC_StartPublicServantHiTechTax(params)
   elseif actionId == "PS_L3_PROPERTY_TAX" then
     return VOC_StartPublicServantPropertyTax(params)
+  elseif actionId == "PS_PERK_HEALTH_MONITOR_ACCESS" then
+    return VOC_PlacePublicServantHealthMonitorAccess(params)
+  elseif actionId == "PS_PERK_ALARM_ACCESS" then
+    return VOC_PlacePublicServantAlarmAccess(params)
+  elseif actionId == "PS_PERK_CAR_ACCESS" then
+    return VOC_PlacePublicServantCarAccess(params)
   elseif actionId == "PS_SPECIAL_POLICY" then
     return VOC_StartPublicServantPolicy(params)
   elseif actionId == "PS_SPECIAL_BOTTLENECK" then
@@ -5343,6 +5746,33 @@ local function showSummaryUI(color, vocation, previewOnly, forColor)
     
     if shouldShowActions then
       local actions = getVocationActions(vocation, levelToUse)
+      -- Public Servant: hide perk buttons once they already have that card on their board
+      if vocation == VOC_PUBLIC_SERVANT and ownerColor then
+        local shopEngine = nil
+        for _, o in ipairs(getAllObjects()) do
+          if o and o.hasTag and o.hasTag("WLB_SHOP_ENGINE") and o.call then shopEngine = o break end
+        end
+        if shopEngine then
+          local okH, hasH = pcall(function() return shopEngine.call("API_hasHealthMonitorAccess", { color = ownerColor }) end)
+          if okH and hasH then
+            for i = #actions, 1, -1 do
+              if actions[i].actionId == "PS_PERK_HEALTH_MONITOR_ACCESS" then table.remove(actions, i) break end
+            end
+          end
+          local okA, hasA = pcall(function() return shopEngine.call("API_hasAlarmAccess", { color = ownerColor }) end)
+          if okA and hasA then
+            for i = #actions, 1, -1 do
+              if actions[i].actionId == "PS_PERK_ALARM_ACCESS" then table.remove(actions, i) break end
+            end
+          end
+          local okC, hasC = pcall(function() return shopEngine.call("API_hasCarAccess", { color = ownerColor }) end)
+          if okC and hasC then
+            for i = #actions, 1, -1 do
+              if actions[i].actionId == "PS_PERK_CAR_ACCESS" then table.remove(actions, i) break end
+            end
+          end
+        end
+      end
       log("showSummaryUI: getVocationActions returned "..#actions.." actions for vocation="..tostring(vocation)..", level="..levelToUse)
       updateActionButtons(actions)
       UI.setAttribute("vocationActionButtons", "active", "true")
@@ -5350,6 +5780,20 @@ local function showSummaryUI(color, vocation, previewOnly, forColor)
     else
       UI.setAttribute("vocationActionButtons", "active", "false")
       log("showSummaryUI: Hiding action buttons (viewer="..viewerColor..", owner="..tostring(ownerColor)..")")
+    end
+
+    -- Public Servant: show tax waiver status (non-clickable text). Add a Text element in Global UI with id "summaryTaxWaiverStatus".
+    local taxWaiverColor = ownerColor or viewerColor
+    if vocation == VOC_PUBLIC_SERVANT and taxWaiverColor then
+      local statusText = API_GetPublicServantTaxWaiverStatus({ color = taxWaiverColor })
+      pcall(function()
+        UI.setAttribute("summaryTaxWaiverStatus", "text", statusText or "Tax obligation")
+        UI.setAttribute("summaryTaxWaiverStatus", "active", "true")
+      end)
+    else
+      pcall(function()
+        UI.setAttribute("summaryTaxWaiverStatus", "active", "false")
+      end)
     end
     
     -- Verify the panel is actually active (with delay to allow UI to update)
