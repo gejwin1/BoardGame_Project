@@ -476,6 +476,7 @@ local function onTurnStart_AddRentalCosts(color)
   -- Rental costs apply to all owned apartments (rented or bought)
   -- Use same method as EstateEngine to ensure consistency
   local totalRentalCost = ESTATE_RENTAL_COST.L0  -- Default: 50 WIN (grandma's house)
+  local rentLevel = "L0"  -- For cost calculator tooltip
   local isRentedApartment = false  -- True if L1–L4 and card has ESTATE_MODE_RENT (Social Worker pays 50%)
   
   -- Search for estate cards with player's color tag AND ESTATE_OWNED tag
@@ -496,6 +497,7 @@ local function onTurnStart_AddRentalCosts(color)
           local cost = ESTATE_RENTAL_COST[level]
           if cost then
             totalRentalCost = cost  -- Use apartment's rental cost
+            rentLevel = level
             isRentedApartment = (o.hasTag(TAG_ESTATE_MODE_RENT) == true)
             log("Rental cost: Found "..level.." apartment for "..color..", cost="..tostring(cost)..", rented="..tostring(isRentedApartment))
             break  -- Player should only have one apartment
@@ -534,7 +536,7 @@ local function onTurnStart_AddRentalCosts(color)
     end
     
     local ok = pcall(function()
-      costsCalc.call("addCost", {color=color, amount=totalRentalCost})
+      costsCalc.call("addCost", {color=color, amount=totalRentalCost, label="Rent "..rentLevel})
     end)
     if ok then
       rentalCostAddedThisTurn[color] = true  -- Mark as added for this turn
@@ -1099,6 +1101,15 @@ local function setActiveByTurnIndex()
   rentalCostAddedThisTurn[c] = false
 
   globalCall("WLB_ON_TURN_CHANGED", { newColor = c, prevColor = prev })
+
+  -- ShopEngine: clear Entrepreneur "double prices" when that player's turn starts again
+  shopCall("API_OnTurnChanged", { newColor = c })
+
+  -- VocationsController: Gangster lockdown – opponents start turn with 1 AP moved to inactive
+  local voc = findOneByTags(TAG_VOCATIONS_CTRL)
+  if voc and voc.call then
+    pcall(function() voc.call("VOC_OnTurnStarted", { color = c }) end)
+  end
 
   -- Call for Auction: close JOINING and start BIDDING when initiator's turn comes again
   evtCall("Auction_OnTurnStart", { activeColor = c, finalOrder = W.finalOrder })
@@ -1852,19 +1863,30 @@ function API_GetPlayerColors(params)
   return shallowCopy(W.colors or {})
 end
 
+-- Returns turn order (finalOrder) for Flash Sale / other systems that need player order
+function API_GetTurnOrder(params)
+  if not W.finalOrder or #W.finalOrder == 0 then return {} end
+  local out = {}
+  for _, c in ipairs(W.finalOrder) do out[#out + 1] = c end
+  return out
+end
+
 -- =========================================================
 -- [S13] UI CORE
 -- =========================================================
 function noop() end
 
 local function btn(label, fn, x, z, w, h, fs, tip)
+  -- TTS createButton expects label and tooltip as strings; passing a table causes "cannot convert table to System.String"
+  local labelStr = (type(label) == "string") and label or tostring(label)
+  local tipStr = (type(tip) == "string") and tip or tostring(tip or "")
   self.createButton({
-    label=label,
+    label=labelStr,
     click_function=fn,
     function_owner=self,
     position={x, UIY, z},
     width=w, height=h, font_size=fs,
-    tooltip=tip or ""
+    tooltip=tipStr
   })
 end
 

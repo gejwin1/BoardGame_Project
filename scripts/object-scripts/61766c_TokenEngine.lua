@@ -48,6 +48,7 @@ local TAG_STATUS_ADDICTION   = "WLB_STATUS_ADDICTION"
 local TAG_STATUS_VOUCH_C     = "WLB_STATUS_VOUCH_C"   -- 25% discount Consumables
 local TAG_STATUS_VOUCH_H     = "WLB_STATUS_VOUCH_H"   -- 25% discount Hi-Tech
 local TAG_STATUS_VOUCH_P     = "WLB_STATUS_VOUCH_P"   -- 20% discount Properties
+local TAG_STATUS_AWARD       = "WLB_STATUS_AWARD"     -- Award progress (Public Servant, Social Worker, NGO, Gangster)
 
 -- Order of board statuses (slot 1..8) - canonical ordering (visual compact first-in)
 local STATUS_ORDER = {
@@ -60,6 +61,7 @@ local STATUS_ORDER = {
   TAG_STATUS_VOUCH_C,
   TAG_STATUS_VOUCH_H,
   TAG_STATUS_VOUCH_P,
+  TAG_STATUS_AWARD,
 }
 
 -- Multi-statuses:
@@ -72,6 +74,7 @@ local MULTI_STATUS = {
   [TAG_STATUS_VOUCH_C]   = true,
   [TAG_STATUS_VOUCH_H]   = true,
   [TAG_STATUS_VOUCH_P]   = true,
+  [TAG_STATUS_AWARD]     = true,
 }
 
 -- Vertical lift between stacked status tokens on the board (0.35 avoids collider overlap → no fly-away)
@@ -449,13 +452,25 @@ local function requestTokenByTag(tag)
     return nil
   end
   local list = POOL[tag]
-  if not list or #list == 0 then
-    dprint("No token available for tag:", tag)
-    return nil
+  if not list then POOL[tag] = {}; list = POOL[tag] end
+  if #list > 0 then
+    local tok = table.remove(list, 1)
+    pcall(function() if tok and tok.unlock then tok.unlock() end end)
+    return tok
   end
-  local tok = table.remove(list, 1)
-  pcall(function() if tok and tok.unlock then tok.unlock() end end)
-  return tok
+  -- Fallback: tokens may be stored on table (not in bag). Search for one by tag.
+  for _, obj in ipairs(getAllObjects()) do
+    if obj and obj.hasTag and obj.hasTag(TAG_STATUS_TOKEN) and obj.hasTag(tag) and not obj.hasTag(TAG_PLAYER_TOKEN) then
+      local parent = obj.getParent and obj.getParent()
+      if not parent or not (parent.hasTag and parent.hasTag(TAG_BOARD)) then
+        -- Token is on table, not on a board – available for use
+        pcall(function() if obj.unlock then obj.unlock() end end)
+        return obj
+      end
+    end
+  end
+  dprint("No token available for tag:", tag)
+  return nil
 end
 
 function primeTokenPool()
@@ -1084,6 +1099,7 @@ function btnAddADD(_,pc)  local c=resolveTargetColor(nil,pc); TE_AddStatus(c, TA
 function btnAddVouchC(_,pc) local c=resolveTargetColor(nil,pc); TE_AddStatus(c, TAG_STATUS_VOUCH_C) end
 function btnAddVouchH(_,pc) local c=resolveTargetColor(nil,pc); TE_AddStatus(c, TAG_STATUS_VOUCH_H) end
 function btnAddVouchP(_,pc) local c=resolveTargetColor(nil,pc); TE_AddStatus(c, TAG_STATUS_VOUCH_P) end
+function btnAddAward(_,pc)  local c=resolveTargetColor(nil,pc); TE_AddStatus(c, TAG_STATUS_AWARD) end
 
 -- Status remove (auto target)
 function btnRemGK(_,pc)   local c=resolveTargetColor(nil,pc); TE_RemoveStatus(c, TAG_STATUS_GOODKARMA) end
@@ -1095,6 +1111,7 @@ function btnRemADD(_,pc)  local c=resolveTargetColor(nil,pc); TE_RemoveStatus(c,
 function btnRemVouchC(_,pc) local c=resolveTargetColor(nil,pc); TE_RemoveStatus(c, TAG_STATUS_VOUCH_C) end
 function btnRemVouchH(_,pc) local c=resolveTargetColor(nil,pc); TE_RemoveStatus(c, TAG_STATUS_VOUCH_H) end
 function btnRemVouchP(_,pc) local c=resolveTargetColor(nil,pc); TE_RemoveStatus(c, TAG_STATUS_VOUCH_P) end
+function btnRemAward(_,pc)  local c=resolveTargetColor(nil,pc); TE_RemoveStatus(c, TAG_STATUS_AWARD) end
 function btnClearStatuses(_,pc) local c=resolveTargetColor(nil,pc); TE_ClearStatuses(c) end
 
 -- =========================

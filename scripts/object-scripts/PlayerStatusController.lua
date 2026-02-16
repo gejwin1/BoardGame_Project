@@ -36,6 +36,7 @@ local TAG_STATUS_EXPERIENCE = "WLB_STATUS_EXPERIENCE"
 local TAG_STATUS_VOUCH_C    = "WLB_STATUS_VOUCH_C"
 local TAG_STATUS_VOUCH_H    = "WLB_STATUS_VOUCH_H"
 local TAG_STATUS_VOUCH_P    = "WLB_STATUS_VOUCH_P"
+local TAG_STATUS_AWARD      = "WLB_STATUS_AWARD"
 
 -- High-level keys from EventEngine -> status tags
 -- (EventEngine can send either statusTag directly OR "effect"/"statusKey")
@@ -49,6 +50,7 @@ local MAP_KEY_TO_TAG = {
   VOUCH_C    = TAG_STATUS_VOUCH_C,
   VOUCH_H    = TAG_STATUS_VOUCH_H,
   VOUCH_P    = TAG_STATUS_VOUCH_P,
+  AWARD      = TAG_STATUS_AWARD,
 }
 
 -- State

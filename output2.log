@@ -1,0 +1,179 @@
+2026-02-15 14:23:57.041 [warning] [Main] [CursorProclistService] Native module unavailable; disabling proclist metrics: Cannot find module './build/Release/cursor_proclist.node'
+Require stack:
+- C:\Users\mpiet\AppData\Local\Programs\cursor\resources\app\node_modules\cursor-proclist\index.js
+- C:\Users\mpiet\AppData\Local\Programs\cursor\resources\app\out\main.js
+2026-02-15 14:23:57.057 [info] [Main] updateURL https://api2.cursor.sh/updates/api/update/win32-x64-user/cursor/2.4.37/4fd267dbdc19cf389bdb53602703d83051c4d65532a49bab163def4d851d51b9/stable
+2026-02-15 14:23:57.057 [info] [Main] update#setState idle
+2026-02-15 14:24:27.058 [info] [Main] update#setState checking for updates
+2026-02-15 14:24:27.210 [info] [Main] update#setState idle
+2026-02-15 15:24:27.063 [info] [Main] update#setState checking for updates
+2026-02-15 15:24:27.599 [info] [Main] update#setState idle
+2026-02-15 16:24:27.077 [info] [Main] update#setState checking for updates
+2026-02-15 16:24:27.661 [info] [Main] update#setState idle
+2026-02-15 16:29:01.118 [info] [Main] TracingService: failed to send envelope undefined undefined
+2026-02-15 17:06:16.360 [error] [Main] CodeWindow: renderer process gone (reason: oom, code: -536870904)
+2026-02-15 17:06:16.369 [info] [Main] Extension host with pid 25356 exited with code: 0, signal: unknown.
+2026-02-15 17:06:16.374 [info] [Main] Extension host with pid 21324 exited with code: 0, signal: unknown.
+2026-02-15 17:06:16.391 [info] [Main] Extension host with pid 8684 exited with code: 0, signal: unknown.
+2026-02-15 17:13:43.421 [error] [Main] CodeWindow: renderer process gone (reason: oom, code: -536870904)
+2026-02-15 17:13:43.436 [info] [Main] Extension host with pid 4892 exited with code: 0, signal: unknown.
+2026-02-15 17:13:43.441 [info] [Main] Extension host with pid 9580 exited with code: 0, signal: unknown.
+2026-02-15 17:13:43.451 [info] [Main] Extension host with pid 7864 exited with code: 0, signal: unknown.
+2026-02-15 17:15:41.980 [error] [Main] CodeWindow: renderer process gone (reason: oom, code: -536870904)
+2026-02-15 17:15:41.990 [info] [Main] Extension host with pid 8580 exited with code: 0, signal: unknown.
+2026-02-15 17:15:41.999 [info] [Main] Extension host with pid 13308 exited with code: 0, signal: unknown.
+2026-02-15 17:15:42.010 [info] [Main] Extension host with pid 7740 exited with code: 0, signal: unknown.
+2026-02-15 17:24:27.081 [info] [Main] update#setState checking for updates
+2026-02-15 17:24:27.232 [info] [Main] update#setState idle
+2026-02-15 18:24:27.085 [info] [Main] update#setState checking for updates
+2026-02-15 18:24:27.585 [info] [Main] update#setState idle
+2026-02-15 19:24:27.095 [info] [Main] update#setState checking for updates
+2026-02-15 19:24:27.621 [info] [Main] update#setState idle
+2026-02-15 20:05:19.299 [error] [Main] CodeWindow: renderer process gone (reason: oom, code: -536870904)
+2026-02-15 20:05:19.315 [info] [Main] Extension host with pid 25464 exited with code: 0, signal: unknown.
+2026-02-15 20:05:19.318 [info] [Main] Extension host with pid 17716 exited with code: 0, signal: unknown.
+2026-02-15 20:05:19.323 [info] [Main] Extension host with pid 20412 exited with code: 0, signal: unknown.
+2026-02-15 20:06:28.130 [warning] [Window] Missing property "rpcFileLoggerFolder" in oldValue. Filling with value from initValue. Please add a migration if necessary.
+2026-02-15 20:06:28.142 [info] [Window] [CursorExtensionIsolationService] Extension isolation is enabled
+2026-02-15 20:06:28.142 [warning] [Window] Via 'product.json#extensionEnabledApiProposals' extension 'ms-toolsai.datawrangler' wants API proposal 'debugFocus' but that proposal DOES NOT EXIST. Likely, the proposal has been finalized (check 'vscode.d.ts') or was abandoned.
+2026-02-15 20:06:28.143 [warning] [Window] Via 'product.json#extensionEnabledApiProposals' extension 'ms-vscode.vscode-copilot-data-analysis' wants API proposal 'chatVariableResolver' but that proposal DOES NOT EXIST. Likely, the proposal has been finalized (check 'vscode.d.ts') or was abandoned.
+2026-02-15 20:06:28.145 [warning] [Window] Via 'product.json#extensionEnabledApiProposals' extension 'ms-python.python' wants API proposal 'terminalShellType' but that proposal DOES NOT EXIST. Likely, the proposal has been finalized (check 'vscode.d.ts') or was abandoned.
+2026-02-15 20:06:28.145 [warning] [Window] Via 'product.json#extensionEnabledApiProposals' extension 'ms-python.vscode-python-envs' wants API proposal 'terminalShellType' but that proposal DOES NOT EXIST. Likely, the proposal has been finalized (check 'vscode.d.ts') or was abandoned.
+2026-02-15 20:06:28.145 [warning] [Window] Via 'product.json#extensionEnabledApiProposals' extension 'github.copilot-chat' wants API proposal 'chatReadonlyPromptReference' but that proposal DOES NOT EXIST. Likely, the proposal has been finalized (check 'vscode.d.ts') or was abandoned.
+2026-02-15 20:06:28.146 [warning] [Window] Via 'product.json#extensionEnabledApiProposals' extension 'ms-azuretools.vscode-azure-github-copilot' wants API proposal 'lmTools' but that proposal DOES NOT EXIST. Likely, the proposal has been finalized (check 'vscode.d.ts') or was abandoned.
+2026-02-15 20:06:28.146 [warning] [Window] Via 'product.json#extensionEnabledApiProposals' extension 'vscjava.vscode-java-pack' wants API proposal 'lmTools' but that proposal DOES NOT EXIST. Likely, the proposal has been finalized (check 'vscode.d.ts') or was abandoned.
+2026-02-15 20:06:28.147 [warning] [Window] Via 'product.json#extensionEnabledApiProposals' extension 'apidev.azure-api-center' wants API proposal 'chatParticipant' but that proposal DOES NOT EXIST. Likely, the proposal has been finalized (check 'vscode.d.ts') or was abandoned.
+2026-02-15 20:06:28.147 [warning] [Window] Via 'product.json#extensionEnabledApiProposals' extension 'apidev.azure-api-center' wants API proposal 'languageModels' but that proposal DOES NOT EXIST. Likely, the proposal has been finalized (check 'vscode.d.ts') or was abandoned.
+2026-02-15 20:06:28.264 [info] [Window] [storage] Database optimization (VACUUM) is disabled via feature flag
+2026-02-15 20:06:29.069 [info] [Window] Started local extension host with pid 1556.
+2026-02-15 20:06:30.977 [error] [Window] Extension 'openai.chatgpt' wants API proposal 'chatSessionsProvider' but that proposal DOES NOT EXIST. Likely, the proposal has been finalized (check 'vscode.d.ts') or was abandoned.
+2026-02-15 20:06:30.977 [error] [Window] Extension 'openai.chatgpt' wants API proposal 'languageModelProxy' but that proposal DOES NOT EXIST. Likely, the proposal has been finalized (check 'vscode.d.ts') or was abandoned.
+2026-02-15 20:06:30.983 [info] [Window] Placing extension(s) anysphere.cursor-always-local, anysphere.cursor-retrieval on a separate extension host.
+2026-02-15 20:06:30.983 [info] [Window] Placing extension(s) anysphere.cursor-agent-exec on a separate extension host.
+2026-02-15 20:06:31.667 [info] [Window] Started local extension host with pid 2120.
+2026-02-15 20:06:31.667 [info] [Window] Started local extension host with pid 19336.
+2026-02-15 20:06:32.803 [info] [Window] [WorktreeCleanupCron] Registering cleanup task with interval of 6 hours
+2026-02-15 20:06:32.803 [info] [Window] [WorktreeCleanupCron] Cleanup task registered with interval of 6 hours (21600000ms)
+2026-02-15 20:06:33.670 [info] [Window] [Debug] Registered command palette action: debug.getLayoutState
+2026-02-15 20:06:33.670 [info] [Window] [Debug] Registered command palette action: debug.simulateSidebarBug
+2026-02-15 20:06:33.671 [info] [Window] [Debug] Registered command palette action: debug.setSidebarPosition
+2026-02-15 20:06:33.671 [info] [Window] [Debug] Registered command palette action: debug.toggleSyncMode
+2026-02-15 20:06:33.671 [info] [Window] [Debug] Registered command palette action: debug.toggleAgentMode
+2026-02-15 20:06:33.671 [info] [Window] [Debug] Registered command palette action: debug.testLayoutPersistence
+2026-02-15 20:06:33.671 [info] [Window] [Debug] Registered command palette action: debug.classifyRecentConversations
+2026-02-15 20:06:33.672 [info] [Window] [Debug] Registered command palette action: debug.getApplicationProperty
+2026-02-15 20:06:33.672 [info] [Window] [Debug] Registered command palette action: debug.logComposer
+2026-02-15 20:06:33.672 [info] [Window] [Debug] Registered command palette action: debug.getContextKeyValue
+2026-02-15 20:06:33.672 [info] [Window] [Debug] Registered command palette action: debug.testLinearIssues
+2026-02-15 20:06:33.672 [info] [Window] [Debug] Registered command palette action: debug.resetThirdPartyExtensibilityNotification
+2026-02-15 20:06:33.673 [info] [Window] [Debug] Registered command palette action: debug.triggerThirdPartyExtensibilityNotification
+2026-02-15 20:06:33.702 [info] [Window] OpenInBrowserWatcher: Initializing terminal log watcher
+2026-02-15 20:06:33.740 [info] [Window] [Cursor Proclist Polling] Started polling (every 5 min)
+2026-02-15 20:06:34.346 [info] [Window] [perf] Render performance baseline is 27ms
+2026-02-15 20:06:52.175 [info] [Window] [LocalProcessExtensionHost] getDefaultShell result: C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe
+2026-02-15 20:06:52.176 [info] [Window] [LocalProcessExtensionHost] getDefaultShell result: C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe
+2026-02-15 20:06:52.176 [info] [Window] [LocalProcessExtensionHost] getDefaultShell result: C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe
+2026-02-15 20:06:52.177 [info] [Window] [LocalProcessExtensionHost] Final userTerminalHint: C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe
+2026-02-15 20:06:52.205 [info] [Window] [LocalProcessExtensionHost] Final userTerminalHint: C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe
+2026-02-15 20:06:52.223 [info] [Window] [LocalProcessExtensionHost] Final userTerminalHint: C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe
+2026-02-15 20:06:52.518 [info] [Extension Host] Extension host with pid 2120 started
+2026-02-15 20:06:52.518 [info] [Extension Host] Skipping acquiring lock for c:\Users\mpiet\AppData\Roaming\Cursor\User\workspaceStorage\fd586578877606591956a5c8fb271ded.
+2026-02-15 20:06:52.518 [info] [Extension Host] [ExtHostShellExec] Detecting sandbox support...
+2026-02-15 20:06:52.518 [info] [Extension Host] [ExtHostShellExec] Platform: win32, Shell type: unknown
+2026-02-15 20:06:52.518 [info] [Extension Host] [ExtHostShellExec] dirname: c:\Users\mpiet\AppData\Local\Programs\cursor\resources\app\out\vs\workbench\api\node
+2026-02-15 20:06:52.518 [info] [Extension Host] [ExtHostShellExec] Sandbox helper path: not found
+2026-02-15 20:06:52.518 [info] [Extension Host] [ExtHostShellExec] process.resourcesPath: C:\Users\mpiet\AppData\Local\Programs\cursor\resources
+2026-02-15 20:06:52.518 [info] [Extension Host] [ExtHostShellExec] process.execPath: C:\Users\mpiet\AppData\Local\Programs\cursor\Cursor.exe
+2026-02-15 20:06:52.518 [info] [Extension Host] [shell-exec:sandbox] [isSandboxHelperSupported] Starting sandbox support check...
+2026-02-15 20:06:52.518 [info] [Extension Host] [shell-exec:sandbox] [checkBinaryAvailable] Resolved binary path: undefined
+2026-02-15 20:06:52.518 [info] [Extension Host] [shell-exec:sandbox] [checkBinaryAvailable] Binary path not set, returning false
+2026-02-15 20:06:52.518 [info] [Extension Host] [shell-exec:sandbox] [isSandboxHelperSupported] Binary not available, returning false. Reason: Sandbox binary path was not configured
+2026-02-15 20:06:52.518 [info] [Extension Host] [ExtHostShellExec] Sandbox support detected: false
+2026-02-15 20:06:52.518 [info] [Extension Host] [ExtHostShellExec] Initializing terminal executor with userTerminalHint: C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe
+2026-02-15 20:06:52.528 [info] [Extension Host] Extension host with pid 1556 started
+2026-02-15 20:06:52.528 [info] [Extension Host] Skipping acquiring lock for c:\Users\mpiet\AppData\Roaming\Cursor\User\workspaceStorage\fd586578877606591956a5c8fb271ded.
+2026-02-15 20:06:52.528 [info] [Extension Host] [ExtHostShellExec] Detecting sandbox support...
+2026-02-15 20:06:52.528 [info] [Extension Host] [ExtHostShellExec] Platform: win32, Shell type: unknown
+2026-02-15 20:06:52.528 [info] [Extension Host] [ExtHostShellExec] dirname: c:\Users\mpiet\AppData\Local\Programs\cursor\resources\app\out\vs\workbench\api\node
+2026-02-15 20:06:52.528 [info] [Extension Host] [ExtHostShellExec] Sandbox helper path: not found
+2026-02-15 20:06:52.528 [info] [Extension Host] [ExtHostShellExec] process.resourcesPath: C:\Users\mpiet\AppData\Local\Programs\cursor\resources
+2026-02-15 20:06:52.528 [info] [Extension Host] [ExtHostShellExec] process.execPath: C:\Users\mpiet\AppData\Local\Programs\cursor\Cursor.exe
+2026-02-15 20:06:52.528 [info] [Extension Host] [shell-exec:sandbox] [isSandboxHelperSupported] Starting sandbox support check...
+2026-02-15 20:06:52.528 [info] [Extension Host] [shell-exec:sandbox] [checkBinaryAvailable] Resolved binary path: undefined
+2026-02-15 20:06:52.528 [info] [Extension Host] [shell-exec:sandbox] [checkBinaryAvailable] Binary path not set, returning false
+2026-02-15 20:06:52.528 [info] [Extension Host] [shell-exec:sandbox] [isSandboxHelperSupported] Binary not available, returning false. Reason: Sandbox binary path was not configured
+2026-02-15 20:06:52.528 [info] [Extension Host] [ExtHostShellExec] Sandbox support detected: false
+2026-02-15 20:06:52.528 [info] [Extension Host] [ExtHostShellExec] Initializing terminal executor with userTerminalHint: C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe
+2026-02-15 20:06:52.529 [info] [Extension Host] ExtensionService#_doActivateExtension anysphere.cursor-always-local, startup: false, activationEvent: 'onStartupFinished'
+2026-02-15 20:06:52.542 [info] [Extension Host] ExtensionService#_doActivateExtension vscode.emmet, startup: false, activationEvent: 'onLanguage'
+2026-02-15 20:06:52.632 [info] [Extension Host] ExtensionService#_doActivateExtension vscode.extension-editing, startup: false, activationEvent: 'onLanguage:markdown'
+2026-02-15 20:06:52.746 [info] [Extension Host] ExtensionService#_doActivateExtension vscode.markdown-language-features, startup: false, activationEvent: 'onLanguage:markdown'
+2026-02-15 20:06:52.937 [info] [Extension Host] Extension activated success: vscode.emmet — 100ms (code loading: 89ms, activate call: 11ms, activate resolved: 0ms)
+2026-02-15 20:06:52.939 [info] [Extension Host] Extension activated success: vscode.extension-editing — 116ms (code loading: 114ms, activate call: 2ms, activate resolved: 0ms)
+2026-02-15 20:06:53.023 [info] [Extension Host] ExtensionService#_doActivateExtension anysphere.cursor-retrieval, startup: false, activationEvent: 'onStartupFinished'
+2026-02-15 20:06:53.102 [info] [Extension Host] Extension host with pid 19336 started
+2026-02-15 20:06:53.102 [info] [Extension Host] Skipping acquiring lock for c:\Users\mpiet\AppData\Roaming\Cursor\User\workspaceStorage\fd586578877606591956a5c8fb271ded.
+2026-02-15 20:06:53.102 [info] [Extension Host] [ExtHostShellExec] Detecting sandbox support...
+2026-02-15 20:06:53.102 [info] [Extension Host] [ExtHostShellExec] Platform: win32, Shell type: unknown
+2026-02-15 20:06:53.102 [info] [Extension Host] [ExtHostShellExec] dirname: c:\Users\mpiet\AppData\Local\Programs\cursor\resources\app\out\vs\workbench\api\node
+2026-02-15 20:06:53.102 [info] [Extension Host] [ExtHostShellExec] Sandbox helper path: not found
+2026-02-15 20:06:53.102 [info] [Extension Host] [ExtHostShellExec] process.resourcesPath: C:\Users\mpiet\AppData\Local\Programs\cursor\resources
+2026-02-15 20:06:53.102 [info] [Extension Host] [ExtHostShellExec] process.execPath: C:\Users\mpiet\AppData\Local\Programs\cursor\Cursor.exe
+2026-02-15 20:06:53.102 [info] [Extension Host] [shell-exec:sandbox] [isSandboxHelperSupported] Starting sandbox support check...
+2026-02-15 20:06:53.102 [info] [Extension Host] [shell-exec:sandbox] [checkBinaryAvailable] Resolved binary path: undefined
+2026-02-15 20:06:53.102 [info] [Extension Host] [shell-exec:sandbox] [checkBinaryAvailable] Binary path not set, returning false
+2026-02-15 20:06:53.102 [info] [Extension Host] [shell-exec:sandbox] [isSandboxHelperSupported] Binary not available, returning false. Reason: Sandbox binary path was not configured
+2026-02-15 20:06:53.102 [info] [Extension Host] [ExtHostShellExec] Sandbox support detected: false
+2026-02-15 20:06:53.102 [info] [Extension Host] [ExtHostShellExec] Initializing terminal executor with userTerminalHint: C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe
+2026-02-15 20:06:53.102 [info] [Extension Host] ExtensionService#_doActivateExtension anysphere.cursor-agent-exec, startup: true, activationEvent: '*'
+2026-02-15 20:06:53.102 [info] [Extension Host] ExtHostSearch [cursorIgnore] internal fileSearch start reason=cursorIgnoreCheck roots=1 include=**/.cursorignore maxResults=0 numThreads=(default) folderQueries=[{"cwd":"c:\\Users\\mpiet\\BoardGame_Project","disregardIgnoreFiles":false,"disregardParentIgnoreFiles":true,"disregardGlobalIgnoreFiles":true,"ignoreSymlinks":false,"rgNoIgnore":false,"rgNoIgnoreParent":true,"rgNoIgnoreGlobal":true,"rgFollow":true}]
+2026-02-15 20:06:53.102 [info] [Extension Host] ExtHostSearch c:\Users\mpiet\AppData\Local\Programs\cursor\resources\app\node_modules\@vscode\ripgrep\bin\rg.exe --files --hidden --case-sensitive --no-require-git -g '**/.cursorignore' -g '!**/.git' -g '!**/.svn' -g '!**/.hg' -g '!**/.DS_Store' -g '!**/Thumbs.db' -g '!**/node_modules' -g '!**/bower_components' -g '!**/*.code-search' --no-ignore-parent --follow --threads '14' --no-config --no-ignore-global
+ - cwd: c:\Users\mpiet\BoardGame_Project
+ - Sibling clauses: {}
+2026-02-15 20:06:53.131 [info] [Extension Host] ExtHostSearch Search finished. Stats: {"cmdTime":56,"fileWalkTime":56,"directoriesWalked":0,"filesWalked":0,"cmdResultCount":0}
+2026-02-15 20:06:53.132 [info] [Extension Host] ExtHostSearch [cursorIgnore] internal fileSearch done in 68ms limitHit=false failed=false resultCount=0 cmdTime=56 fileWalkTime=56 providerTime=(unknown)
+2026-02-15 20:06:53.308 [info] [Extension Host] Extension activated success: vscode.markdown-language-features — 546ms (code loading: 178ms, activate call: 10ms, activate resolved: 358ms)
+2026-02-15 20:06:53.317 [info] [Extension Host] ExtensionService#_doActivateExtension anysphere.cursor-agent, startup: true, activationEvent: '*'
+2026-02-15 20:06:53.452 [info] [Extension Host] Extension activated success: anysphere.cursor-agent-exec — 945ms (code loading: 560ms, activate call: 5ms, activate resolved: 380ms)
+2026-02-15 20:06:53.453 [info] [Extension Host] Eager extensions activated
+2026-02-15 20:06:53.807 [info] [Extension Host] ExtensionService#_doActivateExtension anysphere.cursor-polyfills-remote, startup: true, activationEvent: '*'
+2026-02-15 20:06:53.900 [info] [Extension Host] ExtensionService#_doActivateExtension vscode.git-base, startup: true, activationEvent: '*', root cause: vscode.git
+2026-02-15 20:06:53.945 [info] [Extension Host] Extension activated success: anysphere.cursor-agent — 499ms (code loading: 491ms, activate call: 2ms, activate resolved: 6ms)
+2026-02-15 20:06:53.946 [info] [Extension Host] Extension activated success: anysphere.cursor-polyfills-remote — 93ms (code loading: 93ms, activate call: 0ms, activate resolved: 0ms)
+2026-02-15 20:06:53.946 [info] [Extension Host] Extension activated success: vscode.git-base — 35ms (code loading: 34ms, activate call: 1ms, activate resolved: 0ms)
+2026-02-15 20:06:53.948 [info] [Extension Host] ExtensionService#_doActivateExtension vscode.git, startup: true, activationEvent: '*'
+2026-02-15 20:06:53.962 [error] [Window] [Extension Host] (node:2120) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `Cursor --trace-deprecation ...` to show where the warning was created)
+2026-02-15 20:06:54.040 [info] [Extension Host] Extension activated success: anysphere.cursor-always-local — 561ms (code loading: 493ms, activate call: 5ms, activate resolved: 63ms)
+2026-02-15 20:06:54.054 [info] [Extension Host] ExtensionService#_doActivateExtension vscode.github, startup: true, activationEvent: '*'
+2026-02-15 20:06:54.095 [info] [Extension Host] Extension activated success: anysphere.cursor-retrieval — 991ms (code loading: 937ms, activate call: 2ms, activate resolved: 52ms)
+2026-02-15 20:06:54.207 [info] [Extension Host] Extension activated success: vscode.github — 122ms (code loading: 117ms, activate call: 1ms, activate resolved: 4ms)
+2026-02-15 20:06:54.321 [error] [Window] [Extension Host] (node:1556) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `Cursor --trace-deprecation ...` to show where the warning was created)
+2026-02-15 20:06:54.347 [info] [Extension Host] Extension activated success: vscode.git — 280ms (code loading: 106ms, activate call: 3ms, activate resolved: 171ms)
+2026-02-15 20:06:54.349 [info] [Extension Host] Eager extensions activated
+2026-02-15 20:06:54.351 [info] [Extension Host] ExtensionService#_doActivateExtension vscode.markdown-math, startup: false, activationEvent: 'api', root cause: vscode.markdown-language-features
+2026-02-15 20:06:54.481 [info] [Extension Host] ExtensionService#_doActivateExtension anysphere.cursor-android-emulator-connect, startup: false, activationEvent: 'onStartupFinished'
+2026-02-15 20:06:54.627 [info] [Extension Host] ExtensionService#_doActivateExtension cursor.cursor-browser-automation, startup: false, activationEvent: 'onStartupFinished'
+2026-02-15 20:06:54.701 [info] [Extension Host] ExtensionService#_doActivateExtension anysphere.cursor-commits, startup: false, activationEvent: 'onStartupFinished'
+2026-02-15 20:06:55.063 [info] [Extension Host] ExtensionService#_doActivateExtension anysphere.cursor-deeplink, startup: false, activationEvent: 'onStartupFinished'
+2026-02-15 20:06:55.252 [info] [Extension Host] ExtensionService#_doActivateExtension anysphere.cursor-ios-simulator-connect, startup: false, activationEvent: 'onStartupFinished'
+2026-02-15 20:06:55.429 [info] [Extension Host] ExtensionService#_doActivateExtension anysphere.cursor-mcp, startup: false, activationEvent: 'onStartupFinished'
+2026-02-15 20:06:55.893 [info] [Extension Host] ExtensionService#_doActivateExtension anysphere.cursor-shadow-workspace, startup: false, activationEvent: 'onStartupFinished'
+2026-02-15 20:06:56.051 [info] [Extension Host] ExtensionService#_doActivateExtension vscode.debug-auto-launch, startup: false, activationEvent: 'onStartupFinished'
+2026-02-15 20:06:56.088 [info] [Extension Host] ExtensionService#_doActivateExtension vscode.merge-conflict, startup: false, activationEvent: 'onStartupFinished'
+2026-02-15 20:06:56.220 [info] [Extension Host] ExtensionService#_doActivateExtension openai.chatgpt, startup: false, activationEvent: 'onStartupFinished'
+2026-02-15 20:06:56.625 [info] [Extension Host] Extension activated success: vscode.markdown-math — 97ms (code loading: 97ms, activate call: 0ms, activate resolved: 0ms)
+2026-02-15 20:06:56.673 [info] [Extension Host] Extension activated success: anysphere.cursor-android-emulator-connect — 147ms (code loading: 146ms, activate call: 0ms, activate resolved: 1ms)
+2026-02-15 20:06:56.676 [info] [Extension Host] Extension activated success: cursor.cursor-browser-automation — 75ms (code loading: 73ms, activate call: 1ms, activate resolved: 1ms)
+2026-02-15 20:06:56.679 [info] [Extension Host] Extension activated success: anysphere.cursor-commits — 365ms (code loading: 362ms, activate call: 0ms, activate resolved: 3ms)
+2026-02-15 20:06:56.680 [info] [Extension Host] Extension activated success: anysphere.cursor-deeplink — 188ms (code loading: 188ms, activate call: 0ms, activate resolved: 0ms)
+2026-02-15 20:06:56.680 [info] [Extension Host] Extension activated success: anysphere.cursor-ios-simulator-connect — 176ms (code loading: 176ms, activate call: 0ms, activate resolved: 0ms)
+2026-02-15 20:06:56.683 [info] [Extension Host] Extension activated success: anysphere.cursor-mcp — 465ms (code loading: 464ms, activate call: 1ms, activate resolved: 0ms)
+2026-02-15 20:06:56.684 [info] [Extension Host] Extension activated success: anysphere.cursor-shadow-workspace — 158ms (code loading: 158ms, activate call: 0ms, activate resolved: 0ms)
+2026-02-15 20:06:56.685 [info] [Extension Host] Extension activated success: vscode.debug-auto-launch — 37ms (code loading: 36ms, activate call: 1ms, activate resolved: 0ms)
+2026-02-15 20:06:56.703 [info] [Extension Host] Extension activated success: vscode.merge-conflict — 138ms (code loading: 132ms, activate call: 3ms, activate resolved: 3ms)
+2026-02-15 20:06:56.733 [info] [Extension Host] Extension activated success: openai.chatgpt — 433ms (code loading: 404ms, activate call: 1ms, activate resolved: 28ms)
+2026-02-15 20:06:57.194 [info] [Extension Host] ExtensionService#_doActivateExtension vscode.github-authentication, startup: false, activationEvent: 'onAuthenticationRequest:github'
+2026-02-15 20:06:57.338 [info] [Extension Host] Extension activated success: vscode.github-authentication — 118ms (code loading: 113ms, activate call: 2ms, activate resolved: 3ms)
+2026-02-15 20:06:59.082 [error] [Window] [Extension Host] [otel.error] {"stack":"OTLPExporterError: Bad Request\n\tat IncomingMessage.<anonymous> (c:\\Users\\mpiet\\AppData\\Local\\Programs\\cursor\\resources\\app\\node_modules\\@opentelemetry\\otlp-exporter-base\\build\\src\\transport\\http-transport-utils.js:52:31)\n\tat IncomingMessage.emit (node:events:531:35)\n\tat endReadableNT (node:internal/streams/readable:1698:12)\n\tat process.processTicksAndRejections (node:internal/process/task_queues:90:21)","message":"Bad Request","code":"400","name":"OTLPExporterError","data":"{\"error\":\"Trace spans collection is not enabled for this user\"}"}

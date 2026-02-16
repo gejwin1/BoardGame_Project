@@ -195,6 +195,9 @@ local auctionState = {
   bidderTurnStartTime = nil,  -- os.clock() when current bidder's turn started
 }
 
+-- Entrepreneur L3 Reposition: phase "select" (pick 3 cards with MOVE) -> "assign" (MOVE TO + pick 3 destinations). Not persisted.
+local repositionState = nil
+
 -- === SECTION 2: PERSISTENCE ==================================================
 
 local function sanitizeValue(v, depth)
@@ -666,6 +669,61 @@ local function uiAttachClickCatcher_IDLE(card)
   })
 end
 
+-- Entrepreneur L3 Reposition: MOVE button (red = not selected, green = selected)
+local function uiAttachRepositionMove(card, slotIdx, isSelected)
+  if not isCard(card) then return end
+  local color = isSelected and {0.2, 0.75, 0.2, 0.95} or {0.85, 0.2, 0.2, 0.95}
+  card.createButton({
+    click_function = "evt_onRepositionMoveClicked",
+    function_owner = self,
+    label          = "MOVE",
+    position       = {0, 0.35, 0},
+    rotation       = {0, 0, 0},
+    width          = 700,
+    height         = 280,
+    font_size      = 140,
+    color          = color,
+    font_color     = {1, 1, 1, 1},
+    tooltip        = isSelected and "Selected for reposition (click again to deselect)" or "Select this card to reposition (pick 3)",
+  })
+end
+
+-- Entrepreneur L3 Reposition: MOVE TO (green) + destination slot buttons (1, 2, 7) ON THE CARD. No buttons on controller/board.
+local function uiAttachRepositionMoveTo(card, availSlots)
+  if not isCard(card) then return end
+  card.createButton({
+    click_function = "ui_noop",
+    function_owner = self,
+    label          = "MOVE TO",
+    position       = {0, 0.35, 0.5},
+    rotation       = {0, 0, 0},
+    width          = 700,
+    height         = 280,
+    font_size      = 140,
+    color          = {0.2, 0.75, 0.2, 0.95},
+    font_color     = {1, 1, 1, 1},
+    tooltip        = "Click a slot number below to choose destination",
+  })
+  availSlots = availSlots or {}
+  local x0, z0 = -0.6, -0.35
+  local dx = 0.6
+  for idx, slotNum in ipairs(availSlots) do
+    local fn = "evt_onRepositionDest" .. tostring(slotNum)
+    card.createButton({
+      label = tostring(slotNum),
+      click_function = fn,
+      function_owner = self,
+      position = { x0 + (idx - 1) * dx, 0.35, z0 },
+      width = 420,
+      height = 220,
+      font_size = 140,
+      color = {0.25, 0.6, 0.9, 0.95},
+      font_color = {1, 1, 1, 1},
+      tooltip = "Move one selected card to slot " .. tostring(slotNum),
+    })
+  end
+end
+
 local function uiAttachQuestionLabel_MODAL(card)
   if not isCard(card) then return end
   card.createButton({
@@ -948,6 +1006,46 @@ end
 
 function refreshEventSlotUI()
   if not state.setup then return end
+  -- Entrepreneur L3 Reposition: show MOVE (red/green) or MOVE TO on cards
+  if repositionState then
+    if repositionState.phase == "select" then
+      for i=1,7 do
+        local g = state.track.slots[i]
+        if g and g ~= "" then
+          local o = objByGUID(g)
+          if isCard(o) and isObjNearSlot(o, i) then
+            uiClearButtons(o)
+            uiSetTrackDescription(o)
+            local selected = false
+            for _, s in ipairs(repositionState.selectedSlots or {}) do if s == i then selected = true break end end
+            uiAttachRepositionMove(o, i, selected)
+          end
+        end
+      end
+      return
+    end
+    if repositionState.phase == "assign" then
+      local selectedSet = {}
+      for _, s in ipairs(repositionState.selectedSlots or {}) do selectedSet[s] = true end
+      local avail = repositionState.availableDestSlots or {}
+      for i = 1, 7 do
+        local g = state.track.slots[i]
+        if g and g ~= "" then
+          local o = objByGUID(g)
+          if isCard(o) and isObjNearSlot(o, i) then
+            uiClearButtons(o)
+            uiSetTrackDescription(o)
+            if selectedSet[i] then
+              uiAttachRepositionMoveTo(o, avail)
+            else
+              uiEnsureIdle(o)
+            end
+          end
+        end
+      end
+      return
+    end
+  end
   for i=1,7 do
     local g = state.track.slots[i]
     if g and g ~= "" then
@@ -1872,6 +1970,93 @@ local function getSlotIndexForCardGuid(cardGuid)
   return nil
 end
 
+function evt_onRepositionMoveClicked(card, player_color, alt_click)
+  if not isCard(card) or not repositionState or repositionState.phase ~= "select" then return end
+  local g = card.getGUID()
+  local slotIdx = getSlotIndexForCardGuid(g)
+  if not slotIdx then return end
+  local sel = repositionState.selectedSlots or {}
+  local found
+  for i, s in ipairs(sel) do
+    if s == slotIdx then found = i break end
+  end
+  if found then
+    table.remove(sel, found)
+  else
+    if #sel >= 3 then return end
+    table.insert(sel, slotIdx)
+    table.sort(sel)
+  end
+  repositionState.selectedSlots = sel
+  if #sel == 3 then
+    repositionState.phase = "assign"
+    repositionState.assignmentStep = 1
+    repositionState.assignments = {}
+    repositionState.availableDestSlots = { sel[1], sel[2], sel[3] }
+  end
+  refreshEventSlotUI()
+end
+
+local function repositionDestChosen(destSlot)
+  if not repositionState or repositionState.phase ~= "assign" then return end
+  local step = repositionState.assignmentStep or 1
+  local sel = repositionState.selectedSlots or {}
+  if step < 1 or step > #sel then return end
+  local fromSlot = sel[step]
+  repositionState.assignments = repositionState.assignments or {}
+  repositionState.assignments[fromSlot] = destSlot
+  local avail = repositionState.availableDestSlots or {}
+  for i, s in ipairs(avail) do
+    if s == destSlot then table.remove(avail, i) break end
+  end
+  repositionState.availableDestSlots = avail
+  repositionState.assignmentStep = step + 1
+  if repositionState.assignmentStep > 3 then
+    -- Apply moves and clear
+    local fromSlots = repositionState.selectedSlots or {}
+    local asgn = repositionState.assignments or {}
+    local guids = {}
+    for _, i in ipairs(fromSlots) do
+      guids[i] = state.track.slots[i]
+      state.track.slots[i] = nil
+    end
+    for from, to in pairs(asgn) do
+      local obj = objByGUID(guids[from])
+      if obj and isCard(obj) then
+        teleportToSlot(obj, to)
+        state.track.slots[to] = guids[from]
+      end
+    end
+    saveState()
+    repositionState = nil
+    if drawUI then drawUI() end
+    refreshEventSlotUI_later(0.2)
+    broadcastToAll("🔄 Reposition: 3 event cards moved.", {0.7, 1, 0.8})
+    return
+  end
+  refreshEventSlotUI()
+end
+
+function evt_onRepositionDest1() repositionDestChosen(1) end
+function evt_onRepositionDest2() repositionDestChosen(2) end
+function evt_onRepositionDest3() repositionDestChosen(3) end
+function evt_onRepositionDest4() repositionDestChosen(4) end
+function evt_onRepositionDest5() repositionDestChosen(5) end
+function evt_onRepositionDest6() repositionDestChosen(6) end
+function evt_onRepositionDest7() repositionDestChosen(7) end
+
+-- Callable: start Entrepreneur L3 Reposition event cards. Puts track in "select" phase (MOVE buttons on non-empty slots 1-7).
+function API_StartEntrepreneurReposition(params)
+  if repositionState then
+    log("API_StartEntrepreneurReposition: already active, ignoring")
+    return
+  end
+  refreshTrackedSlots()
+  repositionState = { phase = "select", selectedSlots = {} }
+  refreshEventSlotUI_later(0.15)
+  broadcastToAll("🔄 Reposition: click MOVE on 3 event lane cards, then choose destinations.", {0.7, 1, 0.8})
+end
+
 local function announceSlot1ObligatoryToCurrentTurn()
   if not slot1HasObligatory() then return end
   local c = "White"
@@ -2294,6 +2479,58 @@ end
 
 function API_setPlayers(params) return setPlayers(params) end
 function API_setMode(params) return setMode(params) end
+
+-- NGO "Take Good Karma (free)": true if any of the 7 event lane slots has a Good Karma card (KARMA / AD_KARMA).
+function API_hasVisibleGoodKarmaCard(params)
+  local engine = getEngine()
+  if not engine or not engine.call then return false end
+  state.track.slots = state.track.slots or {}
+  for i = 1, 7 do
+    local g = state.track.slots[i]
+    if g and g ~= "" then
+      local card = objByGUID(g)
+      if card and isCard(card) then
+        local ok, isKarma = pcall(function() return engine.call("isGoodKarmaCard", { card_guid = g }) end)
+        if ok and isKarma then return true end
+      end
+    end
+  end
+  return false
+end
+
+-- NGO "Take Good Karma (free)": take the first visible Good Karma card from the event lane; add token to color, move card to used. Returns true if taken.
+function API_takeFirstGoodKarmaCardFromLane(params)
+  params = params or {}
+  local color = params.color or params.player_color
+  if not color or color == "" then return false end
+  color = (type(color) == "string" and color:sub(1,1):upper() .. color:sub(2):lower()) or color
+  local engine = getEngine()
+  local psc = getPSC()
+  if not engine or not engine.call or not psc or not psc.call then return false end
+  state.track.slots = state.track.slots or {}
+  for i = 1, 7 do
+    local g = state.track.slots[i]
+    if g and g ~= "" then
+      local card = objByGUID(g)
+      if card and isCard(card) then
+        local ok, isKarma = pcall(function() return engine.call("isGoodKarmaCard", { card_guid = g }) end)
+        if ok and isKarma then
+          state.track.slots[i] = nil
+          saveState()
+          pcall(function() psc.call("PS_Event", { op = "ADD_STATUS", color = color, statusTag = "WLB_STATUS_GOOD_KARMA" }) end)
+          teleportToUsed(card, 0)
+          Wait.time(function()
+            refreshTrackedSlots()
+            refreshObligatoryLock()
+            refreshEventSlotUI()
+          end, 0.25)
+          return true
+        end
+      end
+    end
+  end
+  return false
+end
 
 function WLB_EVT_NEWGAME(params)
   params = params or {}

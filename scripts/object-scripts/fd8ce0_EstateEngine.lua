@@ -683,7 +683,7 @@ local function updateRentalCostInCalculator(color, oldLevel, newLevel, isRent)
   -- Adjust by the delta (this correctly transitions from old cost to new cost)
   if delta ~= 0 then
     safeCall(function()
-      costsCalc.call("addCost", {color=color, amount=delta})
+      costsCalc.call("addCost", {color=color, amount=delta, label="Rent "..tostring(effectiveOldLevel).."→"..tostring(newLevel)})
     end)
     log("Estate rental: "..color.." adjusted cost by "..tostring(delta).." WIN (from "..tostring(effectiveOldLevel).."="..tostring(oldCost).." to "..tostring(newLevel).."="..tostring(newCost)..", was "..tostring(currentCost)..", now "..tostring(currentCost + delta)..")")
   else

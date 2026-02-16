@@ -107,7 +107,7 @@ Check at end of turn (or in the same place other “additional rules” are appl
 | # | Button label | Description | Implementation status | Implementation notes |
 |---|--------------|-------------|------------------------|------------------------|
 | 1 | **Commercial training course** | Level action. Run the commercial training course. | **Partly implemented** | `actionId`: `ENT_L2_TRAINING`. Cost: 2 AP. Participants, exam roll, rewards (Knowledge/Skill). Complete as needed. |
-| 2 | **Use your network** | Special ability. **Spend 1 AP** to use your network → **you may reroll a die during your turn.** (Only the Entrepreneur can use the reroll; only during their turn.) | **To implement** | In practice, dice are almost always rolled during the active player’s turn, so limiting to “during your turn” and “only Entrepreneur” keeps implementation straightforward: no need to support another player asking the Entrepreneur to enable a reroll. Store a “pending reroll” when the ability is used; on the **Entrepreneur’s next die roll that turn**, show “Reroll?” and use second result if they choose. Clear the pending reroll after use or at end of turn. |
+| 2 | **Use your network** | Passive (no button). On every die roll during their turn (vocation, shop, events), Entrepreneur may choose **Reroll** (1 AP, once) or **Go on**. | **Fully implemented** | In practice, dice are almost always rolled during the active player’s turn, so limiting to “during your turn” and “only Entrepreneur” keeps implementation straightforward: no need to support another player asking the Entrepreneur to enable a reroll. Store a “pending reroll” when the ability is used; on the **Entrepreneur’s next die roll that turn**, show “Reroll?” and use second result if they choose. Clear the pending reroll after use or at end of turn. |
 
 **Passive (no button):** Richest player Satisfaction (same as Level 1): +1 Sat when Entrepreneur has highest money at end of their turn.
 
@@ -115,7 +115,7 @@ Check at end of turn (or in the same place other “additional rules” are appl
 
 | # | Button label | Description | Implementation status | Implementation notes |
 |---|--------------|-------------|------------------------|------------------------|
-| 1 | **Reposition event cards** | Special ability. **During your turn, spend 2 AP** to change the position of **up to 3 event cards** in the **event lane**. The player may reorder/shuﬀle 3 out of the 7 open cards as they wish. | **To implement** | Needs integration with Event Lane / Events Controller: which object holds the 7 open cards, how positions are defined, and an UI or flow to “pick up to 3 cards and place them in new positions” (swap/reorder). |
+| 1 | **Reposition event cards** | Special ability. **During your turn, spend 2 AP** to change the position of **up to 3 event cards** in the **event lane**. The player may reorder/shuﬀle 3 out of the 7 open cards as they wish. | **Implemented** | `actionId`: `ENT_L3_REPOSITION_EVENTS`. Cost: 2 AP. EventsController: MOVE on non-empty slots 1–7; select 3 → MOVE TO + slot-number buttons on those cards; assign each to a destination; buttons on cards only. “pick up to 3 cards and place them in new positions” (swap/reorder). |
 
 **Passive (no button):**  
 - **Property discount:** Entrepreneur gets **25% discount on properties**. This **stacks** with discount cards/tokens (e.g. discount token + this passive = combined discount). Apply wherever property purchase price is calculated.  

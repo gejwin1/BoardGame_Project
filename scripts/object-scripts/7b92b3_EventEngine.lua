@@ -310,7 +310,7 @@ local function addBabyCostToCalculator(color, cost)
   
   if costsCalc and costsCalc.call then
     local ok, result = pcall(function()
-      return costsCalc.call("addCost", {color=color, amount=cost})
+      return costsCalc.call("addCost", {color=color, amount=cost, label="Baby"})
     end)
     if ok then
       log("Baby cost: "..color.." added "..tostring(cost).." WIN per turn for baby")
@@ -1252,131 +1252,16 @@ function VECrimeTargetSelected(params)
   cardUI_clear(cardObj)
   safeBroadcastTo(data.color, "Crime target: "..targetColor..". Rolling dice...", {1,0.9,0.5})
   if DEBUG then log("VECrimeTargetSelected: starting dice roll for target="..tostring(targetColor)) end
-  
-  -- Always try to use physical die (GUID: 14d4a4)
-  local die = getObjectFromGUID("14d4a4")
-  if die then
-    if type(rollRealDieAsync) == "function" then
-      -- Use rollRealDieAsync if available
-      rollRealDieAsync(cardObj, function(roll, err)
-        if err or not roll then
-          -- Fallback: try to read die value directly - NEVER use math.random
-          local dieValue = nil
-          if die.getValue then
-            local ok, v = pcall(function() return die.getValue() end)
-            if ok and type(v) == "number" and v >= 1 and v <= 6 then
-              dieValue = v
-            end
-          end
-          if dieValue then
-            roll = dieValue
-            if DEBUG then log("VECrimeTargetSelected: rollRealDieAsync failed, using die value="..tostring(roll)) end
-          else
-            -- Keep trying to read physical die - don't use math.random
-            if DEBUG then log("VECrimeTargetSelected: rollRealDieAsync failed, continuing to poll physical die") end
-            -- Start polling for die value
-            local startTime = Time.time
-            local lastValue = nil
-            local stableCount = 0
-            local function readDieValueFallback()
-              if not die or not die.getValue then return nil end
-              local ok, v = pcall(function() return die.getValue() end)
-              if ok and type(v) == "number" and v >= 1 and v <= 6 then return v end
-              return nil
-            end
-            local function pollDieFallback()
-              if (Time.time - startTime) > DICE_ROLL_TIMEOUT then
-                local finalValue = readDieValueFallback()
-                if finalValue then
-                  if DEBUG then log("VECrimeTargetSelected: fallback poll got value="..tostring(finalValue)) end
-                  processCrimeRollResult(finalValue, data, cardObj, g, targetColor)
-                else
-                  -- Keep polling - never give up on physical die
-                  Wait.time(pollDieFallback, DICE_POLL)
-                end
-                return
-              end
-              local dieVal = readDieValueFallback()
-              if dieVal then
-                if dieVal == lastValue then
-                  stableCount = stableCount + 1
-                  if stableCount >= DICE_STABLE_READS then
-                    if DEBUG then log("VECrimeTargetSelected: fallback poll got stable value="..tostring(dieVal)) end
-                    processCrimeRollResult(dieVal, data, cardObj, g, targetColor)
-                    return
-                  end
-                else
-                  lastValue = dieVal
-                  stableCount = 1
-                end
-              else
-                stableCount = 0
-              end
-              Wait.time(pollDieFallback, DICE_POLL)
-            end
-            -- Wait 1.0 second for die to fall and settle before starting to poll
-            Wait.time(pollDieFallback, 1.0)
-            return -- Don't process result yet, wait for poll
-          end
-        end
-        if roll then
-          processCrimeRollResult(roll, data, cardObj, g, targetColor)
-        end
-      end)
-    else
-      -- Fallback: roll die and read value (always use physical die, never math.random)
-      if DEBUG then log("VECrimeTargetSelected: rollRealDieAsync not available, rolling physical die") end
-      -- Cache die home position if needed (inline to avoid chunking issues)
-      if die and not diceHome then
-        local ok, p, r = pcall(function()
-          local pos = die.getPosition()
-          local rot = die.getRotation()
-          return pos, rot
-        end)
-        if ok and p and r then
-          diceHome = { pos={x=p.x,y=p.y,z=p.z}, rot={x=r.x,y=r.y,z=r.z} }
-        end
-      end
-      -- Roll die physically
-      pcall(function() die.randomize() end)
-      pcall(function() die.roll() end)
-      
-      -- Use Wait.condition to wait for die.resting (like Turn Controller)
-      -- This ensures we read the final settled value, not the first value when it hits the table
-      local timeout = os.time() + 6
-      Wait.condition(
-        function()
-          -- Die is now resting - read the final value
-          local v = nil
-          local ok = pcall(function() v = die.getValue() end)
-          if ok and type(v) == "number" and v >= 1 and v <= 6 then
-            if DEBUG then log("VECrimeTargetSelected: die resting, final value="..tostring(v)) end
-            processCrimeRollResult(v, data, cardObj, g, targetColor)
-          else
-            if DEBUG then log("VECrimeTargetSelected: failed to read die value after resting") end
-            safeBroadcastTo(data.color, "ERROR: Failed to read die value.", {1,0,0})
-            pendingVECrime[g] = nil
-            cardUI_clear(cardObj)
-          end
-        end,
-        function()
-          -- Condition: wait until die is resting (fully settled)
-          local resting = false
-          pcall(function() resting = die.resting end)
-          if resting then return true end
-          if os.time() >= timeout then return true end
-          return false
-        end
-      )
+  rollDieForPlayer(data.color, "evt_crime", function(roll, err)
+    if not roll or roll < 1 or roll > 6 then
+      safeBroadcastTo(data.color, "ERROR: Failed to read die value.", {1,0,0})
+      pendingVECrime[g] = nil
+      cardUI_clear(cardObj)
+      return
     end
-  else
-    -- Die not found - cannot proceed without physical die
-    safeBroadcastTo(data.color, "ERROR: Physical die (GUID: 14d4a4) not found. Cannot roll dice.", {1,0,0})
-    if DEBUG then log("VECrimeTargetSelected: ERROR - die not found (GUID 14d4a4), cannot proceed") end
-    pendingVECrime[g] = nil
-    cardUI_clear(cardObj)
-    -- Don't finalize card - let player try again
-  end
+    if DEBUG then log("VECrimeTargetSelected: final value="..tostring(roll)) end
+    processCrimeRollResult(roll, data, cardObj, g, targetColor)
+  end)
 end
 
 local function evt_veTarget(cardObj, targetColor)
@@ -1873,30 +1758,48 @@ local function rollRealDieAsync(cardObj, onDone)
   if not die then onDone(nil, "Die not found"); return end
 
   cacheDieHomeIfNeeded(die)
-  -- Roll die in place, don't move it
   pcall(function() die.randomize() end)
   pcall(function() die.roll() end)
 
-  -- Use Wait.condition to wait for die.resting (like Turn Controller)
-  -- This ensures we read the final settled value, not the first value when it hits the table
   local timeout = os.time() + 6
   Wait.condition(
     function()
-      -- Die is now resting - read the final value
       local v = tryReadDieValue(die)
-      if v then
-        onDone(v, nil)
-      else
-        onDone(nil, "Failed to read die value after resting")
-      end
+      if v then onDone(v, nil)
+      else onDone(nil, "Failed to read die value after resting") end
     end,
     function()
-      -- Condition: wait until die is resting (fully settled)
       local resting = false
       pcall(function() resting = die.resting end)
-      if resting then return true end
-      if os.time() >= timeout then return true end
-      return false
+      return resting or (os.time() >= timeout)
+    end
+  )
+end
+
+-- Roll die via VocationsController (Entrepreneur L2 Reroll/Go on support).
+local function rollDieForPlayer(color, requestPrefix, onDone)
+  if not color then onDone(math.random(1,6), nil) return end
+  local ts = 0
+  if Time and Time.time then ts = (type(Time.time) == "function") and Time.time() or Time.time
+  elseif os and os.time then ts = os.time() end
+  local requestId = (requestPrefix or "evt") .. "_" .. tostring(color) .. "_" .. tostring(ts)
+  local voc = findOneByTags and findOneByTags({TAG_VOCATIONS_CTRL}) or nil
+  if not voc or not voc.call then
+    rollRealDieAsync(nil, function(v, err) onDone(v or math.random(1,6), err) end)
+    return
+  end
+  if not _G.VOC_DieRollResults then _G.VOC_DieRollResults = {} end
+  pcall(function() voc.call("VOC_RollDieForPlayer", { requestId = requestId, color = color }) end)
+  local deadline = (os.time and os.time() or 0) + 12
+  Wait.condition(
+    function()
+      local v = _G.VOC_DieRollResults and _G.VOC_DieRollResults[requestId]
+      if _G.VOC_DieRollResults then _G.VOC_DieRollResults[requestId] = nil end
+      onDone((v and type(v)=="number" and v >= 1 and v <= 6) and v or math.random(1,6), nil)
+    end,
+    function()
+      if _G.VOC_DieRollResults and _G.VOC_DieRollResults[requestId] ~= nil then return true end
+      return (os.time and os.time()) >= deadline
     end
   )
 end
@@ -2478,7 +2381,7 @@ local function handleSpecial(color, cardId, def, cardObj)
       
       if costsCalc and costsCalc.call then
         safeCall(function()
-          costsCalc.call("addCost", {color=color, amount=totalTax})
+          costsCalc.call("addCost", {color=color, amount=totalTax, label="Property Tax L"..tostring(estateLevel)})
         end)
         safeBroadcastTo(color, "🏠 Property Tax: "..tostring(totalTax).." WIN (Level L"..tostring(estateLevel).." × 300) added to Costs Calculator. Pay by end of round or lose satisfaction.", {1,0.7,0.3})
         log("Property Tax: Added "..tostring(totalTax).." WIN to Costs Calculator for "..color.." (cannot afford)")
@@ -2520,7 +2423,7 @@ local function handleSpecial(color, cardId, def, cardObj)
     end
 
     local ok, ownedList = pcall(function()
-      return shopEngine.call("API_getOwnedHiTech", {color=color})
+      return shopEngine.call("API_getOwnedHiTech", { color = color, excludePerkProxies = true })
     end)
 
     if not ok or type(ownedList) ~= "table" or #ownedList == 0 then
@@ -2772,17 +2675,12 @@ function evt_roll(cardObj, player_color, alt_click)
   cardUI_clear(cardObj)
   cardUI_title(cardObj, "ROLLING...")
 
-  rollRealDieAsync(cardObj, function(roll, err)
+  rollDieForPlayer(pd.color, "evt_dice", function(roll, err)
     cardUI_clear(cardObj)
-
-    if not roll then
-      local fallback = math.random(1,6)
-      warn("Real die roll failed ("..tostring(err)..") -> fallback="..tostring(fallback))
-      roll = fallback
+    if not roll or roll < 1 or roll > 6 then
+      roll = math.random(1,6)
       safeBroadcastTo(pd.color, "Die read failed; used fallback roll: "..tostring(roll), {1,0.8,0.3})
     end
-
-    -- Always show the roll result to the player (otherwise it feels like "no resolution").
     safeBroadcastTo(pd.color, "🎲 Roll result: "..tostring(roll), {0.85,0.95,1})
 
     local typeKey = CARD_TYPE[pd.cardId]
@@ -3588,6 +3486,23 @@ function isObligatoryCard(args)
   local def = typeKey and TYPES[typeKey] or nil
   if def and tostring(def.kind) == "obligatory" then return true end
   if cardId:match("_O$") then return true end
+  return false
+end
+
+-- True if this event card gives a Good Karma token (KARMA, AD_KARMA). Used by NGO "Take Good Karma (free)" to find a card in the event lane.
+function isGoodKarmaCard(args)
+  args = args or {}
+  local guid = args.card_guid or args.cardGuid
+  if not guid or guid == "" then return false end
+  local cardObj = getObjectFromGUID(guid)
+  if not cardObj or cardObj.tag ~= "Card" then return false end
+  local cardId = extractCardId(cardObj)
+  if not cardId then return false end
+  local typeKey = CARD_TYPE[cardId]
+  local def = typeKey and TYPES[typeKey] or nil
+  if not def then return false end
+  if def.karma == true then return true end
+  if def.statusAddTag == STATUS_TAG.GOODKARMA then return true end
   return false
 end
 

@@ -6,7 +6,12 @@
 -- - Auto-refresh UI when active player changes
 -- =========================
 
-local SAVE_VERSION = 2
+local SAVE_VERSION = 3
+
+-- Breakdown storage: per-color lists of {label, amount} for tooltip display
+-- Merged by label when building tooltip (same label → sum amounts)
+local costsBreakdown    = { Yellow={}, Blue={}, Red={}, Green={} }
+local earningsBreakdown = { Yellow={}, Blue={}, Red={}, Green={} }
 
 -- Tags to find money tiles (legacy). If no money tiles exist, we fall back to Player Boards.
 local TAG_MONEY = "WLB_MONEY"
@@ -104,35 +109,69 @@ end
 local function setCosts(c, v)
   if not isPlayableColor(c) then return end
   costsDue[c] = clampNonNeg(v)
+  if v == 0 then costsBreakdown[c] = {} end
 end
 
 local function setEarnings(c, v)
   if not isPlayableColor(c) then return end
   earningsDue[c] = clampNonNeg(v)
+  if v == 0 then earningsBreakdown[c] = {} end
 end
 
 -- Compatibility: one API `addCost` supports negative deltas (treated as earnings)
 -- New: optional explicit bucket adjustments (allows undo of earnings without creating costs)
-local function addCostsOrEarnings(c, delta, bucket)
+-- label: optional string for tooltip breakdown (e.g. "Rent L1", "Work (3 AP)")
+local function addCostsOrEarnings(c, delta, bucket, label)
   if not isPlayableColor(c) then return end
   delta = clampInt(delta)
+  label = (type(label) == "string" and label ~= "") and label or "Other"
 
   -- Explicit bucket mode: delta may be negative to undo within the same bucket.
   if bucket == "earnings" then
     earningsDue[c] = clampNonNeg((earningsDue[c] or 0) + delta)
+    if not earningsBreakdown[c] then earningsBreakdown[c] = {} end
+    table.insert(earningsBreakdown[c], { label = label, amount = delta })
     return
   end
   if bucket == "costs" then
     costsDue[c] = clampNonNeg((costsDue[c] or 0) + delta)
+    if not costsBreakdown[c] then costsBreakdown[c] = {} end
+    table.insert(costsBreakdown[c], { label = label, amount = delta })
     return
   end
 
   -- Legacy mode: sign determines bucket (no undo for earnings; kept for backward compatibility)
   if delta >= 0 then
     costsDue[c] = clampNonNeg((costsDue[c] or 0) + delta)
+    if not costsBreakdown[c] then costsBreakdown[c] = {} end
+    table.insert(costsBreakdown[c], { label = label, amount = delta })
   else
     earningsDue[c] = clampNonNeg((earningsDue[c] or 0) + math.abs(delta))
+    if not earningsBreakdown[c] then earningsBreakdown[c] = {} end
+    table.insert(earningsBreakdown[c], { label = label, amount = math.abs(delta) })
   end
+end
+
+-- Merge breakdown by label (sum amounts), return string for tooltip
+local function buildBreakdownTooltip(breakdown, prefix)
+  if not breakdown or #breakdown == 0 then return prefix end
+  local merged = {}
+  for _, item in ipairs(breakdown) do
+    local lbl = item.label or "Other"
+    merged[lbl] = (merged[lbl] or 0) + (item.amount or 0)
+  end
+  local lines = { prefix }
+  local keys = {}
+  for lbl in pairs(merged) do
+    if merged[lbl] ~= 0 then
+      table.insert(keys, lbl)
+    end
+  end
+  table.sort(keys)
+  for _, lbl in ipairs(keys) do
+    table.insert(lines, "  " .. lbl .. ": " .. tostring(merged[lbl]))
+  end
+  return table.concat(lines, "\n")
 end
 
 local function labelTextCosts()
@@ -191,6 +230,10 @@ end
 local function ensureButtons()
   self.clearButtons()
 
+  local c = getActiveColor()
+  local costTip = buildBreakdownTooltip(costsBreakdown[c], "Remaining costs for active player")
+  local earnTip = buildBreakdownTooltip(earningsBreakdown[c], "Earnings to collect for active player")
+
   -- Costs label (index 0)
   self.createButton({
     click_function = "noop",
@@ -201,10 +244,10 @@ local function ensureButtons()
     width          = W_LABEL,
     height         = H_LABEL,
     font_size      = FS_LABEL,
-    color          = tintBgForColor(getActiveColor()),
+    color          = tintBgForColor(c),
     font_color     = FG_LABEL,
     alignment      = 3,
-    tooltip        = "Remaining costs for active player"
+    tooltip        = costTip
   })
 
   -- Earnings label (index 1)
@@ -217,10 +260,10 @@ local function ensureButtons()
     width          = W_LABEL,
     height         = H_LABEL,
     font_size      = FS_LABEL,
-    color          = tintBgForColor(getActiveColor()),
+    color          = tintBgForColor(c),
     font_color     = FG_LABEL,
     alignment      = 3,
-    tooltip        = "Earnings available to collect for active player"
+    tooltip        = earnTip
   })
 
   -- PAY (index 2)
@@ -241,14 +284,16 @@ end
 
 local function updateLabelAndBg()
   local btns = self.getButtons()
-  if not btns or #btns == 0 then
+  if not btns or #btns < 2 then
     ensureButtons()
     return
   end
 
   local c = getActiveColor()
-  self.editButton({ index = 0, label = labelTextCosts(), color = tintBgForColor(c) })
-  self.editButton({ index = 1, label = labelTextEarnings(), color = tintBgForColor(c) })
+  local costTip = buildBreakdownTooltip(costsBreakdown[c], "Remaining costs for active player")
+  local earnTip = buildBreakdownTooltip(earningsBreakdown[c], "Earnings to collect for active player")
+  self.editButton({ index = 0, label = labelTextCosts(), color = tintBgForColor(c), tooltip = costTip })
+  self.editButton({ index = 1, label = labelTextEarnings(), color = tintBgForColor(c), tooltip = earnTip })
 end
 
 function noop() end
@@ -271,7 +316,9 @@ function onSave()
   return JSON.encode({
     v = SAVE_VERSION,
     costsDue = costsDue,
-    earningsDue = earningsDue
+    earningsDue = earningsDue,
+    costsBreakdown = costsBreakdown,
+    earningsBreakdown = earningsBreakdown
   })
 end
 
@@ -280,10 +327,12 @@ function onLoad(saved_data)
   if saved_data ~= nil and saved_data ~= "" then
     local ok, data = pcall(function() return JSON.decode(saved_data) end)
     if ok and type(data) == "table" then
-      -- v2+ (separate)
+      -- v2+ (separate costs/earnings)
       if type(data.costsDue) == "table" and type(data.earningsDue) == "table" then
         costsDue = data.costsDue
         earningsDue = data.earningsDue
+        if type(data.costsBreakdown) == "table" then costsBreakdown = data.costsBreakdown end
+        if type(data.earningsBreakdown) == "table" then earningsBreakdown = data.earningsBreakdown end
         loaded = true
       -- v1 (combined): negative meant earnings
       elseif type(data.costs) == "table" then
@@ -304,6 +353,11 @@ function onLoad(saved_data)
   if not loaded then
     costsDue = { Yellow=0, Blue=0, Red=0, Green=0 }
     earningsDue = { Yellow=0, Blue=0, Red=0, Green=0 }
+  end
+  -- Ensure breakdown structure for each color
+  for _, c in ipairs({"Yellow","Blue","Red","Green"}) do
+    if type(costsBreakdown[c]) ~= "table" then costsBreakdown[c] = {} end
+    if type(earningsBreakdown[c]) ~= "table" then earningsBreakdown[c] = {} end
   end
 
   Wait.time(function()
@@ -358,6 +412,10 @@ function resetNewGame()
   -- Reset all player buckets to 0 for new game
   costsDue = { Yellow=0, Blue=0, Red=0, Green=0 }
   earningsDue = { Yellow=0, Blue=0, Red=0, Green=0 }
+  for _, c in ipairs({"Yellow","Blue","Red","Green"}) do
+    costsBreakdown[c] = {}
+    earningsBreakdown[c] = {}
+  end
   updateLabelAndBg()
   log("Costs Calculator: All costs reset for new game")
 end
@@ -368,13 +426,15 @@ function addCost(params)
   if not c then return 0 end
   local delta = 0
   local bucket = nil
+  local label = nil
   if type(params) == "table" then
     delta = params.amount or params.delta or 0
     bucket = params.bucket
+    label = params.label
   else
     delta = params
   end
-  addCostsOrEarnings(c, delta, bucket)
+  addCostsOrEarnings(c, delta, bucket, label)
   updateLabelAndBg()
   return getCosts(c)
 end

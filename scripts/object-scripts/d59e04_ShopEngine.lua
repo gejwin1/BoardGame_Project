@@ -205,6 +205,15 @@ local S = {
   carAccessOwner = nil,
   -- NGO Take Trip (free): while set, "Take this Trip (free)" buttons are on visible Trip cards; cleared when player picks one
   pendingNGOTakeTripColor = nil,
+
+  -- Entrepreneur L1 "Talk to shop owner": other players pay double for shop purchases (C/H only) until Entrepreneur's next turn
+  doublePricesInitiator = nil,  -- color who activated; cleared when their turn starts again
+
+  -- Entrepreneur L1 Flash Sale: { active=true, initiatorColor, turnOrder={}, currentIndex=1 }
+  flashSale = nil,
+
+  -- Gangster L1 Steal hi-tech: { active=true, color=gangsterColor }. STEAL buttons on H cards until one is chosen.
+  gangsterStealHitech = nil,
 }
 
 -- =========================
@@ -298,15 +307,19 @@ local function checkBusyGate(player_color)
 end
 
 -- Unified CostsCalc wrapper: always use addCost (never setCost)
--- This ensures consistent cost management across all investment types
-local function Costs_add(color, amount)
+-- label: optional, for tooltip breakdown (e.g. "Debentures", "Loan")
+-- bucket: optional "costs" or "earnings" - when subtracting, use "costs" to reduce costs bucket
+local function Costs_add(color, amount, label, bucket)
   if not color or color == "" or color == "White" then return false end
   local costsCalc = firstWithTag(TAG_COSTS_CALC)
   if not costsCalc or not costsCalc.call then
     warn("CostsCalc not found for addCost")
     return false
   end
-  local ok = safeCall(costsCalc, "addCost", {color=color, amount=amount})
+  local payload = {color=color, amount=amount}
+  if label then payload.label = label end
+  if bucket then payload.bucket = bucket end
+  local ok = safeCall(costsCalc, "addCost", payload)
   if ok then
     log("CostsCalc: Added "..tostring(amount).." WIN to "..color)
   else
@@ -601,6 +614,7 @@ local UI = {
 
 -- Pending dice state (for cards requiring manual die roll)
 local pendingDice = {} -- [guid] = { color, def, card, kind, ... }
+local rollingDice = {} -- [guid] = true while roll in progress (prevents double-click / second roll)
 local diceInitialValue = {} -- [guid] = initial die value when button shown (to detect if player rolled)
 
 -- Pending investment input state (for interactive investment cards)
@@ -991,11 +1005,94 @@ local function uiAttachCounter(card, currentAmount, minAmount, increment)
   uiSetDescription(card, "Amount: "..tostring(currentAmount).." WIN (min: "..tostring(minAmount)..")")
 end
 
+-- Player color to button background (RGB 0–1) for Flash Sale buttons
+local function flashSaleColorTint(color)
+  local c = normalizeColor(tostring(color or ""))
+  if c == "Yellow" then return {1, 0.95, 0.2} end
+  if c == "Red"    then return {1, 0.25, 0.25} end
+  if c == "Blue"   then return {0.25, 0.55, 1} end
+  if c == "Green"  then return {0.25, 1, 0.35} end
+  return {0.5, 0.5, 0.5}
+end
+
+-- Flash Sale: attach BUY (-30%) and RESIGN buttons on consumable card (current player's color)
+-- Defined before refreshShopOpenUI so it is in scope when refreshShopOpenUI runs (avoids chunking nil)
+local function uiAttachFlashSaleButtons(card)
+  if not isCard(card) or not S.flashSale or not S.flashSale.active or not S.flashSale.turnOrder then return end
+  local idx = S.flashSale.currentIndex
+  if idx < 1 or idx > #S.flashSale.turnOrder then return end
+  local currentColor = S.flashSale.turnOrder[idx]
+  local tint = flashSaleColorTint(currentColor)
+  uiClearButtons(card)
+  uiSetDescription(card, "Flash Sale: "..tostring(currentColor).." – buy with 30% off or resign")
+  -- Two buttons: 2x size, spread to left/right edges of card so they don't block the card art
+  local btnW, btnH, btnFs = 960, 520, 260
+  local edgeX = 0.58
+  card.createButton({
+    click_function = "shop_flashSaleBuy",
+    function_owner = self,
+    label = "BUY\n-30%",
+    position = {-edgeX, 0.28, 0.08},
+    rotation = {0, 0, 0},
+    width = btnW,
+    height = btnH,
+    font_size = btnFs,
+    color = tint,
+    font_color = {1, 1, 1},
+    tooltip = "Buy this consumable at 30% off",
+  })
+  card.createButton({
+    click_function = "shop_flashSaleResign",
+    function_owner = self,
+    label = "RESIGN",
+    position = {edgeX, 0.28, 0.08},
+    rotation = {0, 0, 0},
+    width = btnW,
+    height = btnH,
+    font_size = btnFs,
+    color = tint,
+    font_color = {1, 1, 1},
+    tooltip = "Skip buying this round",
+  })
+end
+
+-- Gangster L1 Steal hi-tech: STEAL button on one Hi-Tech card (red background)
+local function uiAttachGangsterStealButton(card)
+  if not isCard(card) or not isShopOpenSlotCard(card) or classifyRowByName(card) ~= "H" then return end
+  uiClearButtons(card)
+  uiSetDescription(card, "Gangster: click STEAL to attempt to steal this hi-tech (3 AP spent; then roll die).")
+  card.createButton({
+    click_function = "shop_gangsterStealHitechClick",
+    function_owner = self,
+    label = "STEAL",
+    position = {0, 0.28, 0},
+    width = 600,
+    height = 280,
+    font_size = 150,
+    color = {0.85, 0.2, 0.2, 0.95},
+    font_color = {1, 1, 1},
+    tooltip = "Attempt to steal this hi-tech (die 1-2 fail; 3-4 success + investigation; 5-6 success, heat only)",
+  })
+end
+
 local function refreshShopOpenUI()
   if not ensureBoard() then return end
   for _,o in ipairs(getAllObjects()) do
     if isCard(o) and isShopOpenSlotCard(o) then
-      uiEnsureIdle(o)
+      local g = o.getGUID and o.getGUID()
+      -- Never overwrite ROLL DICE button: cards waiting for die (PILLS, Nature Trip, etc.) or rolling
+      if g and (pendingDice[g] or rollingDice[g]) then
+        if pendingDice[g] and not rollingDice[g] then
+          uiAttachRollDiceButton(o)
+        end
+        -- else: rolling in progress, keep current state
+      elseif S.flashSale and S.flashSale.active and S.flashSale.turnOrder and #S.flashSale.turnOrder > 0 and classifyRowByName(o) == "C" then
+        uiAttachFlashSaleButtons(o)
+      elseif S.gangsterStealHitech and S.gangsterStealHitech.active and classifyRowByName(o) == "H" then
+        uiAttachGangsterStealButton(o)
+      else
+        uiEnsureIdle(o)
+      end
     end
   end
 end
@@ -1109,6 +1206,51 @@ end
 local DICE_ROLL_TIMEOUT  = 6.0  -- seconds to wait for roll
 local DICE_STABLE_READS  = 4     -- number of consecutive stable reads needed
 local DICE_POLL          = 0.12  -- seconds between polls
+
+-- Roll die via VocationsController (Entrepreneur L2 Reroll/Go on support). Uses _G.VOC_DieRollResults bridge.
+local function rollDieForPlayer(color, requestPrefix, onDone)
+  color = normalizeColor(color)
+  if not color then onDone(math.random(1,6)) return end
+  local ts = 0
+  if Time and Time.time then ts = (type(Time.time) == "function") and Time.time() or Time.time
+  elseif os and os.time then ts = os.time() end
+  local requestId = (requestPrefix or "shop") .. "_" .. tostring(color) .. "_" .. tostring(ts)
+  local voc = firstWithTag(TAG_VOCATIONS_CTRL)
+  if not voc or not voc.call then
+    local die = getObjectFromGUID(DIE_GUID)
+    if not die then onDone(math.random(1,6)) return end
+    pcall(function() die.randomize() end)
+    pcall(function() die.roll() end)
+    local timeout = os.time() + 6
+    Wait.condition(
+      function()
+        local v = tryReadDieValue(die)
+        onDone(v and v >= 1 and v <= 6 and v or math.random(1,6))
+      end,
+      function()
+        local resting = false
+        pcall(function() resting = die.resting end)
+        return resting or (os.time() >= timeout)
+      end
+    )
+    return
+  end
+  if not _G.VOC_DieRollResults then _G.VOC_DieRollResults = {} end
+  pcall(function() voc.call("VOC_RollDieForPlayer", { requestId = requestId, color = color }) end)
+  local deadline = (os.time and os.time() or 0) + 12
+  Wait.condition(
+    function()
+      local v = _G.VOC_DieRollResults and _G.VOC_DieRollResults[requestId]
+      if _G.VOC_DieRollResults then _G.VOC_DieRollResults[requestId] = nil end
+      onDone((v and type(v)=="number" and v >= 1 and v <= 6) and v or math.random(1,6))
+    end,
+    function()
+      if _G.VOC_DieRollResults and _G.VOC_DieRollResults[requestId] ~= nil then return true end
+      if (os.time and os.time()) >= deadline then return true end
+      return false
+    end
+  )
+end
 
 local function rollD6(cb)
   local die = getObjectFromGUID(DIE_GUID)
@@ -1657,6 +1799,15 @@ local function giveCardToPlayer(card, color)
         pcall(function() card.setSticky(false) end)
       end
     end, 1.5)
+    -- Extra pass for perk tiles (TAG_PERK_PROXY): some Tiles revert stickiness; force again at 3s
+    Wait.time(function()
+      if card and isCardOrTile(card) and card.hasTag then
+        local ok, hasPerkTag = pcall(function() return card.hasTag(TAG_PERK_PROXY) end)
+        if ok and hasPerkTag then
+          pcall(function() card.setSticky(false) end)
+        end
+      end
+    end, 3)
   else
     log("Failed to place Hi-Tech card for: "..tostring(color))
     -- Make it holdable as fallback
@@ -2107,53 +2258,43 @@ function hitech_onHMonitorUse(card, player_color, alt_click)
     return
   end
   
-  -- Player is sick - roll die
-  local die = getObjectFromGUID(DIE_GUID)
-  if not die then
-    safeBroadcastToColor("⚠️ Die not found (GUID: "..DIE_GUID..")", color, {1,0.6,0.2})
-    return
-  end
-  
   -- Mark as used (before rolling, so player can't click multiple times)
   incrementHiTechUsage(cardName, color, 1)
-  
-  -- Randomize and roll the die
-  pcall(function() die.randomize() end)
-  pcall(function() die.roll() end)
-  
   safeBroadcastToColor("🎲 Rolling die...", color, {0.8,0.9,1})
-  
-  -- Wait for die to settle
-  local timeout = os.time() + 6
-  Wait.condition(
-    function()
-      -- Die has settled, read the value
-      local v = tryReadDieValue(die)
-      if not v or v < 1 or v > 6 then
-        safeBroadcastToColor("⚠️ Could not read die value", color, {1,0.7,0.3})
-        return
-      end
-      
-      -- Apply effect based on roll
-      if v >= 3 and v <= 6 then
-        -- Roll 3-6: Cured (remove SICK status and restore 3 Health – sickness had removed 3)
-        pscRemoveStatus(color, TAG_STATUS_SICK)
-        statsApply(color, {h=3})
-        safeBroadcastToColor("✅ Health Monitor cured SICK! +3 Health restored (roll="..v..")", color, {0.7,1,0.7})
-      else
-        -- Roll 1-2: Still sick (status remains)
-        safeBroadcastToColor("🩺 Health Monitor failed to cure (roll="..v.."). SICK status remains.", color, {1,0.7,0.3})
-      end
-    end,
-    function()
-      -- Condition: wait for die to be resting or timeout
-      local resting = false
-      pcall(function() resting = die.resting end)
-      if resting then return true end
-      if os.time() >= timeout then return true end
-      return false
+  -- Use API callback to avoid closure/context issues when callback runs after Wait
+  local shopObj = self  -- use self (Shop Engine) directly for reliable reference in async callback
+  local targetColor = color
+  rollDieForPlayer(color, "shop_hm", function(v)
+    if not v or v < 1 or v > 6 then
+      broadcastToAll("⚠️ Could not read die value", {1,0.7,0.3})
+      return
     end
-  )
+    local success = (v >= 3 and v <= 6)
+    if shopObj and shopObj.call then
+      pcall(function()
+        shopObj.call("API_HealthMonitorApplyResult", { color = targetColor, success = success, roll = v })
+      end)
+    else
+      broadcastToAll(success and "✅ Health Monitor cured SICK!" or "🩺 Health Monitor failed. SICK remains.", {0.7,1,0.7})
+    end
+  end)
+end
+
+-- Called after Health Monitor die roll (avoids async callback closure/context issues)
+function API_HealthMonitorApplyResult(params)
+  params = params or {}
+  local color = normalizeColor(params.color)
+  local success = params.success
+  local roll = params.roll or 0
+  if not color or color == "White" then return false end
+  if success then
+    pscRemoveStatus(color, TAG_STATUS_SICK)
+    statsApply(color, {h=3})
+    safeBroadcastAll("✅ Health Monitor cured SICK! +3 Health restored (roll="..tostring(roll)..")", {0.7,1,0.7})
+  else
+    safeBroadcastAll("🩺 Health Monitor failed to cure (roll="..tostring(roll).."). SICK status remains.", {1,0.7,0.3})
+  end
+  return true
 end
 
 -- =========================
@@ -2223,6 +2364,7 @@ local function placePublicServantHealthMonitorProxy(color)
     card.setDescription("Public Servant perk: free access to Health Monitor.\nSame use as shop Health Monitor (roll vs SICK).\nCannot be traded or sold.")
     card.addTag(TAG_PERK_PROXY)
     card.addTag(TAG_OWNER_PREFIX .. color)
+    pcall(function() card.setSticky(false) end)
   end)
   -- Clear any broken state so the proxy does not show "Repair" when first placed
   local engine = resolveEventEngine()
@@ -2300,6 +2442,7 @@ local function placePublicServantAlarmProxy(color)
     card.setDescription("Public Servant perk: free Anti-burglary Alarm.\nTheft protection (same as shop).\nCannot be traded or sold.")
     card.addTag(TAG_PERK_PROXY)
     card.addTag(TAG_OWNER_PREFIX .. color)
+    pcall(function() card.setSticky(false) end)
   end)
   local engine = resolveEventEngine()
   if engine and engine.call then
@@ -2375,6 +2518,7 @@ local function placePublicServantCarProxy(color)
     card.setDescription("Public Servant perk: free Car.\nSame as shop (free shop/estate entry; Event cards -1 AP).\nCannot be traded or sold.")
     card.addTag(TAG_PERK_PROXY)
     card.addTag(TAG_OWNER_PREFIX .. color)
+    pcall(function() card.setSticky(false) end)
   end)
   local engine = resolveEventEngine()
   if engine and engine.call then
@@ -2755,7 +2899,7 @@ local function applyConsumableEffect(color, card, def, rollValue)
     end
     
     -- Add baby cost to cost calculator (Family Planning Center: 150 per turn)
-    Costs_add(color, 150)
+    Costs_add(color, 150, "Baby")
     log("Baby cost (Family Planning): "..color.." added 150 WIN per turn for baby")
     
     return true
@@ -2939,7 +3083,7 @@ local function processDebenturesPurchase(color, card, amount, amountToCharge)
   end
   
   -- Add first payment to cost calculator
-  Costs_add(color, amount)
+  Costs_add(color, amount, "Debentures")
   log("Debentures: "..color.." added "..amount.." WIN to cost calculator (payment 1/3)")
   
   -- Store investment state
@@ -3063,80 +3207,48 @@ local function processStockPurchase(color, card, amount, amountToCharge)
     card.addTag("WLB_INVESTMENT")
   end)
   
-  -- Clear buttons and show "Rolling..." message
   uiClearButtons(card)
   uiSetDescription(card, "Rolling first die...")
   safeBroadcastToColor("💰 Stock: Invested "..tostring(amount).." WIN. Rolling first die...", color, {0.8,0.9,1})
-  
-  -- Automatically roll first die
-  local die = getObjectFromGUID(DIE_GUID)
-  if not die then
-    safeBroadcastToColor("⚠️ Die not found (GUID: "..DIE_GUID..")", color, {1,0.6,0.2})
-    -- Return money if die not found
-    moneyAdd(color, amount)
-    return false
-  end
-  
-  pcall(function() die.randomize() end)
-  pcall(function() die.roll() end)
-  
-  -- Wait for die to settle
-  local timeout = os.time() + 6
-  Wait.condition(
-    function()
-      local v = tryReadDieValue(die)
-      if not v or v < 1 or v > 6 then
-        safeBroadcastToColor("⚠️ Could not read die value", color, {1,0.7,0.3})
-        -- Return money if can't read die
-        moneyAdd(color, amount)
-        return
-      end
-      
-      -- Store first roll
-      S.investments[color].stock.firstRoll = v
-      safeBroadcastAll("🎲 "..color.." Stock: First roll = "..v, {0.8,0.9,1})
-      
-      -- Show result and Yes/No buttons
-      uiSetDescription(card, "First die: "..v.."\nDo you want to continue?")
-      pcall(function()
-        card.clearButtons()
-        card.createButton({
-          click_function = "inv_stock_continueYes",
-          function_owner = self,
-          label = "YES\n(Roll Second)",
-          position = {-0.4, 0.33, 1.0},
-          rotation = {0, 0, 0},
-          width = 700,
-          height = 300,
-          font_size = 120,
-          color = {0.2, 0.8, 0.2, 0.95},
-          font_color = {1, 1, 1, 1},
-          tooltip = "Continue and roll second die",
-        })
-        card.createButton({
-          click_function = "inv_stock_continueNo",
-          function_owner = self,
-          label = "NO\n(Return Money)",
-          position = {0.4, 0.33, 1.0},
-          rotation = {0, 0, 0},
-          width = 700,
-          height = 300,
-          font_size = 120,
-          color = {0.8, 0.2, 0.2, 0.95},
-          font_color = {1, 1, 1, 1},
-          tooltip = "Cancel and get investment back",
-        })
-      end)
-    end,
-    function()
-      local resting = false
-      pcall(function() resting = die.resting end)
-      if resting then return true end
-      if os.time() >= timeout then return true end
-      return false
+  rollDieForPlayer(color, "shop_stock1", function(v)
+    if not v or v < 1 or v > 6 then
+      safeBroadcastToColor("⚠️ Could not read die value", color, {1,0.7,0.3})
+      moneyAdd(color, amount)
+      return
     end
-  )
-  
+    S.investments[color].stock.firstRoll = v
+    safeBroadcastAll("🎲 "..color.." Stock: First roll = "..v, {0.8,0.9,1})
+    uiSetDescription(card, "First die: "..v.."\nDo you want to continue?")
+    pcall(function()
+      card.clearButtons()
+      card.createButton({
+        click_function = "inv_stock_continueYes",
+        function_owner = self,
+        label = "YES\n(Roll Second)",
+        position = {-0.4, 0.33, 1.0},
+        rotation = {0, 0, 0},
+        width = 700,
+        height = 300,
+        font_size = 120,
+        color = {0.2, 0.8, 0.2, 0.95},
+        font_color = {1, 1, 1, 1},
+        tooltip = "Continue and roll second die",
+      })
+      card.createButton({
+        click_function = "inv_stock_continueNo",
+        function_owner = self,
+        label = "NO\n(Return Money)",
+        position = {0.4, 0.33, 1.0},
+        rotation = {0, 0, 0},
+        width = 700,
+        height = 300,
+        font_size = 120,
+        color = {0.8, 0.2, 0.2, 0.95},
+        font_color = {1, 1, 1, 1},
+        tooltip = "Cancel and get investment back",
+      })
+    end)
+  end)
   return true
 end
 
@@ -3155,7 +3267,7 @@ local function processEndowmentPurchase(color, card, amount, duration, amountToC
   end
   
   -- Add first payment to cost calculator
-  Costs_add(color, amount)
+  Costs_add(color, amount, "Endowment")
   log("Endowment: "..color.." added "..amount.." WIN to cost calculator (payment 1/"..duration..")")
   
   -- Store investment state
@@ -3554,9 +3666,19 @@ local function attemptBuyCard(card, buyerColor, options)
 
   -- Voucher discount: 25% per token for C/H (options.discountTokens, options.voucherTag)
   local cost = def.cost or 0
+  -- Entrepreneur L1 Flash Sale: 30% off consumables only
+  if row == "C" and options.flashSaleDiscount and tonumber(options.flashSaleDiscount) then
+    local pct = math.max(0, math.min(1, tonumber(options.flashSaleDiscount)))
+    cost = math.max(0, math.floor(cost * (1 - pct)))
+  end
   local discountTokens = (row == "C" or row == "H") and options.discountTokens and options.voucherTag and math.max(0, math.min(4, math.floor(tonumber(options.discountTokens) or 0))) or 0
   if discountTokens > 0 then
     cost = math.max(0, math.floor(cost * (1 - 0.25 * discountTokens)))
+  end
+
+  -- Entrepreneur L1 "Talk to shop owner": other players pay double for consumables and hi-tech only (not investments/loans)
+  if (row == "C" or row == "H") and S.doublePricesInitiator and normalizeColor(buyerColor) ~= normalizeColor(S.doublePricesInitiator) then
+    cost = math.max(0, math.floor(cost * 2))
   end
 
   -- Public Servant: 50% off consumables only (stacks with vouchers). Not for Hi-Tech or Investments.
@@ -3914,6 +4036,10 @@ end
 -- =========================
 function shop_onCardClicked(card, player_color, alt_click)
   if not isCard(card) then return end
+  -- During Flash Sale, consumable cards use Flash Sale buttons only (no modal)
+  if S.flashSale and S.flashSale.active and classifyRowByName(card) == "C" then return end
+  -- During Gangster Steal hi-tech, H cards use STEAL button only (no modal)
+  if S.gangsterStealHitech and S.gangsterStealHitech.active and classifyRowByName(card) == "H" then return end
   uiOpenModal(card)
 end
 
@@ -3921,6 +4047,71 @@ function shop_onNo(card, player_color, alt_click)
   if not isCard(card) then return end
   if checkBusyGate(player_color) then return end
   uiCloseModal(card)
+end
+
+-- Flash Sale: current player buys this consumable at 30% off
+function shop_flashSaleBuy(card, player_color, alt_click)
+  if not isCard(card) or not S.flashSale or not S.flashSale.active then return end
+  if not isShopOpenSlotCard(card) or classifyRowByName(card) ~= "C" then return end
+  local idx = S.flashSale.currentIndex
+  if idx < 1 or idx > #S.flashSale.turnOrder then return end
+  local buyer = S.flashSale.turnOrder[idx]
+  local initiator = S.flashSale.initiatorColor
+  local ok = attemptBuyCard(card, buyer, { flashSaleDiscount = 0.3 })
+  if not ok then
+    refreshShopOpenUI_later(0.2)
+    return
+  end
+  -- Entrepreneur gains +1 SAT only when another player buys (not for own purchase), and only for real players (not White)
+  if buyer ~= initiator and initiator and initiator ~= "White" then
+    if type(satAdd) == "function" then
+      satAdd(initiator, 1)
+      safeBroadcastAll("🛒 Flash Sale: "..tostring(initiator).." gains +1 Satisfaction ("..tostring(buyer).." bought).", {0.7,1,0.7})
+    else
+      safeBroadcastAll("🛒 Flash Sale: "..tostring(initiator).." would gain +1 SAT (SAT not available).", {0.8,0.8,0.8})
+    end
+  end
+  -- Refill consumable row via callable API (avoids nil deal3Open in chunked callback)
+  Wait.time(function()
+    if self and self.call then pcall(function() self.call("API_RefillConsumableRow", {}) end) end
+  end, 0.35)
+  S.flashSale.currentIndex = idx + 1
+  if S.flashSale.currentIndex > #S.flashSale.turnOrder then
+    S.flashSale = nil
+    safeBroadcastAll("🛒 Flash Sale ended. All players had their turn.", {0.7,1,0.7})
+  end
+  refreshShopOpenUI_later(0.6)
+end
+
+-- Gangster L1 Steal hi-tech: player chose this card; notify VocationsController to roll die and resolve
+function shop_gangsterStealHitechClick(card, player_color, alt_click)
+  if not isCard(card) or not S.gangsterStealHitech or not S.gangsterStealHitech.active then return end
+  if not isShopOpenSlotCard(card) or classifyRowByName(card) ~= "H" then return end
+  local cardGuid = card.getGUID()
+  local color = S.gangsterStealHitech.color
+  S.gangsterStealHitech = nil
+  refreshShopOpenUI_later(0.1)
+  local voc = firstWithTag(TAG_VOCATIONS_CTRL)
+  if voc and voc.call then
+    pcall(function() voc.call("VOC_GangsterStealHitechCardChosen", { cardGuid = cardGuid, color = color }) end)
+  else
+    safeBroadcastAll("⚠️ VocationsController not found – cannot resolve Gangster steal.", {1,0.6,0.2})
+  end
+end
+
+-- Flash Sale: current player skips (resign)
+function shop_flashSaleResign(card, player_color, alt_click)
+  if not isCard(card) or not S.flashSale or not S.flashSale.active then return end
+  local idx = S.flashSale.currentIndex
+  if idx < 1 or idx > #S.flashSale.turnOrder then return end
+  local skipped = S.flashSale.turnOrder[idx]
+  safeBroadcastAll("🛒 Flash Sale: "..tostring(skipped).." skipped.", {0.85,0.85,0.85})
+  S.flashSale.currentIndex = idx + 1
+  if S.flashSale.currentIndex > #S.flashSale.turnOrder then
+    S.flashSale = nil
+    safeBroadcastAll("🛒 Flash Sale ended. All players had their turn.", {0.7,1,0.7})
+  end
+  refreshShopOpenUI_later(0.2)
 end
 
 -- Voucher: "Use discount? (S)" No -> buy at full price
@@ -4088,67 +4279,45 @@ function shop_onRollDice(card, player_color, alt_click)
   local g = card.getGUID()
   local pending = pendingDice[g]
   if not pending then
-    safeBroadcastToColor("⚠️ No pending dice roll on this card", player_color, {1,0.6,0.2})
-    return
-  end
-  
-  -- Roll the die (like TurnController does when button is clicked)
-  local die = getObjectFromGUID(DIE_GUID)
-  if not die then
-    safeBroadcastToColor("⚠️ Die not found (GUID: "..DIE_GUID..")", player_color, {1,0.6,0.2})
-    return
-  end
-  
-  -- Randomize and roll the die (same as TurnController)
-  pcall(function() die.randomize() end)
-  pcall(function() die.roll() end)
-  
-  -- Wait for die to settle (same pattern as TurnController)
-  local timeout = os.time() + 6
-  Wait.condition(
-    function()
-      -- Die has settled, read the value
-      local v = tryReadDieValue(die)
-      if not v or v < 1 or v > 6 then
-        safeBroadcastToColor("⚠️ Could not read die value", player_color, {1,0.7,0.3})
-        return
-      end
-      
-      -- Clear pending state
-      pendingDice[g] = nil
-      diceInitialValue[g] = nil
-      
-      -- Complete the effect with the roll value (check card type)
-      local result = nil
-      if pending.cardType == "INVESTMENT" then
-        result = applyInvestmentEffect(pending.color, card, pending.def, v)
-      else
-        -- Default: Consumable
-        result = applyConsumableEffect(pending.color, card, pending.def, v)
-      end
-      
-      -- Clear UI and stash card
-      uiClearButtons(card)
-      uiClearDescription(card)
-      
-      Wait.time(function()
-        if card and card.tag=="Card" then
-          stashPurchasedCard(card)
-        end
-        refreshShopOpenUI_later(0.25)
-      end, 0.3)
-      
-      safeBroadcastToColor("🎲 Die rolled: "..v, player_color, {0.8,0.9,1})
-    end,
-    function()
-      -- Condition: wait for die to be resting or timeout
-      local resting = false
-      pcall(function() resting = die.resting end)
-      if resting then return true end
-      if os.time() >= timeout then return true end
-      return false
+    if rollingDice[g] then
+      safeBroadcastToColor("⏳ Roll already in progress – please wait", player_color, {1,0.9,0.3})
+    else
+      safeBroadcastToColor("⚠️ No pending dice roll on this card", player_color, {1,0.6,0.2})
     end
-  )
+    return
+  end
+  
+  -- Prevent double-click: move to rolling state immediately
+  pendingDice[g] = nil
+  rollingDice[g] = true
+  
+  local rollColor = pending.color or player_color
+  rollDieForPlayer(rollColor, "shop_dice", function(v)
+    rollingDice[g] = nil
+    if not v or v < 1 or v > 6 then
+      safeBroadcastToColor("⚠️ Could not read die value", player_color, {1,0.7,0.3})
+      -- Restore pending so user can try again
+      pendingDice[g] = pending
+      uiAttachRollDiceButton(card)
+      return
+    end
+    diceInitialValue[g] = nil
+    local result = nil
+    if pending.cardType == "INVESTMENT" then
+      result = applyInvestmentEffect(pending.color, card, pending.def, v)
+    else
+      result = applyConsumableEffect(pending.color, card, pending.def, v)
+    end
+    uiClearButtons(card)
+    uiClearDescription(card)
+    Wait.time(function()
+      if card and card.tag=="Card" then
+        stashPurchasedCard(card)
+      end
+      refreshShopOpenUI_later(0.25)
+    end, 0.3)
+    safeBroadcastToColor("🎲 Die rolled: "..v, player_color, {0.8,0.9,1})
+  end)
 end
 
 -- =========================
@@ -4292,11 +4461,10 @@ function inv_debentures_cashOut(card, player_color, alt_click)
   end
   
   -- Remove from cost calculator (cancel remaining payments)
-  -- Since CostsCalc is additive, we subtract the remaining payments
   local remainingPayments = 3 - inv.paidCount
   if remainingPayments > 0 then
     local totalRemaining = inv.investedPerTurn * remainingPayments
-    Costs_add(color, -totalRemaining)  -- Subtract remaining payments
+    Costs_add(color, -totalRemaining, "Debentures (cancelled)", "costs")  -- Subtract from costs bucket
     log("Debentures cashout: Removed "..tostring(totalRemaining).." WIN from cost calculator for "..color)
   end
   
@@ -4347,97 +4515,45 @@ function inv_stock_continueYes(card, player_color, alt_click)
     return
   end
   
-  -- Clear buttons and show "Rolling..." message
   uiClearButtons(card)
   uiSetDescription(card, "Rolling second die...")
   safeBroadcastToColor("🎲 Rolling second die...", color, {0.8,0.9,1})
-  
-  -- Roll the die
-  local die = getObjectFromGUID(DIE_GUID)
-  if not die then
-    safeBroadcastToColor("⚠️ Die not found (GUID: "..DIE_GUID..")", color, {1,0.6,0.2})
-    -- Return money if die not found
-    moneyAdd(color, inv.investmentAmount or 0)
-    S.investments[color].stock = nil
-    return
-  end
-  
-  pcall(function() die.randomize() end)
-  pcall(function() die.roll() end)
-  
-  -- Wait for die to settle
-  local timeout = os.time() + 6
-  Wait.condition(
-    function()
-      local v = tryReadDieValue(die)
-      if not v or v < 1 or v > 6 then
-        safeBroadcastToColor("⚠️ Could not read die value", color, {1,0.7,0.3})
-        -- Return money if can't read die
-        moneyAdd(color, inv.investmentAmount or 0)
-        S.investments[color].stock = nil
-        return
-      end
-      
-      -- Store second roll
-      inv.secondRoll = v
-      inv.resolved = true
-      
-      local firstRoll = inv.firstRoll
-      local secondRoll = v
-      local investmentAmount = inv.investmentAmount or 0
-      
-      -- Calculate result
-      local payout = 0
-      local message = ""
-      local colorMsg = {0.8,0.8,0.8}
-      
-      if secondRoll > firstRoll then
-        -- Win: Double investment (2× return, 100% profit)
-        payout = investmentAmount * 2
-        message = "🎉🎉 "..color.." Stock: WON! (First="..firstRoll..", Second="..secondRoll..") → "..tostring(payout).." WIN (profit: "..tostring(investmentAmount)..")"
-        colorMsg = {0.9,1,0.6}
-      elseif secondRoll == firstRoll then
-        -- Break even: Get investment back
-        payout = investmentAmount
-        message = "➖ "..color.." Stock: Break even (First="..firstRoll..", Second="..secondRoll..") → "..tostring(payout).." WIN back"
-        colorMsg = {0.8,0.8,0.8}
-      else
-        -- Lose: No payout
-        payout = 0
-        message = "❌ "..color.." Stock: LOST (First="..firstRoll..", Second="..secondRoll..") → 0 WIN (lost "..tostring(investmentAmount)..")"
-        colorMsg = {0.9,0.7,0.7}
-      end
-      
-      -- Pay out
-      if payout > 0 then
-        local ok = moneyAdd(color, payout)
-        if not ok then
-          safeBroadcastAll("⚠️ Stock: Failed to add payout", {1,0.7,0.2})
-        end
-      end
-      
-      safeBroadcastAll(message, colorMsg)
-      
-      -- Clear investment state
+  rollDieForPlayer(color, "shop_stock2", function(v)
+    if not v or v < 1 or v > 6 then
+      safeBroadcastToColor("⚠️ Could not read die value", color, {1,0.7,0.3})
+      moneyAdd(color, inv.investmentAmount or 0)
       S.investments[color].stock = nil
-      
-      -- Remove card buttons and stash card
-      pcall(function() card.clearButtons() end)
-      uiClearDescription(card)
-      Wait.time(function()
-        if card and card.tag=="Card" then
-          stashPurchasedCard(card)
-        end
-      end, 0.3)
-    end,
-    function()
-      local resting = false
-      pcall(function() resting = die.resting end)
-      if resting then return true end
-      if os.time() >= timeout then return true end
-      return false
+      return
     end
-  )
+    inv.secondRoll = v
+    inv.resolved = true
+    local firstRoll = inv.firstRoll
+    local secondRoll = v
+    local investmentAmount = inv.investmentAmount or 0
+    local payout, message, colorMsg = 0, "", {0.8,0.8,0.8}
+    if secondRoll > firstRoll then
+      payout = investmentAmount * 2
+      message = "🎉🎉 "..color.." Stock: WON! (First="..firstRoll..", Second="..secondRoll..") → "..tostring(payout).." WIN (profit: "..tostring(investmentAmount)..")"
+      colorMsg = {0.9,1,0.6}
+    elseif secondRoll == firstRoll then
+      payout = investmentAmount
+      message = "➖ "..color.." Stock: Break even (First="..firstRoll..", Second="..secondRoll..") → "..tostring(payout).." WIN back"
+    else
+      message = "❌ "..color.." Stock: LOST (First="..firstRoll..", Second="..secondRoll..") → 0 WIN (lost "..tostring(investmentAmount)..")"
+      colorMsg = {0.9,0.7,0.7}
+    end
+    if payout > 0 then
+      local ok = moneyAdd(color, payout)
+      if not ok then safeBroadcastAll("⚠️ Stock: Failed to add payout", {1,0.7,0.2}) end
+    end
+    safeBroadcastAll(message, colorMsg)
+    S.investments[color].stock = nil
+    pcall(function() card.clearButtons() end)
+    uiClearDescription(card)
+    Wait.time(function()
+      if card and card.tag=="Card" then stashPurchasedCard(card) end
+    end, 0.3)
+  end)
 end
 
 function inv_stock_continueNo(card, player_color, alt_click)
@@ -4499,70 +4615,43 @@ function inv_stock_rollFirst(card, player_color, alt_click)
     safeBroadcastToColor("⚠️ First roll already made. Click ROLL SECOND DIE", color, {1,0.7,0.2})
     return
   end
-  
-  -- Roll the die
-  local die = getObjectFromGUID(DIE_GUID)
-  if not die then
-    safeBroadcastToColor("⚠️ Die not found (GUID: "..DIE_GUID..")", color, {1,0.6,0.2})
-    return
-  end
-  
-  pcall(function() die.randomize() end)
-  pcall(function() die.roll() end)
-  
-  -- Wait for die to settle
-  local timeout = os.time() + 6
-  Wait.condition(
-    function()
-      local v = tryReadDieValue(die)
-      if not v or v < 1 or v > 6 then
-        safeBroadcastToColor("⚠️ Could not read die value", color, {1,0.7,0.3})
-        return
-      end
-      
-      -- Store first roll
-      inv.firstRoll = v
-      safeBroadcastAll("🎲 "..color.." Stock: First roll = "..v, {0.8,0.9,1})
-      
-      -- Update card buttons: show second roll button, keep resign
-      pcall(function()
-        card.clearButtons()
-        card.createButton({
-          click_function = "inv_stock_rollSecond",
-          function_owner = self,
-          label = "ROLL\nSECOND DIE",
-          position = {-0.4, 0.33, 1.0},
-          rotation = {0, 0, 0},
-          width = 700,
-          height = 300,
-          font_size = 120,
-          color = {0.2, 0.6, 0.9, 0.95},
-          font_color = {1, 1, 1, 1},
-          tooltip = "Roll second die (must be > "..v.." to win)",
-        })
-        card.createButton({
-          click_function = "inv_stock_resign",
-          function_owner = self,
-          label = "RESIGN\n(Break Even)",
-          position = {0.4, 0.33, 1.0},
-          rotation = {0, 0, 0},
-          width = 700,
-          height = 300,
-          font_size = 120,
-          color = {0.6, 0.6, 0.6, 0.95},
-          font_color = {1, 1, 1, 1},
-          tooltip = "Resign and get investment back (no profit/loss)",
-        })
-      end)
-    end,
-    function()
-      local resting = false
-      pcall(function() resting = die.resting end)
-      if resting then return true end
-      if os.time() >= timeout then return true end
-      return false
+  rollDieForPlayer(color, "shop_stock1b", function(v)
+    if not v or v < 1 or v > 6 then
+      safeBroadcastToColor("⚠️ Could not read die value", color, {1,0.7,0.3})
+      return
     end
-  )
+    inv.firstRoll = v
+    safeBroadcastAll("🎲 "..color.." Stock: First roll = "..v, {0.8,0.9,1})
+    pcall(function()
+      card.clearButtons()
+      card.createButton({
+        click_function = "inv_stock_rollSecond",
+        function_owner = self,
+        label = "ROLL\nSECOND DIE",
+        position = {-0.4, 0.33, 1.0},
+        rotation = {0, 0, 0},
+        width = 700,
+        height = 300,
+        font_size = 120,
+        color = {0.2, 0.6, 0.9, 0.95},
+        font_color = {1, 1, 1, 1},
+        tooltip = "Roll second die (must be > "..v.." to win)",
+      })
+      card.createButton({
+        click_function = "inv_stock_resign",
+        function_owner = self,
+        label = "RESIGN\n(Break Even)",
+        position = {0.4, 0.33, 1.0},
+        rotation = {0, 0, 0},
+        width = 700,
+        height = 300,
+        font_size = 120,
+        color = {0.6, 0.6, 0.6, 0.95},
+        font_color = {1, 1, 1, 1},
+        tooltip = "Resign and get investment back (no profit/loss)",
+      })
+    end)
+  end)
 end
 
 function inv_stock_rollSecond(card, player_color, alt_click)
@@ -4579,86 +4668,42 @@ function inv_stock_rollSecond(card, player_color, alt_click)
     safeBroadcastToColor("⚠️ Second roll already made", color, {1,0.7,0.2})
     return
   end
-  
-  -- Roll the die
-  local die = getObjectFromGUID(DIE_GUID)
-  if not die then
-    safeBroadcastToColor("⚠️ Die not found (GUID: "..DIE_GUID..")", color, {1,0.6,0.2})
-    return
-  end
-  
-  pcall(function() die.randomize() end)
-  pcall(function() die.roll() end)
-  
-  -- Wait for die to settle
-  local timeout = os.time() + 6
-  Wait.condition(
-    function()
-      local v = tryReadDieValue(die)
-      if not v or v < 1 or v > 6 then
-        safeBroadcastToColor("⚠️ Could not read die value", color, {1,0.7,0.3})
-        return
-      end
-      
-      -- Store second roll
-      inv.secondRoll = v
-      inv.resolved = true
-      
-      local firstRoll = inv.firstRoll
-      local secondRoll = v
-      local investmentAmount = inv.investmentAmount or 0
-      
-      -- Calculate result
-      local payout = 0
-      local message = ""
-      local colorMsg = {0.8,0.8,0.8}
-      
-      if secondRoll > firstRoll then
-        -- Win: Double investment (2× return, 100% profit)
-        payout = investmentAmount * 2
-        message = "🎉🎉 "..color.." Stock: WON! (First="..firstRoll..", Second="..secondRoll..") → "..tostring(payout).." WIN (profit: "..tostring(investmentAmount)..")"
-        colorMsg = {0.9,1,0.6}
-      elseif secondRoll == firstRoll then
-        -- Break even: Get investment back
-        payout = investmentAmount
-        message = "➖ "..color.." Stock: Break even (First="..firstRoll..", Second="..secondRoll..") → "..tostring(payout).." WIN back"
-        colorMsg = {0.8,0.8,0.8}
-      else
-        -- Lose: No payout
-        payout = 0
-        message = "❌ "..color.." Stock: LOST (First="..firstRoll..", Second="..secondRoll..") → 0 WIN (lost "..tostring(investmentAmount)..")"
-        colorMsg = {0.9,0.7,0.7}
-      end
-      
-      -- Pay out
-      if payout > 0 then
-        local ok = moneyAdd(color, payout)
-        if not ok then
-          safeBroadcastAll("⚠️ Stock: Failed to add payout", {1,0.7,0.2})
-        end
-      end
-      
-      safeBroadcastAll(message, colorMsg)
-      
-      -- Clear investment state
-      S.investments[color].stock = nil
-      
-      -- Remove card buttons and stash card
-      pcall(function() card.clearButtons() end)
-      Wait.time(function()
-        if card and card.tag=="Card" then
-          stashPurchasedCard(card)
-        end
-      end, 0.3)
-    end,
-    function()
-      local resting = false
-      pcall(function() resting = die.resting end)
-      if resting then return true end
-      if os.time() >= timeout then return true end
-      return false
+  rollDieForPlayer(color, "shop_stock2b", function(v)
+    if not v or v < 1 or v > 6 then
+      safeBroadcastToColor("⚠️ Could not read die value", color, {1,0.7,0.3})
+      return
     end
-  )
+    inv.secondRoll = v
+    inv.resolved = true
+    local firstRoll = inv.firstRoll
+    local secondRoll = v
+    local investmentAmount = inv.investmentAmount or 0
+    local payout = 0
+    local message = ""
+    local colorMsg = {0.8,0.8,0.8}
+    if secondRoll > firstRoll then
+      payout = investmentAmount * 2
+      message = "🎉🎉 "..color.." Stock: WON! (First="..firstRoll..", Second="..secondRoll..") → "..tostring(payout).." WIN (profit: "..tostring(investmentAmount)..")"
+      colorMsg = {0.9,1,0.6}
+    elseif secondRoll == firstRoll then
+      payout = investmentAmount
+      message = "➖ "..color.." Stock: Break even (First="..firstRoll..", Second="..secondRoll..") → "..tostring(payout).." WIN back"
+    else
+      payout = 0
+      message = "❌ "..color.." Stock: LOST (First="..firstRoll..", Second="..secondRoll..") → 0 WIN (lost "..tostring(investmentAmount)..")"
+      colorMsg = {0.9,0.7,0.7}
+    end
+    if payout > 0 then
+      local ok = moneyAdd(color, payout)
+      if not ok then safeBroadcastAll("⚠️ Stock: Failed to add payout", {1,0.7,0.2}) end
+    end
+    safeBroadcastAll(message, colorMsg)
+    S.investments[color].stock = nil
+    pcall(function() card.clearButtons() end)
+    Wait.time(function()
+      if card and card.tag=="Card" then stashPurchasedCard(card) end
+    end, 0.3)
+  end)
 end
 
 function inv_stock_resign(card, player_color, alt_click)
@@ -4919,6 +4964,66 @@ local function deal3Open(row, deckObj)
   end
 
   refreshShopOpenUI_later(0.35)
+end
+
+-- Callable: refill consumable row only (used after Flash Sale purchase; defined here so deal3Open/deckForRow are in scope)
+function API_RefillConsumableRow(_)
+  local dc = deckForRow("C")
+  if dc then deal3Open("C", dc) end
+  return true
+end
+
+-- Callable: refill hi-tech row (one card per empty slot; used after Gangster steal)
+function API_RefillHiTechRow(_)
+  local dh = deckForRow("H")
+  if dh then deal3Open("H", dh) end
+  return true
+end
+
+-- Callable: start Gangster L1 Steal hi-tech. Shows STEAL on all open H cards. Cost 3 AP is taken by VocationsController.
+function API_StartGangsterStealHitech(params)
+  params = params or {}
+  local color = normalizeColor(params.color or params.initiatorColor)
+  if not color or color == "" then return false end
+  if S.gangsterStealHitech and S.gangsterStealHitech.active then
+    log("API_StartGangsterStealHitech: already active")
+    return false
+  end
+  S.gangsterStealHitech = { active = true, color = color }
+  refreshShopOpenUI_later(0.15)
+  safeBroadcastAll("🔫 "..tostring(color).." attempts to steal hi-tech: click STEAL on one open hi-tech card, then the die will be rolled.", {0.9, 0.5, 0.2})
+  return true
+end
+
+-- Callable: complete Gangster steal – give this hi-tech card to the gangster and refill H row. Called by VocationsController after successful die roll.
+function API_CompleteGangsterStealHitech(params)
+  params = params or {}
+  local cardGuid = params.cardGuid or params.card_guid
+  local toColor = normalizeColor(params.toColor or params.color)
+  if not cardGuid or not toColor then return false end
+  local card = getObjectFromGUID(cardGuid)
+  if not card or not isCard(card) then
+    log("API_CompleteGangsterStealHitech: card not found "..tostring(cardGuid))
+    return false
+  end
+  if classifyRowByName(card) ~= "H" then return false end
+  local name = getNameSafe(card)
+  local def = HI_TECH_DEF[name]
+  if not def then
+    log("API_CompleteGangsterStealHitech: unknown hi-tech "..tostring(name))
+    return false
+  end
+  toColor = normalizeColor(toColor)
+  if not S.ownedHiTech[toColor] then S.ownedHiTech[toColor] = {} end
+  table.insert(S.ownedHiTech[toColor], name)
+  applyHiTechEffect(toColor, name, def)
+  giveCardToPlayer(card, toColor)
+  safeBroadcastAll("🔫 Gangster stole "..tostring(name).." – moved to "..tostring(toColor).."'s board.", {0.9, 0.5, 0.2})
+  Wait.time(function()
+    if self and self.call then pcall(function() self.call("API_RefillHiTechRow", {}) end) end
+  end, 0.35)
+  refreshShopOpenUI_later(0.6)
+  return true
 end
 
 local function takeOpenCardsBackToDeck(row, deckObj)
@@ -5186,6 +5291,18 @@ local function btn(label, fn, x, z, w, h, fs, tip)
   })
 end
 
+local function refreshShopBoardDoublePricesUI()
+  local board = getObjectFromGUID("2df5f1")
+  if not board then
+    for _, o in ipairs(getObjectsWithTag(TAG_SHOPS_BOARD) or {}) do
+      if o and o.call then board = o break end
+    end
+  end
+  if board and board.call then
+    pcall(function() board.call("API_RefreshDoublePricesUI", {}) end)
+  end
+end
+
 local function drawUI()
   self.clearButtons()
 
@@ -5198,6 +5315,9 @@ local function drawUI()
 
   btn("CHECK", "UI_check",     0.00, -0.70, 1200, 420, 160, "Print loose/deck counts to console")
   btn("+1000\nWIN", "UI_add1000", 0.00, -1.20, 1200, 420, 160, "DEBUG: dodaj 1000 WIN dla aktywnego gracza")
+
+  -- Double prices reminder is on Shop Board (GUID 2df5f1), not here
+  refreshShopBoardDoublePricesUI()
 end
 
 function UI_reset()  pipeline_RESET() end
@@ -5282,6 +5402,54 @@ local function clearNGOTakeTripButtons()
     end
   end
   S.pendingNGOTakeTripColor = nil
+end
+
+-- Find all visible Good Karma cards in the shop consumable row (open slots only). Used by NGO "Take Good Karma (free)".
+local function findAllVisibleGoodKarmaCards()
+  local list = {}
+  if not ensureBoard() then return list end
+  local function addIfKarma(o)
+    if not isCard(o) or classifyRowByName(o) ~= "C" then return end
+    if not isShopOpenSlotCard(o) then return end
+    local name = getNameSafe(o)
+    local def = CONSUMABLE_DEF[name]
+    if def and def.kind == "KARMA" then
+      table.insert(list, { card = o, def = def })
+      return
+    end
+    if name and string.find(string.upper(name), "KARMA") then
+      table.insert(list, { card = o, def = def or { cost = 200, extraAP = 0, kind = "KARMA" } })
+    end
+  end
+  for _, o in ipairs(getAllObjects()) do
+    addIfKarma(o)
+  end
+  return list
+end
+
+-- NGO "Take Good Karma (free)": true if at least one Good Karma card is visible in the shop consumable row.
+function API_hasVisibleGoodKarmaCard(params)
+  return #findAllVisibleGoodKarmaCards() > 0
+end
+
+-- NGO "Take Good Karma (free)": take the first visible Good Karma card from the shop; apply effect (add token), stash card. Returns true if taken.
+function API_takeFirstGoodKarmaCardForNGO(params)
+  params = params or {}
+  local color = normalizeColor(params.color or params.player_color)
+  if not color or color == "" then return false end
+  local list = findAllVisibleGoodKarmaCards()
+  if #list == 0 then return false end
+  local entry = list[1]
+  local card, def = entry.card, entry.def
+  if not card or not def then return false end
+  applyConsumableEffect(color, card, def)
+  Wait.time(function()
+    if card and card.tag == "Card" then
+      stashPurchasedCard(card)
+    end
+    refreshShopOpenUI_later(0.25)
+  end, 0.3)
+  return true
 end
 
 -- NGO Worker L2: Show "Take this Trip (free)" on each visible Trip card; player picks one, then we apply effect and mark used.
@@ -5369,6 +5537,56 @@ end
 -- =========================
 function API_reset(_)  pipeline_RESET();  return true end
 function API_refill(_) pipeline_REFILL(); return true end
+
+-- Entrepreneur L1 Flash Sale: start flow – show BUY (-30%) / RESIGN on each consumable card, in turn order
+function API_StartFlashSale(params)
+  params = params or {}
+  local initiatorColor = normalizeColor(params.initiatorColor or params.color)
+  if not initiatorColor or initiatorColor == "" then return false end
+  local order = params.turnOrder
+  if type(order) ~= "table" then order = {} end
+  local turnOrder = {}
+  for _, c in ipairs(order) do
+    c = normalizeColor(c)
+    if c and c ~= "" and c ~= "White" then turnOrder[#turnOrder + 1] = c end
+  end
+  if #turnOrder == 0 then
+    safeBroadcastAll("⚠️ Flash Sale: no turn order (start game first).", {1,0.7,0.2})
+    return false
+  end
+  S.flashSale = { active = true, initiatorColor = initiatorColor, turnOrder = turnOrder, currentIndex = 1 }
+  safeBroadcastAll("🛒 Flash Sale: "..tostring(initiatorColor).." started. Each player may buy one consumable at 30% off (in turn order) or resign.", {0.9,0.6,0.2})
+  refreshShopOpenUI_later(0.15)
+  return true
+end
+
+-- Returns current double-prices initiator color or nil. Used by Shop Board for UI.
+function API_GetDoublePricesInitiator(_)
+  return S.doublePricesInitiator
+end
+
+-- Entrepreneur L1 "Talk to shop owner": other players pay double for consumables & hi-tech until initiator's next turn
+function SetDoublePrices(params)
+  params = params or {}
+  local initiatorColor = normalizeColor(params.initiatorColor or params.color)
+  if not initiatorColor or initiatorColor == "" then return false end
+  S.doublePricesInitiator = initiatorColor
+  drawUI()
+  safeBroadcastAll("🛒 "..tostring(initiatorColor).." talked to the shop owner: other players pay DOUBLE for consumables & hi-tech until "..tostring(initiatorColor).."'s next turn.", {0.9, 0.5, 0.2})
+  return true
+end
+
+-- Called by TurnController when turn changes; clears double prices when the initiator's turn starts again
+function API_OnTurnChanged(params)
+  params = params or {}
+  local newColor = normalizeColor(params.newColor or params.activeColor)
+  if not newColor or newColor == "" then return end
+  if S.doublePricesInitiator and normalizeColor(S.doublePricesInitiator) == newColor then
+    S.doublePricesInitiator = nil
+    drawUI()
+    safeBroadcastAll("🛒 Double prices ended (Entrepreneur's turn). Shop prices back to normal.", {0.7, 0.9, 0.7})
+  end
+end
 
 function API_randomize(args)
   args = args or {}
@@ -5459,7 +5677,7 @@ function API_processInvestmentPayments(params)
     local inv = S.investments[color].debentures
     if inv.paidCount < 3 then
       -- Add payment to cost calculator
-      Costs_add(color, inv.investedPerTurn)
+      Costs_add(color, inv.investedPerTurn, "Debentures")
       inv.paidCount = inv.paidCount + 1
       inv.totalInvested = inv.totalInvested + (inv.investedPerTurn or 0)
       log("Debentures: "..color.." payment "..tostring(inv.paidCount).."/3 added to cost calculator")
@@ -5494,7 +5712,7 @@ function API_processInvestmentPayments(params)
     local inv = S.investments[color].loan
     if inv.paidInstalments < 4 then
       -- Add instalment to cost calculator
-      Costs_add(color, inv.instalmentAmount)
+      Costs_add(color, inv.instalmentAmount, "Loan")
       inv.paidInstalments = inv.paidInstalments + 1
       log("Loan: "..color.." instalment "..tostring(inv.paidInstalments).."/4 added to cost calculator")
     end
@@ -5505,7 +5723,7 @@ function API_processInvestmentPayments(params)
     local inv = S.investments[color].endowment
     if inv.paidCount < inv.duration then
       -- Add payment to cost calculator
-      Costs_add(color, inv.amountPerYear)
+      Costs_add(color, inv.amountPerYear, "Endowment")
       inv.paidCount = inv.paidCount + 1
       inv.totalInvested = inv.totalInvested + (inv.amountPerYear or 0)
       log("Endowment: "..color.." payment "..tostring(inv.paidCount).."/"..inv.duration.." added to cost calculator")
@@ -5542,7 +5760,7 @@ function API_processInvestmentPayments(params)
     if inv.method == "3x30pct" and inv.paidCount < 3 then
       -- Add payment to cost calculator
       if costsCalc and costsCalc.call then
-          Costs_add(color, inv.paymentAmount)
+          Costs_add(color, inv.paymentAmount, "Estate Invest")
         inv.paidCount = inv.paidCount + 1
         inv.paidAmount = inv.paidAmount + (inv.paymentAmount or 0)
         log("EstateInvest: "..color.." payment "..tostring(inv.paidCount).."/3 added to cost calculator")
@@ -5722,7 +5940,7 @@ local function deliverEstateInvestApartment(color, level)
           local delta = newCost - oldCost
           
           if delta ~= 0 then
-            Costs_add(color, delta)
+            Costs_add(color, delta, "Rent L0→"..tostring(level))
             log("EstateInvest delivery: Adjusted rental cost by "..tostring(delta).." WIN for "..color.." (from "..oldLevel.." to "..newLevel..")")
           end
         end)
@@ -5821,7 +6039,7 @@ function API_processEndOfGameLoans(params)
         
         -- Add remaining balance to cost calculator
         safeCall(function()
-          costsCalc.call("addCost", {color=color, amount=totalRemaining})
+          costsCalc.call("addCost", {color=color, amount=totalRemaining, label="Loan (remaining)"})
         end)
         
         safeBroadcastAll("💰 End of Game: "..color.." must pay remaining loan balance: "..tostring(totalRemaining).." WIN ("..remainingInstalments.." instalments)", {1,0.8,0.2})
@@ -5835,22 +6053,33 @@ end
 
 function API_getOwnedHiTech(params)
   -- Get list of owned Hi-Tech cards for a player
-  -- params: {color="Yellow"}
+  -- params: {color="Yellow", excludePerkProxies=false} -- when true, excludes PS perk tiles (they cannot be broken by Hi-Tech Failure)
   local color = params.color or params.player_color
   if type(color) ~= "string" or color == "" then return {} end
   
   color = normalizeColor(color)
+  local excludePerkProxies = (params.excludePerkProxies == true)
   
-  -- Return copy of owned cards list
-  if S.ownedHiTech[color] then
-    local result = {}
-    for _, name in ipairs(S.ownedHiTech[color]) do
+  if not S.ownedHiTech[color] then return {} end
+  
+  local result = {}
+  for _, name in ipairs(S.ownedHiTech[color]) do
+    if excludePerkProxies then
+      -- Public Servant perk tiles must never be broken by Hi-Tech Failure
+      if name == PS_HMONITOR_CARD_NAME then
+        -- skip (always perk)
+      elseif name == PS_ALARM_CARD_NAME or (name == "HSHOP_11_ALARM" and S.alarmAccessOwner == color) then
+        -- skip (perk alarm)
+      elseif name == PS_CAR_CARD_NAME or (name == "HSHOP_09_CAR" and S.carAccessOwner == color) then
+        -- skip (perk car)
+      else
+        table.insert(result, name)
+      end
+    else
       table.insert(result, name)
     end
-    return result
   end
-  
-  return {}
+  return result
 end
 
 -- Get Hi-Tech definition (for repair cost etc.). For perk cards with cost=0, returns equivalent shop cost.
@@ -5901,7 +6130,8 @@ function onSave()
     investments = S.investments,
     healthMonitorAccessOwner = S.healthMonitorAccessOwner,
     alarmAccessOwner = S.alarmAccessOwner,
-    carAccessOwner = S.carAccessOwner
+    carAccessOwner = S.carAccessOwner,
+    doublePricesInitiator = S.doublePricesInitiator
   }
   return JSON.encode(stateToSave)
 end
@@ -5967,7 +6197,14 @@ function onLoad(saved_data)
         end
         S.investments = normalizedInvestments
       end
+      if data.doublePricesInitiator and type(data.doublePricesInitiator) == "string" and data.doublePricesInitiator ~= "" then
+        S.doublePricesInitiator = normalizeColor(data.doublePricesInitiator)
+      end
     end
+  end
+
+  if not S.doublePricesInitiator then
+    S.doublePricesInitiator = nil
   end
   
   -- Ensure state tables exist
