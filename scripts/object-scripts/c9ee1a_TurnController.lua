@@ -184,7 +184,10 @@ local function sortByName(list)
 end
 
 local function setTurnsColor(color)
-  if Turns then Turns.turn_color = color end
+  if not Turns then return end
+  -- TTS Turns.turn_color expects a string; passing a table causes "cannot convert table to System.String"
+  if type(color) ~= "string" or color == "" then return end
+  Turns.turn_color = color
 end
 
 local function safeGetObjectsWithTag(tag)
@@ -193,19 +196,62 @@ local function safeGetObjectsWithTag(tag)
   return {}
 end
 
+-- Guard: TTS obj.call(fnName, params) requires fnName as string; passing table causes "cannot convert table to System.String"
 local function pcallCall(obj, fnName, params)
   if not obj or not obj.call then return false, nil end
+  if type(fnName) ~= "string" then
+    print("[WLB][FATAL] obj.call got NON-STRING fnName!")
+    print("  obj="..tostring(obj and (obj.getName and obj.getName() or obj.getGUID and obj.getGUID()) or "nil"))
+    print("  fnNameType="..type(fnName))
+    print("  fnName="..tostring(fnName))
+    print("  paramsType="..type(params))
+    if type(fnName) == "table" then
+      for k, v in pairs(fnName) do
+        print("    fnName["..tostring(k).."]="..tostring(v))
+      end
+    end
+    return false, "bad_fnName_type"
+  end
   local ok, ret = pcall(function()
     return obj.call(fnName, params or {})
   end)
+  if not ok then
+    print("[WLB][ERR] obj.call failed fnName="..tostring(fnName).." err="..tostring(ret))
+  end
   return ok, ret
 end
 
 local function globalCall(fn, params)
   if not (Global and Global.call) then return false, nil end
+  if type(fn) ~= "string" then
+    print("[WLB][FATAL] Global.call got NON-STRING fn!")
+    print("  fnType="..type(fn))
+    print("  fn="..tostring(fn))
+    return false, "bad_global_fn_type"
+  end
   local ok, ret = pcall(function()
     return Global.call(fn, params or {})
   end)
+  if not ok then
+    print("[WLB][ERR] Global.call failed fn="..tostring(fn).." err="..tostring(ret))
+  end
+  return ok, ret
+end
+
+-- Wrap direct obj.call() with same guard as pcallCall (catches .call(table, string) wrong-arg-order bugs)
+local function safeDirectCall(obj, fnName, params)
+  if not obj or not obj.call then return false, nil end
+  if type(fnName) ~= "string" then
+    print("[WLB][FATAL] safeDirectCall: fnName is not string!")
+    print("  obj="..tostring(obj and (obj.getGUID and obj.getGUID() or "?") or "nil"))
+    print("  fnNameType="..type(fnName))
+    if type(fnName) == "table" then
+      for k, v in pairs(fnName) do print("    fnName["..tostring(k).."]="..tostring(v)) end
+    end
+    return false, "bad_fnName_type"
+  end
+  local ok, ret = pcall(function() return obj.call(fnName, params or {}) end)
+  if not ok then print("[WLB][ERR] safeDirectCall "..fnName.." err="..tostring(ret)) end
   return ok, ret
 end
 
@@ -283,7 +329,7 @@ end
 local function satAddForColor(color, amount, reason)
   local satObj = getSatToken(color)
   if not satObj or not satObj.call then return false end
-  local ok = pcall(function() satObj.call("addSat", { delta = amount }) end)
+  local ok = select(1, safeDirectCall(satObj, "addSat", { delta = amount }))
   if ok and reason then
     log("SAT: "..tostring(color).." +"..tostring(amount).." ("..tostring(reason)..")")
   end
@@ -758,7 +804,7 @@ local function notifyPlayerBoardsRoundChanged()
         end
       end
       if isPlayerBoard then
-        pcall(function() obj.call("rebuildUI") end)
+        safeDirectCall(obj, "rebuildUI", {})
       end
     end
   end
@@ -767,16 +813,15 @@ end
 local function tokenYearSetRound(r)
   local ty = getTokenYear()
   if not ty then warn("TokenYear not found "..tostring(TOKENYEAR_GUID)); return end
-  pcall(function() ty.call("setRound", {round = r}) end)
+  safeDirectCall(ty, "setRound", {round = r})
   notifyPlayerBoardsRoundChanged()
 end
 
 local function tokenYearSetColor(color)
+  if type(color) ~= "string" or color == "" then return end
   local ty = getTokenYear()
   if not ty then return end
-  local ok = pcall(function()
-    ty.call("setColor", {color = color})
-  end)
+  local ok = select(1, safeDirectCall(ty, "setColor", {color = color}))
   if not ok then
     pcall(function()
       ty.setColorTint(tintForColor(color))
@@ -845,7 +890,10 @@ end
 -- =========================================================
 local function getActiveColor()
   if not W.finalOrder or #W.finalOrder == 0 then return nil end
-  return W.finalOrder[W.turnIndex] or W.finalOrder[1]
+  local raw = W.finalOrder[W.turnIndex] or W.finalOrder[1]
+  if type(raw) == "string" and raw ~= "" then return raw end
+  if type(raw) == "table" and raw[1] and type(raw[1]) == "string" then return raw[1] end
+  return nil
 end
 
 local function apGetUnspentCount(color)
@@ -993,9 +1041,7 @@ local function onTurnEnd_PayCosts(color)
     return
   end
   
-  local ok, result = pcall(function()
-    return costsCalc.call("onTurnEnd", {color=color})
-  end)
+  local ok, result = safeDirectCall(costsCalc, "onTurnEnd", {color=color})
   
   if not ok then
     warn("CostsCalculator.onTurnEnd failed for "..tostring(color)..": "..tostring(result))
@@ -1043,7 +1089,7 @@ local function endTurnProcessing(color)
   local workCount = apGetWorkCount(color)
   local voc = findOneByTags(TAG_VOCATIONS_CTRL)
   if voc and voc.call and workCount > 0 then
-    local ok, loss = pcall(function() return voc.call("API_GetOverworkSatLoss", { color = color, workAPThisTurn = workCount }) end)
+    local ok, loss = safeDirectCall(voc, "API_GetOverworkSatLoss", { color = color, workAPThisTurn = workCount })
     if ok and type(loss) == "number" and loss > 0 then
       local satOk = satAddForColor(color, -loss, "overwork")
       if satOk then
@@ -1078,14 +1124,20 @@ local function setActiveByTurnIndex()
   if W.triggerVocationSelectionAtRound6 then
     W.triggerVocationSelectionAtRound6 = false
     if self and self.call then
-      pcall(function() self.call("TriggerYouthToAdultVocationSelection", {}) end)
+      safeDirectCall(self, "TriggerYouthToAdultVocationSelection", {})
     end
   end
 
-  local c = W.finalOrder[W.turnIndex] or W.finalOrder[1]
+  local raw = W.finalOrder[W.turnIndex] or W.finalOrder[1]
+  local c = (type(raw) == "string" and raw ~= "") and raw
+    or (type(raw) == "table" and raw[1] and type(raw[1]) == "string") and raw[1]
+    or nil
+  if not c then
+    warn("setActiveByTurnIndex: invalid color in finalOrder[turnIndex]="..tostring(W.turnIndex))
+    return
+  end
 
-  -- Before this player's turn: check vocation level-up (1→2 or 2→3); if requirements met, swap next-level tile with current vocation tile.
-  onTurnStart_CheckVocationPromotion(c)
+  -- Note: Vocation promotion is checked at turn end (after tokens are added), not at turn start
 
   tokenYearSetColor(c)
   setTurnsColor(c)
@@ -1108,7 +1160,7 @@ local function setActiveByTurnIndex()
   -- VocationsController: Gangster lockdown – opponents start turn with 1 AP moved to inactive
   local voc = findOneByTags(TAG_VOCATIONS_CTRL)
   if voc and voc.call then
-    pcall(function() voc.call("VOC_OnTurnStarted", { color = c }) end)
+    safeDirectCall(voc, "VOC_OnTurnStarted", { color = c })
   end
 
   -- Call for Auction: close JOINING and start BIDDING when initiator's turn comes again
@@ -1130,9 +1182,9 @@ local function advanceTurn()
 
   if W.turnIndex > #W.finalOrder then
     -- Round just finished: work obligation + experience tokens (Public Servant 2–4 AP/year)
-    local voc = findOneByTags({TAG_VOCATIONS_CTRL})
+    local voc = findOneByTags(TAG_VOCATIONS_CTRL)
     if voc and voc.call then
-      pcall(function() voc.call("VOC_OnRoundEnd", { round = W.currentRound }) end)
+      safeDirectCall(voc, "VOC_OnRoundEnd", { round = W.currentRound })
     end
     W.turnIndex = 1
     if W.currentRound < MAX_ROUND then
@@ -1877,15 +1929,17 @@ end
 function noop() end
 
 local function btn(label, fn, x, z, w, h, fs, tip)
-  -- TTS createButton expects label and tooltip as strings; passing a table causes "cannot convert table to System.String"
+  -- TTS createButton expects label, tooltip, click_function as strings; passing a table causes "cannot convert table to System.String"
   local labelStr = (type(label) == "string") and label or tostring(label)
   local tipStr = (type(tip) == "string") and tip or tostring(tip or "")
+  local fnStr = (type(fn) == "string" and fn ~= "") and fn or "noop"
+  local fsNum = (type(fs) == "number") and fs or 160
   self.createButton({
     label=labelStr,
-    click_function=fn,
+    click_function=fnStr,
     function_owner=self,
     position={x, UIY, z},
-    width=w, height=h, font_size=fs,
+    width=w, height=h, font_size=fsNum,
     tooltip=tipStr
   })
 end
@@ -1986,7 +2040,10 @@ function ui_startGame()  startGame() end
 
 function ui_confirmEndTurnYes()
   if W.step ~= "RUNNING" then return end
-  local active = (W.endConfirm and W.endConfirm.color) or getActiveColor()
+  local raw = (W.endConfirm and W.endConfirm.color) or getActiveColor()
+  local active = (type(raw) == "string" and raw ~= "") and raw
+    or (type(raw) == "table" and raw[1] and type(raw[1]) == "string") and raw[1]
+    or nil
   W.endConfirm = nil
 
   local moved = evtAPI_autoNextTurn()
@@ -1998,6 +2055,12 @@ function ui_confirmEndTurnYes()
   endTurnProcessing(active)
   finalizeAPAfterTurn(active)
   onTurnEnd_ExpireOneTurnStatuses(active)
+  
+  -- VocationsController: Add experience tokens and check for promotion after turn ends
+  local voc = findOneByTags(TAG_VOCATIONS_CTRL)
+  if voc and voc.call then
+    pcall(function() voc.call("VOC_OnTurnEnd", { color = active }) end)
+  end
 
   advanceTurn()
 end
@@ -2041,6 +2104,12 @@ function ui_nextTurn()
   endTurnProcessing(active)
   finalizeAPAfterTurn(active)
   onTurnEnd_ExpireOneTurnStatuses(active)
+  
+  -- VocationsController: Add experience tokens and check for promotion after turn ends
+  local voc = findOneByTags(TAG_VOCATIONS_CTRL)
+  if voc and voc.call then
+    pcall(function() voc.call("VOC_OnTurnEnd", { color = active }) end)
+  end
 
   advanceTurn()
 end

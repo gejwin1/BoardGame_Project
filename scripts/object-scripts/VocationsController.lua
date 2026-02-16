@@ -3113,8 +3113,9 @@ function VOC_OnRoundEnd(params)
       -- Celebrity does not use experience tokens (work-based promotion only)
       giveExperience = false
     else
-      -- Other vocations: give experience token only if they worked this round
-      giveExperience = (workThisRound > 0)
+      -- Other vocations: tokens are now given at turn end (VOC_OnTurnEnd), not at round end
+      -- Skip adding tokens here to avoid double-counting
+      giveExperience = false
     end
 
     if giveExperience and tokenEngine and tokenEngine.call then
@@ -3134,6 +3135,69 @@ function VOC_OnRoundEnd(params)
 
   saveState()
   return true
+end
+
+-- Called by TurnController at end of each player's turn. Adds experience tokens and checks for promotion.
+-- Most vocations get 1 token per turn (if they have the vocation). Public Servant gets tokens at round end based on work obligation.
+function VOC_OnTurnEnd(params)
+  params = params or {}
+  local color = normalizeColor(params.color)
+  if not color or color == "White" then return false end
+  
+  local vocation = state.vocations[color]
+  if not vocation then return false end
+  
+  local level = state.levels[color] or 1
+  local tokenEngine = findTokenEngine()
+  
+  -- Public Servant: tokens are given at round end based on work obligation (2-4 AP per round)
+  -- Skip turn-end token for Public Servant
+  if vocation == VOC_PUBLIC_SERVANT then
+    return false
+  end
+  
+  -- Celebrity: does not use experience tokens (work-based promotion only)
+  if vocation == VOC_CELEBRITY then
+    return false
+  end
+  
+  -- Other vocations: give 1 experience token per turn (just for having the vocation)
+  -- This applies to: Social Worker, NGO Worker, Entrepreneur, Gangster
+  -- They get 1 token per turn regardless of whether they worked
+  local giveExperience = true
+  
+  if giveExperience and tokenEngine and tokenEngine.call then
+    local addOk, addErr = pcall(function()
+      return tokenEngine.call("TE_AddStatus_ARGS", { color = color, statusTag = TAG_STATUS_EXPERIENCE })
+    end)
+    if addOk then
+      local newCount = getExperienceTokenCount(color)
+      log("VOC_OnTurnEnd: Added experience token to " .. color .. " (new count: " .. tostring(newCount) .. ")")
+      safeBroadcastToColor("📋 Experience token received (1 per turn).", color, {0.5, 1, 0.6})
+      
+      -- Check promotion eligibility AFTER turn ends with a delay
+      -- Wait 5 seconds after turn ends before checking for promotion
+      Wait.time(function()
+        local canPromote, reason = VOC_CanPromote({color=color})
+        if canPromote then
+          log("VOC_OnTurnEnd: " .. color .. " meets promotion requirements after turn ended, promoting now")
+          local promoteOk, promoteErr = VOC_Promote({color=color})
+          if promoteOk then
+            log("VOC_OnTurnEnd: Successfully promoted " .. color)
+          else
+            log("VOC_OnTurnEnd: Failed to promote " .. color .. " - " .. tostring(promoteErr))
+          end
+        end
+      end, 5.0)  -- Wait 5 seconds after turn ends before checking for promotion
+      
+      saveState()
+      return true
+    else
+      log("VOC_OnTurnEnd: Failed to add experience token to " .. color .. " - " .. tostring(addErr))
+    end
+  end
+  
+  return false
 end
 
 -- =========================================================
@@ -6035,11 +6099,129 @@ function VOC_Promote(params)
   local oldLevel = state.levels[color] or 1
   local newLevel = oldLevel + 1
   
+  local vocationData = VOCATION_DATA[vocation]
+  if not vocationData then
+    return false, "Invalid vocation data"
+  end
+  
   -- Replace vocation card with higher-level card first; only then update state
   local swapOk = swapTileOnPromotion(color, vocation, oldLevel, newLevel)
   if not swapOk then
     log("Promotion aborted: could not replace vocation card for " .. color .. " (Level " .. newLevel .. " tile not found or place failed)")
     return false, "Could not replace vocation card – ensure Level " .. newLevel .. " vocation tiles exist with correct tags"
+  end
+  
+  -- Consume experience tokens if this was a standard promotion
+  -- Tokens are removed from player's board and returned to the pool
+  local currentLevelData = vocationData.levels[oldLevel]
+  if currentLevelData and currentLevelData.promotion and currentLevelData.promotion.type == "standard" then
+    local needTokens = currentLevelData.promotion.experience or 0
+    if needTokens > 0 then
+      local tokenEngine = findTokenEngine()
+      if tokenEngine and tokenEngine.call then
+        local beforeCount = getExperienceTokenCount(color)
+        log("Promotion: Removing " .. tostring(needTokens) .. " experience tokens from " .. color .. " (current count: " .. tostring(beforeCount) .. ")")
+        
+        -- Remove tokens one at a time using sequential Wait.time callbacks (same pattern as AP refunds in EventEngine)
+        -- This ensures each removal completes before the next one starts, preventing race conditions
+        -- Each TE_RemoveStatus triggers TE_RefreshStatuses which uses async Wait.time operations
+        -- Need longer delays to ensure each refresh fully completes before next removal
+        local removedCount = 0
+        for i = 1, needTokens do
+          Wait.time(function()
+            local removeOk, removeErr = pcall(function()
+              return tokenEngine.call("TE_RemoveStatus_ARGS", { color = color, statusTag = TAG_STATUS_EXPERIENCE })
+            end)
+            if removeOk then
+              removedCount = removedCount + 1
+              log("Promotion: Removed token " .. i .. " of " .. needTokens .. " from " .. color)
+              
+              -- After each removal, wait and verify the token count before proceeding to next removal
+              -- This ensures the refresh from this removal completes before starting the next
+              if i < needTokens then
+                Wait.time(function()
+                  local currentCount = getExperienceTokenCount(color)
+                  local expectedCount = beforeCount - removedCount
+                  log("Promotion: After removing token " .. i .. ", count is " .. tostring(currentCount) .. " (expected: " .. tostring(expectedCount) .. ")")
+                  if currentCount ~= expectedCount then
+                    warn("Promotion: Token count mismatch after removing token " .. i .. " - refresh may not have completed")
+                  end
+                end, 2.0)  -- Wait 2 seconds after each removal to verify refresh completed
+              end
+            else
+              log("ERROR: Failed to remove experience token " .. i .. " for " .. color .. " promotion: " .. tostring(removeErr))
+            end
+            
+            -- After last removal, wait for tokens to settle and then verify
+            if i == needTokens then
+              log("Promotion: All " .. tostring(needTokens) .. " tokens removed, waiting for refreshes to complete")
+              -- Add longer delay to let tokens settle and ensure all async operations complete
+              -- This prevents round-end refreshes from restoring tokens
+              Wait.time(function()
+                -- Save state after all removals complete
+                saveState()
+                
+                -- Wait additional time for all async refresh operations to complete
+                -- This includes removal refreshes and any potential round-end processing
+                Wait.time(function()
+                  -- Force a refresh to sync physical tokens with state after all async operations complete
+                  pcall(function()
+                    tokenEngine.call("TE_RefreshStatuses_ARGS", { color = color })
+                  end)
+                  
+                  -- Wait for forced refresh to complete, then verify
+                  Wait.time(function()
+                    saveState()  -- Save state after refresh to ensure consistency
+                    
+                    local afterCount = getExperienceTokenCount(color)
+                    log("Promotion: Token removal complete for " .. color .. " (removed: " .. tostring(removedCount) .. ", before: " .. tostring(beforeCount) .. ", after: " .. tostring(afterCount) .. ", expected: " .. tostring(beforeCount - needTokens) .. ")")
+                    
+                    -- If tokens are still there after forced refresh, they may have been restored by round-end processing
+                    -- Remove them again using the same sequential pattern
+                    if afterCount ~= (beforeCount - needTokens) then
+                      warn("Promotion: Token count incorrect for " .. color .. " after refresh - tokens may have been restored, removing again")
+                      local remaining = afterCount - (beforeCount - needTokens)
+                      if remaining > 0 then
+                        log("Promotion: Removing " .. tostring(remaining) .. " restored tokens using sequential pattern")
+                        for j = 1, remaining do
+                          Wait.time(function()
+                            pcall(function()
+                              tokenEngine.call("TE_RemoveStatus_ARGS", { color = color, statusTag = TAG_STATUS_EXPERIENCE })
+                            end)
+                            if j == remaining then
+                              -- After last additional removal, wait longer and force final refresh
+                              Wait.time(function()
+                                saveState()
+                                Wait.time(function()
+                                  pcall(function()
+                                    tokenEngine.call("TE_RefreshStatuses_ARGS", { color = color })
+                                  end)
+                                  Wait.time(function()
+                                    saveState()
+                                    local finalCount = getExperienceTokenCount(color)
+                                    log("Promotion: Final token count after additional removal: " .. tostring(finalCount) .. " (expected: " .. tostring(beforeCount - needTokens) .. ")")
+                                    if finalCount ~= (beforeCount - needTokens) then
+                                      warn("CRITICAL: Tokens still not removed correctly for " .. color .. " after all attempts")
+                                    end
+                                  end, 3.0)  -- Increased delay for final verification
+                                end, 1.0)  -- Additional delay before final refresh
+                              end, 0.5)  -- Increased delay after additional removals
+                            end
+                          end, 1.0 * j)  -- Sequential delay: 1.0s per token
+                        end  -- closes for j loop
+                      end
+                    end
+                  end, 3.0)  -- Increased delay for forced refresh to complete
+                end, 2.0)  -- Additional delay to ensure all async operations complete
+              end, 2.0)  -- Increased initial delay to let tokens settle
+            end
+          end, 3.0 * i)  -- Increased sequential delay: 3.0s per token to ensure each refresh completes
+        end
+      else
+        log("ERROR: TokenEngine not found when trying to consume experience tokens for " .. color .. " promotion")
+        warn("TokenEngine missing - experience tokens not consumed on promotion")
+      end
+    end
   end
   
   -- Update level and round after successful card swap
@@ -6049,7 +6231,6 @@ function VOC_Promote(params)
   state.experienceYearsEarned[color] = 0
   saveState()
   
-  local vocationData = VOCATION_DATA[vocation]
   local newLevelData = vocationData.levels[newLevel]
   
   log("Promoted: " .. color .. " " .. vocation .. " Level " .. oldLevel .. " → " .. newLevel)
