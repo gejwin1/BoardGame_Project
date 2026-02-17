@@ -439,6 +439,45 @@ function addCost(params)
   return getCosts(c)
 end
 
+-- Replace rent portion: removes all rent-related breakdown items, then adds one clean rent line.
+-- Use when estate level changes (rent, buy, return) to avoid delta stacking and false "earnings".
+-- amount: new rent total (0 = no rent). label: e.g. "Level 1 rent: 200" or nil if amount=0.
+function replaceRentCost(params)
+  local c = resolveColor(params, false)
+  if not c then return 0 end
+  local amount = tonumber(params.amount)
+  local label = (type(params.label) == "string" and params.label ~= "") and params.label or nil
+  if amount == nil then return getCosts(c) end
+  amount = clampNonNeg(clampInt(amount))
+
+  local bd = costsBreakdown[c]
+  if not bd then bd = {} costsBreakdown[c] = bd end
+
+  -- Remove rent-related items (Rent L0, Rent L1, Rent L0→L1, Level X rent: Y, etc.)
+  local removedTotal = 0
+  local i = 1
+  while i <= #bd do
+    local lbl = (bd[i].label or "")
+    if lbl:match("^Rent ") or (lbl:match("^Level ") and lbl:match("rent")) then
+      removedTotal = removedTotal + (bd[i].amount or 0)
+      table.remove(bd, i)
+    else
+      i = i + 1
+    end
+  end
+
+  -- Adjust costs: subtract removed rent, add new rent
+  costsDue[c] = clampNonNeg((costsDue[c] or 0) - removedTotal + amount)
+
+  -- Add new rent item only if amount > 0
+  if amount > 0 and label then
+    table.insert(bd, { label = label, amount = amount })
+  end
+
+  updateLabelAndBg()
+  return getCosts(c)
+end
+
 -- Optional API: explicit earnings getters (for future use)
 function getEarnings(params)
   local c = resolveColor(params, true)

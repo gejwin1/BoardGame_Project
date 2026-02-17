@@ -2981,19 +2981,14 @@ local function applyConsumableEffect(color, card, def, rollValue)
     if isAlreadyAddicted then
       -- Treatment attempt: check if cured
       if v > riskThreshold then
-        -- Success: cured! Remove ALL addiction tokens (could be 1, 2, or 3)
-        local removed = 0
-        for i=1,10 do  -- Remove up to 10 tokens (safety limit)
-          local hadToken = pscHasStatus(color, TAG_STATUS_ADDICTION)
-          if hadToken then
-            pscRemoveStatus(color, TAG_STATUS_ADDICTION)
-            removed = removed + 1
-          else
-            break
-          end
+        -- Success: cured! Remove ALL addiction tokens (use batch remove to avoid TE_RefreshStatuses timing)
+        local addictionCount = pscGetStatusCount(color, TAG_STATUS_ADDICTION)
+        local removed = math.min(addictionCount, 10)  -- Safety limit
+        if removed > 0 then
+          pscRemoveStatusCount(color, TAG_STATUS_ADDICTION, removed)
         end
         S.pillsUseCount[color] = 0  -- Reset use count on cure
-        safeBroadcastAll("✅ "..color.." cured addiction! (removed "..removed.." tokens) (roll="..v..", threshold="..riskThreshold..")", {0.7,1,0.7})
+        safeBroadcastAll("✅ "..color.." cured addiction! (removed "..tostring(removed).." token(s)) (roll="..v..", threshold="..riskThreshold..")", {0.7,1,0.7})
       else
         -- Failed: still addicted (use count continues)
         safeBroadcastAll("❌ "..color.." failed to cure addiction (roll="..v..", threshold="..riskThreshold..")", {1,0.6,0.2})
@@ -6118,9 +6113,36 @@ local function deliverEstateInvestApartment(color, level)
     card.setRotationSmooth({0, boardRot.y, 0}, false, true)
   end)
   
-  -- CRITICAL: Update Estate Engine state and TokenEngine housing level
+  -- CRITICAL: Update rental cost in Costs Calculator (replaceRentCost = single clean line, no deltas)
   Wait.time(function()
-    -- Update Estate Engine's currentEstateLevel for rental cost tracking
+    local costsCalc = firstWithTag(TAG_COSTS_CALC)
+    if costsCalc and costsCalc.call then
+      safeCall(function()
+        pcall(function()
+          local ESTATE_RENTAL_COST = {
+            L0=50, L1=200, L2=350, L3=550, L4=1000
+          }
+          local amount = ESTATE_RENTAL_COST[level] or 0
+          if amount > 0 then
+            local vocation = nil
+            local voc = firstWithTag(TAG_VOCATIONS_CTRL)
+            if voc and voc.call then
+              local ok, v = pcall(function() return voc.call("VOC_GetVocation", { color = color }) end)
+              if ok and v then vocation = v end
+            end
+            if vocation == "SOCIAL_WORKER" then
+              amount = math.floor(amount * 0.5)
+            end
+            local levelNum = (level == "L1" and 1) or (level == "L2" and 2) or (level == "L3" and 3) or (level == "L4" and 4) or 0
+            local label = "Level " .. tostring(levelNum) .. " rent: " .. tostring(amount)
+            costsCalc.call("replaceRentCost", { color = color, amount = amount, label = label })
+            log("EstateInvest delivery: Set rental cost "..tostring(amount).." WIN for "..color.." ("..level..")")
+          end
+        end)
+      end)
+    end
+
+    -- Update Estate Engine state for ME_GetEstateLevel (rental cost tracking)
     local TAG_MARKET_CTRL = "WLB_MARKET_CTRL"
     local estateEngine = nil
     for _,o in ipairs(getAllObjects()) do
@@ -6129,30 +6151,12 @@ local function deliverEstateInvestApartment(color, level)
         break
       end
     end
-    
     if estateEngine and estateEngine.call then
-      -- Try to call Estate Engine API to update state
-      safeCall(function()
-        pcall(function()
-          -- Call updateRentalCostInCalculator indirectly by calling Estate Engine's API if available
-          -- For now, we'll directly update rental cost in calculator (delta from L0 to new level)
-          local ESTATE_RENTAL_COST = {
-            L0=50, L1=200, L2=350, L3=550, L4=1000
-          }
-          local oldLevel = "L0"  -- Assume L0 before delivery
-          local newLevel = level
-          local oldCost = ESTATE_RENTAL_COST[oldLevel] or 0
-          local newCost = ESTATE_RENTAL_COST[newLevel] or 0
-          local delta = newCost - oldCost
-          
-          if delta ~= 0 then
-            Costs_add(color, delta, "Rent L0→"..tostring(level))
-            log("EstateInvest delivery: Adjusted rental cost by "..tostring(delta).." WIN for "..color.." (from "..oldLevel.." to "..newLevel..")")
-          end
-        end)
+      pcall(function()
+        estateEngine.call("ME_SetEstateLevelFromDelivery", { color = color, level = level, isRented = true })
       end)
     end
-    
+
     -- Update TokenEngine housing level for correct token placement
     local TAG_TOKEN_ENGINE = "WLB_TOKEN_SYSTEM"
     local tokenEngine = nil

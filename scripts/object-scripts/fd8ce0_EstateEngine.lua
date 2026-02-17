@@ -408,20 +408,31 @@ end
 -- =========================
 -- OWNED ESTATE DETECTOR
 -- =========================
+local function isCardInsideDeckOrContainer(card)
+  if not card or not card.getParent then return false end
+  local ok, parent = pcall(function() return card.getParent() end)
+  if not ok or not parent then return false end
+  -- Card in deck/bag = not on board (prevents "already have apartment" when card was returned)
+  if parent.hasTag and parent.hasTag(TAG_ESTATE_DECK) then return true end
+  local pt = (parent.tag and tostring(parent.tag)) or ""
+  if pt == "Deck" or pt == "Bag" then return true end
+  return false
+end
+
 local function findOwnedEstateOnBoard(color)
   color = normalizeColor(color)
   if not color or color == "" then return nil, nil end
   
   -- Search for estate cards: must have player's color tag, ESTATE_CARD tag, and ESTATE_OWNED tag
-  -- This ensures we only find cards that actually belong to this player
+  -- Exclude cards inside estate decks (returned cards may briefly retain tags; deck cards are not "on board")
   local colorTagStr = colorTag(color)
   local list = getObjectsWithTag(colorTagStr) or {}
   
   for _,o in ipairs(list) do
     if isAlive(o) and o.tag == "Card" and o.hasTag then
-      -- Must have ALL of these tags: color tag, estate card tag, and owned tag
-      if o.hasTag(TAG_ESTATE_CARD) and o.hasTag(TAG_ESTATE_OWNED) and o.hasTag(colorTagStr) then
-        -- Verify card name matches estate pattern (ESTATE_L1, ESTATE_L2, etc.)
+      if isCardInsideDeckOrContainer(o) then
+        -- Card is in deck, not on board - skip
+      elseif o.hasTag(TAG_ESTATE_CARD) and o.hasTag(TAG_ESTATE_OWNED) and o.hasTag(colorTagStr) then
         local cardName = getNameSafe(o)
         if cardName then
           local lvl = getLevelFromCardName(cardName)
@@ -648,28 +659,31 @@ local function isEntrepreneurL3(color)
   return (vocation == "ENTREPRENEUR" and level >= 3)
 end
 
--- Update rental cost in cost calculator when estate changes
--- IMPORTANT: TurnController adds rental costs every turn at turn start.
--- This function adjusts costs immediately when estate level changes mid-turn.
--- Strategy: Simply calculate delta between old and new rental costs, then adjust.
--- We use S.currentEstateLevel as the source of truth for what level the player currently has.
--- isRent: true when player just rented (apply Social Worker 50% same-turn); false when bought.
+-- Map level code to display number for rent label (L0->0, L1->1, etc.)
+local function levelToNum(lvl)
+  if lvl == "L0" then return 0 end
+  if lvl == "L1" then return 1 end
+  if lvl == "L2" then return 2 end
+  if lvl == "L3" then return 3 end
+  if lvl == "L4" then return 4 end
+  return 0
+end
+
+-- Update rental cost in cost calculator when estate changes.
+-- Uses replaceRentCost (single clean line, no delta stacking or false earnings).
+-- isRent: true when player just rented (apply Social Worker 50%); false when bought (no rent).
 local function updateRentalCostInCalculator(color, oldLevel, newLevel, isRent)
   color = normalizeColor(color)
   if not color or color == "" then return end
   
-  -- Get old level from state if not provided (this is the source of truth)
   local effectiveOldLevel = oldLevel
   if not effectiveOldLevel or effectiveOldLevel == "" then
     effectiveOldLevel = S.currentEstateLevel[color] or "L0"
   end
-  
-  -- Ensure it's a valid level
   if effectiveOldLevel ~= "L0" and effectiveOldLevel ~= "L1" and effectiveOldLevel ~= "L2" and effectiveOldLevel ~= "L3" and effectiveOldLevel ~= "L4" then
     effectiveOldLevel = "L0"
   end
   
-  -- Only update if estate level actually changed
   if effectiveOldLevel == newLevel then
     log("Estate rental: No change for "..color.." (stays at "..tostring(effectiveOldLevel).."), skipping cost update")
     return
@@ -680,34 +694,28 @@ local function updateRentalCostInCalculator(color, oldLevel, newLevel, isRent)
     warn("Costs Calculator not found for rental cost update")
     return
   end
-  
-  -- Get current cost from calculator for logging
-  local currentCost = 0
-  local okGet, currentCostResult = pcall(function()
-    return costsCalc.call("getCost", {color=color})
-  end)
-  if okGet and type(currentCostResult) == "number" then
-    currentCost = currentCostResult
-  end
-  
-  -- Calculate costs for old and new levels
+
   local oldCost = ESTATE_RENTAL_COST[effectiveOldLevel] or 0
-  local newCost = ESTATE_RENTAL_COST[newLevel] or 0
-  local delta = newCost - oldCost
-  
-  -- Social Worker passive: 50% rent for rented apartment. Apply same-turn when player just rented (isRent=true).
-  if delta > 0 and isRent and getVocationForColor(color) == "SOCIAL_WORKER" then
-    delta = math.floor(delta * 0.5)
-  end
-  
-  -- Adjust by the delta (this correctly transitions from old cost to new cost)
-  if delta ~= 0 then
-    safeCall(function()
-      costsCalc.call("addCost", {color=color, amount=delta, label="Rent "..tostring(effectiveOldLevel).."→"..tostring(newLevel)})
-    end)
-    log("Estate rental: "..color.." adjusted cost by "..tostring(delta).." WIN (from "..tostring(effectiveOldLevel).."="..tostring(oldCost).." to "..tostring(newLevel).."="..tostring(newCost)..", was "..tostring(currentCost)..", now "..tostring(currentCost + delta)..")")
+  local newCost = 0
+
+  if newLevel == "L0" then
+    newCost = ESTATE_RENTAL_COST.L0 or 50
+  elseif isRent == false then
+    newCost = 0
   else
-    log("Estate rental: No adjustment needed for "..color.." (cost already correct)")
+    newCost = ESTATE_RENTAL_COST[newLevel] or 0
+    if newCost > 0 and getVocationForColor(color) == "SOCIAL_WORKER" then
+      newCost = math.floor(newCost * 0.5)
+    end
+  end
+
+  local delta = newCost - oldCost
+  if delta ~= 0 then
+    local label = "Rent "..effectiveOldLevel.."→"..newLevel
+    safeCall(function()
+      costsCalc.call("addCost", { color = color, amount = delta, bucket = "costs", label = label })
+    end)
+    log("Estate rental: "..color.." adjusted by "..tostring(delta).." WIN (now "..tostring(newCost).." total)")
   end
 end
 
@@ -1080,6 +1088,20 @@ function Auction_AssignL2(params)
   local color = params.color and normalizeColor(params.color) or nil
   if not color or not isPlayableColor(color) then return end
   doBuyExecute("L2", color, 0, 0)
+end
+
+-- API: Set estate level from external delivery (e.g. EstateInvest). Caller updates CostsCalculator separately.
+function ME_SetEstateLevelFromDelivery(params)
+  params = params or {}
+  local color = params.color and normalizeColor(params.color) or nil
+  local level = params.level
+  local isRented = (params.isRented == true)
+  if not color or not isPlayableColor(color) then return false end
+  if level ~= "L1" and level ~= "L2" and level ~= "L3" and level ~= "L4" then return false end
+  S.currentEstateLevel[color] = level
+  S.currentEstateIsRented[color] = isRented
+  log("Estate: Set "..color.." to "..level.." ("..(isRented and "rented" or "owned")..") from delivery")
+  return true
 end
 
 -- API: Get estate level and rent status for a player (single source of truth for TurnController rental costs).
@@ -1581,80 +1603,56 @@ end
 -- PUBLIC API: Update rental costs when vocation changes
 -- =========================
 -- Called when a player's vocation is set/changed to update rental costs immediately
--- (e.g., when Social Worker gets 50% rent discount)
+-- (e.g., when Social Worker gets 50% rent discount at game start, round 6)
+-- Uses replaceRentCost so only one clean line shows (e.g. "Level 0 rent: 25").
 function API_UpdateRentalCostsForVocationChange(params)
   params = params or {}
   local color = normalizeColor(params.color)
   if not color or color == "" then return false end
-  
-  -- Get current estate level
+
+  local vocation = getVocationForColor(color)
+  if vocation ~= "SOCIAL_WORKER" then
+    return false
+  end
+
   local estateLevel = S.currentEstateLevel[color] or "L0"
   if estateLevel ~= "L0" and estateLevel ~= "L1" and estateLevel ~= "L2" and estateLevel ~= "L3" and estateLevel ~= "L4" then
     estateLevel = "L0"
   end
-  
-  -- Check if player is renting (not bought)
-  local isRenting = false
-  local estateObj = findOwnedEstateOnBoard(color)
-  if estateObj then
-    local ok, hasRentTag = pcall(function() return estateObj.hasTag(TAG_ESTATE_MODE_RENT) end)
-    if ok and hasRentTag then
-      isRenting = true
+
+  local fullRentalCost = ESTATE_RENTAL_COST[estateLevel] or 0
+  if estateLevel ~= "L0" then
+    local estateObj = findOwnedEstateOnBoard(color)
+    if estateObj then
+      local ok, hasRentTag = pcall(function() return estateObj.hasTag(TAG_ESTATE_MODE_RENT) end)
+      if ok and not hasRentTag then
+        return false  -- Bought: no rent
+      end
+    else
+      fullRentalCost = 0
     end
   end
-  
-  -- Only update if player is renting (not L0 and not bought)
-  if not isRenting or estateLevel == "L0" then
-    return false  -- No rental cost to update
+
+  if fullRentalCost <= 0 then
+    return false
   end
-  
+
+  local discountedRentalCost = math.floor(fullRentalCost * 0.5)
   local costsCalc = findCostsCalculator()
   if not costsCalc or not costsCalc.call then
     return false
   end
-  
-  -- Calculate what the rental cost should be
-  local fullRentalCost = ESTATE_RENTAL_COST[estateLevel] or 0
-  
-  -- Check if player is Social Worker (for 50% discount)
-  local vocation = getVocationForColor(color)
-  if vocation ~= "SOCIAL_WORKER" then
-    return false  -- Not Social Worker, no discount to apply
-  end
-  
-  -- Get current total cost to check if rental costs have been added
-  local currentTotalCost = 0
-  local okGet, currentCostResult = pcall(function()
-    return costsCalc.call("getCost", {color=color})
+
+  local delta = discountedRentalCost - fullRentalCost  -- Negative: reduce cost
+  local label = "Rent (Social Worker 50%)"
+
+  local ok = pcall(function()
+    costsCalc.call("addCost", { color = color, amount = delta, bucket = "costs", label = label })
   end)
-  if okGet and type(currentCostResult) == "number" then
-    currentTotalCost = currentCostResult
+  if ok then
+    log("Updated rental cost for "..color..": "..fullRentalCost.." → "..discountedRentalCost.." (Social Worker 50% discount)")
+    return true
   end
-  
-  -- Calculate discounted rental cost
-  local discountedRentalCost = math.floor(fullRentalCost * 0.5)
-  
-  -- Only adjust if rental costs have likely been added (current cost >= rental cost)
-  -- This prevents adding negative costs when rental hasn't been added yet
-  -- (TurnController will apply discount automatically at turn start if not added yet)
-  if currentTotalCost >= fullRentalCost then
-    -- Calculate the adjustment needed: reduce by 50% of the rental cost
-    local delta = discountedRentalCost - fullRentalCost  -- Negative value (reduction)
-    
-    -- Apply the adjustment to the cost calculator
-    local ok = pcall(function()
-      costsCalc.call("addCost", {color=color, amount=delta, label="Rent "..estateLevel.." (Social Worker 50% discount)"})
-    end)
-    
-    if ok then
-      log("Updated rental cost for "..color..": "..fullRentalCost.." → "..discountedRentalCost.." (Social Worker 50% discount applied)")
-      return true
-    end
-  else
-    -- Rental costs haven't been added yet - TurnController will apply discount at turn start
-    log("Rental costs not yet added for "..color.." - discount will be applied at turn start")
-  end
-  
   return false
 end
 
@@ -1685,6 +1683,13 @@ end
 -- =========================
 -- LIFECYCLE
 -- =========================
+function resetNewGame()
+  S.currentEstateLevel = { Yellow="L0", Blue="L0", Red="L0", Green="L0" }
+  S.currentEstateIsRented = { Yellow=false, Blue=false, Red=false, Green=false }
+  S.enteredEstateThisTurn = { Yellow=false, Blue=false, Red=false, Green=false }
+  log("Estate Engine: resetNewGame OK")
+end
+
 function onLoad(saved)
   addTagSafe(self, TAG_MARKET_CTRL)
   broadcastToAll("🟩 WLB MARKET ENGINE LOADED v1.8.1 ("..self.getGUID()..")", {0.7,1,0.7})

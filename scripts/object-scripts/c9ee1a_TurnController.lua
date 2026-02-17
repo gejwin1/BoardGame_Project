@@ -592,20 +592,13 @@ local function onTurnStart_AddRentalCosts(color)
   
   local costsCalc = findOneByTags(TAG_COSTS_CALC)
   if costsCalc and costsCalc.call then
-    local currentCost = 0
-    local okCheck, currentCostResult = pcall(function()
-      return costsCalc.call("getCost", {color=color})
-    end)
-    if okCheck and type(currentCostResult) == "number" then
-      currentCost = currentCostResult
-    end
-    
+    local rentLabel = (totalRentalCost > 0) and ("Level "..((rentLevel=="L0"and 0)or(rentLevel=="L1"and 1)or(rentLevel=="L2"and 2)or(rentLevel=="L3"and 3)or(rentLevel=="L4"and 4)or 0).." rent: "..tostring(totalRentalCost)) or ("Rent "..rentLevel)
     local ok = pcall(function()
-      costsCalc.call("addCost", {color=color, amount=totalRentalCost, label="Rent "..rentLevel})
+      costsCalc.call("addCost", {color=color, amount=totalRentalCost, label=rentLabel})
     end)
     if ok then
-      rentalCostAddedThisTurn[color] = true  -- Mark as added for this turn
-      log("Rental cost: "..color.." added "..tostring(totalRentalCost).." WIN per turn (was: "..tostring(currentCost)..", now: "..tostring(currentCost + totalRentalCost)..")")
+      rentalCostAddedThisTurn[color] = true
+      log("Rental cost: "..color.." added "..tostring(totalRentalCost).." WIN")
     else
       warn("Failed to add rental cost for "..tostring(color))
     end
@@ -1829,6 +1822,7 @@ local function startGame()
     -- If money is embedded in boards, reset those too (safe if boards implement resetNewGame)
     resetControllersByTag(TAG_BOARD)
     resetControllersByTag("WLB_COSTS_CALC")  -- Reset costs calculator for new game
+    resetControllersByTag(TAG_MARKET_CTRL)    -- Reset Estate Engine (currentEstateLevel, etc.)
 
     vocationsCall("VOC_ResetForNewGame", {})  -- Clear vocations from previous game
 
