@@ -784,6 +784,21 @@ function TE_RemoveStatusCount(color, statusTag, count)
   if not color or not isSupportedColor(color) or not statusTag then return end
   count = math.max(0, math.floor(tonumber(count) or 0))
   if count == 0 then return end
+  local s = ensureStatuses(color)
+  local tok = s.active[statusTag]
+  if not tok then return end
+  -- Batch-remove for multi-status: modify array once, recycle all, refresh once (avoids timing issues)
+  if MULTI_STATUS[statusTag] and type(tok) == "table" then
+    local toRemove = math.min(count, #tok)
+    for _ = 1, toRemove do
+      local removedTok = table.remove(tok, #tok)
+      if removedTok then recycleStatusTokenToPool(statusTag, removedTok) end
+    end
+    if #tok == 0 then s.active[statusTag] = nil end
+    TE_RefreshStatuses(color)
+    return
+  end
+  -- Regular status or fallback: remove one at a time
   for _ = 1, count do
     if not TE_HasStatus(color, statusTag) then break end
     TE_RemoveStatus(color, statusTag)

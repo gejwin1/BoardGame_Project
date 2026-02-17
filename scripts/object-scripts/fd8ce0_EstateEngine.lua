@@ -151,6 +151,7 @@ local S = {
   shopboard = nil,
   enteredEstateThisTurn = { Yellow=false, Blue=false, Red=false, Green=false },  -- Per-turn entry tracking (like Shop Engine)
   currentEstateLevel = { Yellow="L0", Blue="L0", Red="L0", Green="L0" },  -- Track current rental level per player (L0 = grandma's house)
+  currentEstateIsRented = { Yellow=false, Blue=false, Red=false, Green=false },  -- true = pay rent, false = owned (L0 or bought)
   pendingEstateVoucher = nil,  -- { level, acting, voucherCount, step } when asking "Use discount?"
 }
 
@@ -965,6 +966,7 @@ local function doRent(level, clickedColor)
     -- Only adjust delta - TurnController handles base L0 costs per turn. Pass isRent=true for Social Worker 50% same-turn.
     local oldLevel = S.currentEstateLevel[acting] or "L0"  -- Default to L0 if not set
     S.currentEstateLevel[acting] = level
+    S.currentEstateIsRented[acting] = true  -- Rented = pay rent
     updateRentalCostInCalculator(acting, oldLevel, level, true)
 
     -- Update TokenEngine housing level and reposition family tokens to the new apartment's slots (L1–L4)
@@ -1030,6 +1032,7 @@ local function doBuyExecute(level, acting, finalPrice, voucherTokensToRemove)
     -- Note: Buying also requires rental cost payment per turn. Pass isRent=false (no Social Worker discount on buy).
     local oldLevel = S.currentEstateLevel[acting] or "L0"  -- Default to L0 if not set
     S.currentEstateLevel[acting] = level
+    S.currentEstateIsRented[acting] = false  -- Bought = no rent
     updateRentalCostInCalculator(acting, oldLevel, level, false)
 
     -- Update TokenEngine housing level and reposition family tokens to the new apartment's slots (L1–L4)
@@ -1058,6 +1061,18 @@ function Auction_AssignL2(params)
   local color = params.color and normalizeColor(params.color) or nil
   if not color or not isPlayableColor(color) then return end
   doBuyExecute("L2", color, 0, 0)
+end
+
+-- API: Get estate level and rent status for a player (single source of truth for TurnController rental costs).
+-- Returns { level = "L0"|"L1"|"L2"|"L3"|"L4", isRented = boolean } or nil if invalid color.
+-- L0 = grandma's house (pays rent). L1-L4: isRented=true means pay rent; isRented=false means owned (no rent).
+function ME_GetEstateLevel(params)
+  params = params or {}
+  local color = params.color and normalizeColor(params.color) or nil
+  if not color or not isPlayableColor(color) then return nil end
+  local level = S.currentEstateLevel[color] or "L0"
+  local isRented = (S.currentEstateIsRented[color] == true)
+  return { level = level, isRented = isRented }
 end
 
 local function showVoucherChoiceOnDeck(level)
@@ -1272,6 +1287,7 @@ function ME_returnOrSellEstate(card, pc)
   -- Only adjust delta - TurnController handles base L0 costs per turn
   local oldLevel = S.currentEstateLevel[acting] or "L0"  -- Default to L0 if somehow not set
   S.currentEstateLevel[acting] = "L0"  -- Revert to grandma's house
+  S.currentEstateIsRented[acting] = false  -- L0 = no rented apartment
   updateRentalCostInCalculator(acting, oldLevel, "L0", false)
 
   -- Update TokenEngine housing level back to L0 and reposition family tokens to board (grandma's house)

@@ -1,22 +1,65 @@
 -- =========================================================
--- WLB EVENT ENGINE v1.7.2 (TARGETED FIXES: AD_KARMA + CHILD AP UNLOCK + BABYSITTER/AUNTY)
+-- WLB EVENT ENGINE v1.7.2 (REFACTORED - _G.WLB.EVT chunk-safe)
 -- Compatible with Event Controller:
 --   - playCardFromUI({card_guid, player_color, slot_idx}) -> "DONE"/"WAIT_*"/"BLOCKED"/"IGNORED"/"ERROR"
 --   - isObligatoryCard({card_guid})
---
--- v1.7.2 changes (ONLY what you asked for):
---  1) Adult KARMA now works exactly like Youth KARMA:
---     - NOT keep, instantly discarded (USED)
---     - adds GOOD_KARMA status token (via PlayerStatusController hub)
---  2) Child logic improved:
---     - Introduced per-round "childUnlock[color]" (0..child.apBlock) to partially unlock AP blocked by child
---     - End-of-round applies INACTIVE AP = (child.apBlock - childUnlock[color]) and resets unlock to 0
---  3) Babysitter & Aunty now interact with childUnlock:
---     - Babysitter unlocks 1 or 2 AP from child block (this round)
---     - Aunty dice special unlocks AP from child block (this round)
+-- REFACTOR: All cross-chunk helpers in _G.WLB.EVT to avoid TTS chunk nil errors
 -- =========================================================
 
-local DEBUG = true
+-- =========================================================
+-- BOOTSTRAP: _G.WLB.EVT namespace (chunk-safe)
+-- =========================================================
+_G.WLB = _G.WLB or {}
+_G.WLB.EVT = _G.WLB.EVT or {}
+EVT = _G.WLB.EVT
+
+EVT.DEBUG = true
+EVT.TAGS = {
+  STATS_CTRL = "WLB_STATS_CTRL",
+  AP_CTRL = "WLB_AP_CTRL",
+  MONEY = "WLB_MONEY",
+  SHOP_ENGINE = "WLB_SHOP_ENGINE",
+  MARKET_CTRL = "WLB_MARKET_CTRL",
+  PLAYER_STATUS_CTRL = "WLB_PLAYER_STATUS_CTRL",
+  VOCATIONS_CTRL = "WLB_VOCATIONS_CTRL",
+  KEEP_ZONE = "WLB_KEEP_ZONE",
+  DISCARD_ZONE = "WLB_EVENT_DISCARD_ZONE",
+  DISCARD_ZONE_ALT = "WLB_EVT_USED_ZONE",
+  COSTS_CALC = "WLB_COSTS_CALC",
+  BOARD = "WLB_BOARD",
+}
+
+EVT.getAllObjectsSafe = function()
+  return (type(getAllObjects) == "function" and getAllObjects()) or {}
+end
+EVT.getObjectsWithTagSafe = function(tag)
+  if type(getObjectsWithTag) ~= "function" then return {} end
+  return getObjectsWithTag(tag) or {}
+end
+EVT.getObjectFromGUID = function(guid)
+  if type(getObjectFromGUID) ~= "function" then return nil end
+  return getObjectFromGUID(guid)
+end
+EVT.findOneByTags = function(tags)
+  local all = EVT.getAllObjectsSafe()
+  for _, o in ipairs(all) do
+    local ok = true
+    for _, t in ipairs(tags) do
+      if not (o and o.hasTag and o.hasTag(t)) then ok = false break end
+    end
+    if ok then return o end
+  end
+  return nil
+end
+EVT.log = function(msg)
+  if EVT.DEBUG then print("[WLB EVENT] " .. tostring(msg)) end
+end
+EVT.warn = function(msg)
+  print("[WLB EVENT][WARN] " .. tostring(msg))
+end
+print("[WLB EVENT] REFACTOR LOADED " .. os.date("%Y-%m-%d %H:%M:%S"))
+
+local DEBUG = EVT.DEBUG
 
 -- =========================================================
 -- SECTION 1) CONFIG
@@ -126,8 +169,8 @@ local brokenRepairCost = { Yellow={}, Blue={}, Red={}, Green={} }
 -- SECTION 1c) UTILS
 -- =========================================================
 
-local function log(msg)  if DEBUG then print("[WLB EVENT] " .. tostring(msg)) end end
-local function warn(msg) print("[WLB EVENT][WARN] " .. tostring(msg)) end
+log = function(msg) if EVT and EVT.log then EVT.log(msg) end end
+warn = function(msg) if EVT and EVT.warn then EVT.warn(msg) else print("[WLB EVENT][WARN] " .. tostring(msg)) end end
 local function colorTag(color) return COLOR_TAG_PREFIX .. tostring(color) end
 
 -- Forward declaration (Lua local visibility rule):
@@ -195,15 +238,7 @@ local function extractCardId(cardObj)
 end
 
 findOneByTags = function(tags)
-  local all = (type(getAllObjects) == "function" and getAllObjects()) or {}
-  for _, o in ipairs(all) do
-    local ok = true
-    for _, t in ipairs(tags) do
-      if not (o and o.hasTag and o.hasTag(t)) then ok = false break end
-    end
-    if ok then return o end
-  end
-  return nil
+  return EVT.findOneByTags(tags)
 end
 
 local function normalizeColor(color)
@@ -228,9 +263,9 @@ end
 -- =========================================================
 
 local function findPlayerStatusCtrl()
-  local list = getObjectsWithTag(TAG_PLAYER_STATUS_CTRL) or {}
+  local list = EVT.getObjectsWithTagSafe(TAG_PLAYER_STATUS_CTRL) or {}
   if #list > 0 then return list[1] end
-  for _,o in ipairs(getAllObjects()) do
+  for _,o in ipairs(EVT.getAllObjectsSafe()) do
     if o and o.hasTag and o.hasTag(TAG_PLAYER_STATUS_CTRL) then return o end
   end
   return nil
@@ -239,14 +274,14 @@ end
 local function PS_EventCall(payload)
   local ctrl = findPlayerStatusCtrl()
   if not ctrl or not ctrl.call then
-    warn("PlayerStatusCtrl not found (tag="..TAG_PLAYER_STATUS_CTRL..")")
+    EVT.warn("PlayerStatusCtrl not found (tag="..TAG_PLAYER_STATUS_CTRL..")")
     return false
   end
   local ok, res = pcall(function()
     return ctrl.call("PS_Event", payload or {})
   end)
   if not ok then
-    warn("PS_EventCall failed: "..tostring(res))
+    EVT.warn("PS_EventCall failed: "..tostring(res))
     return false
   end
   return (res ~= false)
@@ -271,7 +306,7 @@ local function hasDatingStatus(color)
   -- Query PlayerStatusController (central authority for all status queries)
   local ctrl = findPlayerStatusCtrl()
   if not ctrl or not ctrl.call then
-    warn("hasDatingStatus: PlayerStatusController not found, cannot check DATING status")
+    EVT.warn("hasDatingStatus: PlayerStatusController not found, cannot check DATING status")
     return false
   end
   
@@ -281,18 +316,18 @@ local function hasDatingStatus(color)
   end)
   
   if not ok then
-    warn("hasDatingStatus: PS_Event call failed: "..tostring(hasStatus))
+    EVT.warn("hasDatingStatus: PS_Event call failed: "..tostring(hasStatus))
     return false
   end
   
   if type(hasStatus) == "boolean" then
     if hasStatus then
-      log("hasDatingStatus: Player "..tostring(color).." has DATING status")
+      EVT.log("hasDatingStatus: Player "..tostring(color).." has DATING status")
     end
     return hasStatus
   end
   
-  warn("hasDatingStatus: PS_Event returned invalid result type: "..type(hasStatus))
+  EVT.warn("hasDatingStatus: PS_Event returned invalid result type: "..type(hasStatus))
   return false
 end
 
@@ -314,14 +349,14 @@ local function addBabyCostToCalculator(color, cost)
       return costsCalc.call("addCost", {color=color, amount=cost, label="Baby"})
     end)
     if ok then
-      log("Baby cost: "..color.." added "..tostring(cost).." WIN per turn for baby")
+      EVT.log("Baby cost: "..color.." added "..tostring(cost).." WIN per turn for baby")
       return true
     else
-      warn("Baby cost: Failed to add cost to calculator: "..tostring(result))
+      EVT.warn("Baby cost: Failed to add cost to calculator: "..tostring(result))
       return false
     end
   else
-    warn("Costs Calculator not found for baby cost (tag: "..TAG_COSTS_CALC..")")
+    EVT.warn("Costs Calculator not found for baby cost (tag: "..TAG_COSTS_CALC..")")
     return false
   end
 end
@@ -384,12 +419,12 @@ end
 local function getSatToken(color)
   local guid = SAT_TOKEN_GUIDS[tostring(color or "")]
   if not guid then
-    warn("SAT GUID missing for color="..tostring(color))
+    EVT.warn("SAT GUID missing for color="..tostring(color))
     return nil
   end
-  local obj = getObjectFromGUID(guid)
+  local obj = EVT.getObjectFromGUID(guid)
   if not obj then
-    warn("SAT token GUID not found: "..tostring(color).." guid="..tostring(guid))
+    EVT.warn("SAT token GUID not found: "..tostring(color).." guid="..tostring(guid))
     return nil
   end
   return obj
@@ -413,7 +448,7 @@ local function satAdd(satObj, delta, dbgLabel)
     for _=1,n do
       local ok2 = pcall(function() satObj.call(stepFn) end)
       if not ok2 then
-        warn("SAT CALL FAILED: "..tostring(stepFn))
+        EVT.warn("SAT CALL FAILED: "..tostring(stepFn))
         return false
       end
     end
@@ -421,7 +456,7 @@ local function satAdd(satObj, delta, dbgLabel)
   end
 
   if DEBUG and dbgLabel then
-    log("SAT "..tostring(dbgLabel).." delta="..tostring(delta).." ok="..tostring(ok))
+    EVT.log("SAT "..tostring(dbgLabel).." delta="..tostring(delta).." ok="..tostring(ok))
   end
   return ok
 end
@@ -457,7 +492,7 @@ end
 -- Find Shop Engine and check if player owns CAR (for -1 AP cost reduction; shop-bought or PS perk)
 local function hasCarReduction(color)
   if not color then
-    log("CAR check: no color provided")
+    EVT.log("CAR check: no color provided")
     return false
   end
 
@@ -466,12 +501,12 @@ local function hasCarReduction(color)
   local shopEngine = findOneByTags({TAG_SHOP_ENGINE})
   if not shopEngine or not shopEngine.call then
     shopEngine = nil
-    for _, o in ipairs(getAllObjects()) do
+    for _, o in ipairs(EVT.getAllObjectsSafe()) do
       if o and o.hasTag and o.hasTag(TAG_SHOP_ENGINE) and o.call then shopEngine = o break end
     end
   end
   if not shopEngine or not shopEngine.call then
-    warn("CAR check: Shop Engine not found (tag "..TAG_SHOP_ENGINE..")")
+    EVT.warn("CAR check: Shop Engine not found (tag "..TAG_SHOP_ENGINE..")")
     return false
   end
 
@@ -480,15 +515,15 @@ local function hasCarReduction(color)
   end)
 
   if not ok then
-    warn("CAR check: API call failed for "..tostring(normalizedColor).." error="..tostring(hasCar))
+    EVT.warn("CAR check: API call failed for "..tostring(normalizedColor).." error="..tostring(hasCar))
     return false
   end
 
   local result = (ok and hasCar == true)
   if result then
-    log("CAR check: "..tostring(normalizedColor).." HAS CAR (reduction active)")
+    EVT.log("CAR check: "..tostring(normalizedColor).." HAS CAR (reduction active)")
   else
-    log("CAR check: "..tostring(normalizedColor).." NO CAR (ok="..tostring(ok).." hasCar="..tostring(hasCar)..")")
+    EVT.log("CAR check: "..tostring(normalizedColor).." NO CAR (ok="..tostring(ok).." hasCar="..tostring(hasCar)..")")
   end
   return result
 end
@@ -512,7 +547,7 @@ local function getOwnedHiTechCount(color)
   
   local shopEngine = findOneByTags({TAG_SHOP_ENGINE})
   if not shopEngine or not shopEngine.call then
-    warn("Luxury Tax: Shop Engine not found")
+    EVT.warn("Luxury Tax: Shop Engine not found")
     return 0
   end
   
@@ -521,7 +556,7 @@ local function getOwnedHiTechCount(color)
   end)
   
   if not ok or type(ownedList) ~= "table" then
-    warn("Luxury Tax: Failed to get owned hi-tech list for "..color)
+    EVT.warn("Luxury Tax: Failed to get owned hi-tech list for "..color)
     return 0
   end
   
@@ -543,7 +578,7 @@ local function getCurrentEstateLevel(color)
       local TAG_ESTATE_OWNED = "WLB_ESTATE_OWNED"
       local colorTagStr = colorTag(color)
       
-      for _, o in ipairs(getAllObjects()) do
+      for _, o in ipairs(EVT.getAllObjectsSafe()) do
         if o and o.hasTag and o.hasTag(TAG_ESTATE_OWNED) and o.hasTag(colorTagStr) then
           local name = o.getName and o.getName() or ""
           -- Check card name pattern: ESTATE_L1, ESTATE_L2, etc.
@@ -565,7 +600,7 @@ local function getCurrentEstateLevel(color)
   local TAG_ESTATE_OWNED = "WLB_ESTATE_OWNED"
   local colorTagStr = colorTag(color)
   
-  for _, o in ipairs(getAllObjects()) do
+  for _, o in ipairs(EVT.getAllObjectsSafe()) do
     if o and o.hasTag and o.hasTag(TAG_ESTATE_OWNED) and o.hasTag(colorTagStr) then
       local name = o.getName and o.getName() or ""
       if name:match("ESTATE_L([1-4])") then
@@ -586,19 +621,19 @@ local function tryPayAPOrBlock(color, apCost)
 
   local apCtrl = getApCtrl(color)
   if not apCtrl or not apCtrl.call then
-    warn("AP CTRL not found for "..tostring(color).." -> BLOCK card.")
+    EVT.warn("AP CTRL not found for "..tostring(color).." -> BLOCK card.")
     return false
   end
 
   local okCan, can = pcall(function() return apCtrl.call("canSpendAP", apCost) end)
   if (not okCan) or (can ~= true) then
-    log(color.." NOT ENOUGH AP for "..tostring(amount).." -> "..tostring(apCost.to).." (blocked)")
+    EVT.log(color.." NOT ENOUGH AP for "..tostring(amount).." -> "..tostring(apCost.to).." (blocked)")
     return false
   end
 
   local okPay, paid = pcall(function() return apCtrl.call("spendAP", apCost) end)
   if (not okPay) or (paid ~= true) then
-    warn(color.." spendAP failed (blocked).")
+    EVT.warn(color.." spendAP failed (blocked).")
     return false
   end
 
@@ -612,13 +647,13 @@ local function applyAP_Move(color, apEff)
 
   local apCtrl = getApCtrl(color)
   if not apCtrl or not apCtrl.call then
-    warn("AP CTRL not found for "..tostring(color).." -> cannot apply AP effect.")
+    EVT.warn("AP CTRL not found for "..tostring(color).." -> cannot apply AP effect.")
     return false
   end
 
   local okMove = pcall(function() apCtrl.call("moveAP", apEff) end)
   if not okMove then
-    warn("moveAP() not supported by AP CTRL.")
+    EVT.warn("moveAP() not supported by AP CTRL.")
     return false
   end
   return true
@@ -631,7 +666,7 @@ local function applyAP_ToInactive_WithRestFallback(color, amount, duration)
   amount = tonumber(amount) or 0
   local apCtrl = getApCtrl(color)
   if not apCtrl or not apCtrl.call then
-    warn("AP CTRL not found for "..tostring(color).." -> cannot apply hangover AP.")
+    EVT.warn("AP CTRL not found for "..tostring(color).." -> cannot apply hangover AP.")
     return false
   end
 
@@ -640,7 +675,7 @@ local function applyAP_ToInactive_WithRestFallback(color, amount, duration)
 
   local ok, ret = pcall(function() return apCtrl.call("moveAP", apEff) end)
   if not ok then
-    warn("moveAP(INACTIVE) failed for "..tostring(color))
+    EVT.warn("moveAP(INACTIVE) failed for "..tostring(color))
     return false
   end
 
@@ -677,26 +712,26 @@ local function applyToPlayer_NoAP(color, effect, dbgLabel)
   if effect.money and effect.money ~= 0 then
     local moneyObj = resolveMoney(color)
     if not moneyObj then
-      warn("Money object not found for "..tostring(color))
+      EVT.warn("Money object not found for "..tostring(color))
       safeBroadcastTo(color, "⛔ Money controller missing. Add PlayerBoardController_Shared to your player board (WLB_BOARD + WLB_COLOR_"..tostring(color)..") or restore legacy WLB_MONEY tile.", {1,0.6,0.2})
       return false
     end
     local ok = moneyAdd(moneyObj, effect.money)
-    if not ok then warn("Money API mismatch for "..tostring(color)) end
+    if not ok then EVT.warn("Money API mismatch for "..tostring(color)) end
   end
 
   if effect.sat and effect.sat ~= 0 then
     local satObj = getSatToken(color)
     if not satObj then return false end
     local ok = satAdd(satObj, effect.sat, dbgLabel or ("SAT:"..tostring(color)))
-    if not ok then warn("SAT API mismatch for "..tostring(color)) end
+    if not ok then EVT.warn("SAT API mismatch for "..tostring(color)) end
   end
 
   if effect.stats then
     local statsCtrl = findOneByTags({TAG_STATS_CTRL, colorTag(color)})
-    if not statsCtrl then warn("STATS CTRL not found for "..tostring(color)); return false end
+    if not statsCtrl then EVT.warn("STATS CTRL not found for "..tostring(color)); return false end
     local ok = statsApply(statsCtrl, effect.stats)
-    if not ok then warn("STATS API mismatch for "..tostring(color)) end
+    if not ok then EVT.warn("STATS API mismatch for "..tostring(color)) end
   end
 
   return true
@@ -707,7 +742,7 @@ local function applyEffect_WithAPMove_NoCost(color, eff, dbgLabel)
 
   if eff.money and eff.money < 0 then
     if not canAfford(color, eff.money) then
-      warn("BLOCKED: not enough money (cannot go below 0).")
+      EVT.warn("BLOCKED: not enough money (cannot go below 0).")
       return false
     end
   end
@@ -754,13 +789,13 @@ local function finalizeCard(cardObj, kind, color)
   local g = cardObj.getGUID()
   -- Don't finalize if this card was handed off to Events Controller for auction (it's already at auction position)
   if auctionHandoffCardGuids and auctionHandoffCardGuids[g] then
-    if DEBUG then log("finalizeCard: skipped - card "..tostring(g).." is auction handoff") end
+    if DEBUG then EVT.log("finalizeCard: skipped - card "..tostring(g).." is auction handoff") end
     auctionHandoffCardGuids[g] = nil
     return
   end
   -- Don't finalize if there's a pending crime flow
   if pendingVECrime and pendingVECrime[g] then
-    if DEBUG then log("finalizeCard: blocked - pendingVECrime exists for "..tostring(g)) end
+    if DEBUG then EVT.log("finalizeCard: blocked - pendingVECrime exists for "..tostring(g)) end
     return
   end
   pcall(function() cardObj.clearButtons() end)
@@ -908,16 +943,16 @@ function evt_cancelPending(cardObj, player_color, alt_click)
                 local moved = tonumber(result.moved or 0) or 0
                 if moved > 0 then
                   refundTracker.total = refundTracker.total + moved
-                  if DEBUG then log("VE card cancelled: refunded slotExtra AP chunk "..tostring(i)..": moved="..tostring(moved)) end
+                  if DEBUG then EVT.log("VE card cancelled: refunded slotExtra AP chunk "..tostring(i)..": moved="..tostring(moved)) end
                 else
-                  if DEBUG then log("VE card cancelled: WARNING slotExtra refund chunk "..tostring(i).." succeeded but moved=0") end
+                  if DEBUG then EVT.log("VE card cancelled: WARNING slotExtra refund chunk "..tostring(i).." succeeded but moved=0") end
                 end
               else
-                if DEBUG then log("VE card cancelled: FAILED slotExtra refund chunk "..tostring(i).." okRefund="..tostring(okRefund).." result="..tostring(result)) end
+                if DEBUG then EVT.log("VE card cancelled: FAILED slotExtra refund chunk "..tostring(i).." okRefund="..tostring(okRefund).." result="..tostring(result)) end
               end
               -- After last refund, clear state and send message
               if i == slotExtra then
-                if DEBUG then log("VE card cancelled: Total slotExtra refunded="..tostring(refundTracker.total).." (requested "..tostring(slotExtra)..") for card "..tostring(g)) end
+                if DEBUG then EVT.log("VE card cancelled: Total slotExtra refunded="..tostring(refundTracker.total).." (requested "..tostring(slotExtra)..") for card "..tostring(g)) end
                 -- Add small delay to let tokens settle before clearing state
                 Wait.time(function()
                   -- Clear state after all refunds complete and tokens settle
@@ -930,7 +965,7 @@ function evt_cancelPending(cardObj, player_color, alt_click)
                   clearDebounce(g)
                   -- Notify Events Controller
                   pcall(function()
-                    local ctrl = getObjectFromGUID(EVENTS_CONTROLLER_GUID)
+                    local ctrl = EVT.getObjectFromGUID(EVENTS_CONTROLLER_GUID)
                     if ctrl and ctrl.call then
                       ctrl.call("onCardCancelled", { card_guid = g })
                     end
@@ -961,7 +996,7 @@ function evt_cancelPending(cardObj, player_color, alt_click)
   clearDebounce(g)
   -- Notify Events Controller so it closes modal and re-adds YES/click catcher (card becomes interactable again)
   pcall(function()
-    local ctrl = getObjectFromGUID(EVENTS_CONTROLLER_GUID)
+    local ctrl = EVT.getObjectFromGUID(EVENTS_CONTROLLER_GUID)
     if ctrl and ctrl.call then
       ctrl.call("onCardCancelled", { card_guid = g })
     end
@@ -989,7 +1024,7 @@ function evt_veCrime(cardObj, player_color, alt_click)
     typeKey = cardTypeTbl[cardId]
   end
   if not typeKey then
-    if DEBUG then log("evt_veCrime: typeKey not found for cardId="..tostring(cardId).." CARD_TYPE="..tostring(cardTypeTbl)) end
+    if DEBUG then EVT.log("evt_veCrime: typeKey not found for cardId="..tostring(cardId).." CARD_TYPE="..tostring(cardTypeTbl)) end
     -- Try to extract typeKey from cardId pattern (e.g., AD_59_VE-NGO2-SOC1 -> AD_VE_NGO2_SOC1)
     if cardId and type(cardId) == "string" then
       -- Pattern: AD_XX_VE-XXX-YYY -> AD_VE_XXX_YYY
@@ -999,7 +1034,7 @@ function evt_veCrime(cardObj, player_color, alt_click)
         if rest then
           -- Replace hyphens with underscores
           typeKey = "AD_VE_" .. rest:gsub("-", "_")
-          if DEBUG then log("evt_veCrime: extracted typeKey="..tostring(typeKey).." from cardId="..tostring(cardId)) end
+          if DEBUG then EVT.log("evt_veCrime: extracted typeKey="..tostring(typeKey).." from cardId="..tostring(cardId)) end
         end
       end
     end
@@ -1011,7 +1046,7 @@ function evt_veCrime(cardObj, player_color, alt_click)
   -- Chunk-safe: VE_CRIME_TABLE may be in later chunk
   local crimeTable = (type(VE_CRIME_TABLE) == "table" and VE_CRIME_TABLE) or (type(_G.WLB_EVT) == "table" and _G.WLB_EVT.VE_CRIME_TABLE)
   if not crimeTable or type(crimeTable) ~= "table" then
-    if DEBUG then log("evt_veCrime: VE_CRIME_TABLE is nil, using fallback table") end
+    if DEBUG then EVT.log("evt_veCrime: VE_CRIME_TABLE is nil, using fallback table") end
     -- Fallback crime table if VE_CRIME_TABLE is not accessible
     crimeTable = {
       AD_VE_NGO1_ENT1 = { ap = 1, [1] = "nothing", [2] = "wounded", [3] = "wounded_steal", steal = 1000 },
@@ -1030,7 +1065,7 @@ function evt_veCrime(cardObj, player_color, alt_click)
   end
   local crimeDef = crimeTable[typeKey]
   if not crimeDef then
-    if DEBUG then log("evt_veCrime: crimeDef not found for typeKey="..tostring(typeKey)) end
+    if DEBUG then EVT.log("evt_veCrime: crimeDef not found for typeKey="..tostring(typeKey)) end
     safeBroadcastTo(pc.color, "Crime: This card has no crime option.", {1,0.6,0.2})
     return
   end
@@ -1068,7 +1103,7 @@ end
 -- Helper function to process crime roll results
 local function processCrimeRollResult(roll, data, cardObj, g, targetColor)
   if not roll or roll < 1 or roll > 6 then
-    if DEBUG then log("processCrimeRollResult: invalid roll="..tostring(roll)) end
+    if DEBUG then EVT.log("processCrimeRollResult: invalid roll="..tostring(roll)) end
     return
   end
   -- Use typeKey if available, otherwise try to convert cardId (chunk-safe fallback)
@@ -1094,7 +1129,7 @@ local function processCrimeRollResult(roll, data, cardObj, g, targetColor)
   end
   local crimeDef = crimeTable[crimeKey]
   if not crimeDef then
-    if DEBUG then log("processCrimeRollResult: crimeDef not found for crimeKey="..tostring(crimeKey)) end
+    if DEBUG then EVT.log("processCrimeRollResult: crimeDef not found for crimeKey="..tostring(crimeKey)) end
     pendingVECrime[g] = nil
     if type(finalizeCard) == "function" then
       finalizeCard(cardObj, "instant", data.color)
@@ -1122,7 +1157,7 @@ local function processCrimeRollResult(roll, data, cardObj, g, targetColor)
         PS_AddStatus(targetColor, STATUS_TAG.WOUNDED)
       end)
       if not ok and DEBUG then
-        log("processCrimeRollResult: Failed to add WOUNDED status: "..tostring(err))
+        EVT.log("processCrimeRollResult: Failed to add WOUNDED status: "..tostring(err))
       end
     end
     -- Reduce health by 3
@@ -1130,7 +1165,7 @@ local function processCrimeRollResult(roll, data, cardObj, g, targetColor)
     if statsCtrl then
       local ok = statsApply(statsCtrl, { h = -3 })
       if not ok and DEBUG then
-        log("processCrimeRollResult: Failed to reduce health for "..tostring(targetColor))
+        EVT.log("processCrimeRollResult: Failed to reduce health for "..tostring(targetColor))
       end
     end
     pcall(function() broadcastToAll("Crime: "..targetColor.." is WOUNDED and loses 3 Health.", {1,0.6,0.4}) end)
@@ -1141,7 +1176,7 @@ local function processCrimeRollResult(roll, data, cardObj, g, targetColor)
         PS_AddStatus(targetColor, STATUS_TAG.WOUNDED)
       end)
       if not ok and DEBUG then
-        log("processCrimeRollResult: Failed to add WOUNDED status: "..tostring(err))
+        EVT.log("processCrimeRollResult: Failed to add WOUNDED status: "..tostring(err))
       end
     end
     -- Reduce health by 3
@@ -1149,7 +1184,7 @@ local function processCrimeRollResult(roll, data, cardObj, g, targetColor)
     if statsCtrl then
       local ok = statsApply(statsCtrl, { h = -3 })
       if not ok and DEBUG then
-        log("processCrimeRollResult: Failed to reduce health for "..tostring(targetColor))
+        EVT.log("processCrimeRollResult: Failed to reduce health for "..tostring(targetColor))
       end
     end
 
@@ -1230,15 +1265,15 @@ end
 
 -- Called by VocationsController when target is selected via UI
 function VECrimeTargetSelected(params)
-  if DEBUG then log("VECrimeTargetSelected: called with params="..tostring(params and (params.cardGuid or "nil").." targetColor="..tostring(params and params.targetColor or "nil"))) end
+  if DEBUG then EVT.log("VECrimeTargetSelected: called with params="..tostring(params and (params.cardGuid or "nil").." targetColor="..tostring(params and params.targetColor or "nil"))) end
   if not params or not params.cardGuid or not params.targetColor then 
-    if DEBUG then log("VECrimeTargetSelected: missing params") end
+    if DEBUG then EVT.log("VECrimeTargetSelected: missing params") end
     return 
   end
   local g = params.cardGuid
   local data = pendingVECrime[g]
   if not data then 
-    if DEBUG then log("VECrimeTargetSelected: no pendingVECrime data for guid="..tostring(g)) end
+    if DEBUG then EVT.log("VECrimeTargetSelected: no pendingVECrime data for guid="..tostring(g)) end
     return 
   end
   local targetColor = params.targetColor
@@ -1246,16 +1281,17 @@ function VECrimeTargetSelected(params)
     safeBroadcastTo(data.color, "You cannot target yourself.", {1,0.6,0.2})
     return
   end
-  local cardObj = data.cardObj or getObjectFromGUID(g)
+  local cardObj = data.cardObj or EVT.getObjectFromGUID(g)
   if not cardObj then 
-    if DEBUG then log("VECrimeTargetSelected: cardObj not found for guid="..tostring(g)) end
+    if DEBUG then EVT.log("VECrimeTargetSelected: cardObj not found for guid="..tostring(g)) end
     return 
   end
   lockCard(g, LOCK_SEC)
   data.targetColor = targetColor
   cardUI_clear(cardObj)
   safeBroadcastTo(data.color, "Crime target: "..targetColor..". Rolling dice...", {1,0.9,0.5})
-  if DEBUG then log("VECrimeTargetSelected: starting dice roll for target="..tostring(targetColor)) end
+  if DEBUG then EVT.log("VECrimeTargetSelected: starting dice roll for target="..tostring(targetColor)) end
+  if DEBUG then EVT.log("[CRIME_DIAG] VECrimeTargetSelected calling rollDieForPlayer color="..tostring(data.color)) end
   local rollFn = _G.EVT_rollDieForPlayer or rollDieForPlayer
   if type(rollFn) ~= "function" then
     print("[WLB EVENT][FATAL] rollDieForPlayer is nil (chunk): "..tostring(type(_G.EVT_rollDieForPlayer)))
@@ -1268,7 +1304,7 @@ function VECrimeTargetSelected(params)
       cardUI_clear(cardObj)
       return
     end
-    if DEBUG then log("VECrimeTargetSelected: final value="..tostring(roll)) end
+    if DEBUG then EVT.log("VECrimeTargetSelected: final value="..tostring(roll)) end
     processCrimeRollResult(roll, data, cardObj, g, targetColor)
   end)
 end
@@ -1314,7 +1350,7 @@ local function evt_veTarget(cardObj, targetColor)
     end
     local crimeDef = crimeTable[crimeKey]
     if not crimeDef then
-      if DEBUG then log("evt_veTarget roll: crimeDef not found for crimeKey="..tostring(crimeKey)) end
+      if DEBUG then EVT.log("evt_veTarget roll: crimeDef not found for crimeKey="..tostring(crimeKey)) end
       pendingVECrime[g] = nil
       finalizeCard(cardObj, "instant", data.color)
       return
@@ -1431,19 +1467,19 @@ end
 
 -- Vocation Event: only the player who played the card and has that vocation can use the button
 local function veChoiceAllowed(cardObj, player_color, veCode)
-  if DEBUG then log("veChoiceAllowed: START - player_color="..tostring(player_color).." veCode="..tostring(veCode)) end
+  if DEBUG then EVT.log("veChoiceAllowed: START - player_color="..tostring(player_color).." veCode="..tostring(veCode)) end
   if not cardObj or not player_color or not veCode then 
-    if DEBUG then log("veChoiceAllowed: missing params - cardObj="..tostring(cardObj).." player_color="..tostring(player_color).." veCode="..tostring(veCode)) end
+    if DEBUG then EVT.log("veChoiceAllowed: missing params - cardObj="..tostring(cardObj).." player_color="..tostring(player_color).." veCode="..tostring(veCode)) end
     return false 
   end
   if type(pendingChoice) ~= "table" then 
-    if DEBUG then log("veChoiceAllowed: pendingChoice is not a table") end
+    if DEBUG then EVT.log("veChoiceAllowed: pendingChoice is not a table") end
     return false 
   end
   local g = cardObj.getGUID()
   local pc = pendingChoice[g]
   if not pc or pc.choiceKey ~= "VE_PICK_SIDE" then 
-    if DEBUG then log("veChoiceAllowed: no pc or wrong choiceKey - pc="..tostring(pc).." choiceKey="..tostring(pc and pc.choiceKey)) end
+    if DEBUG then EVT.log("veChoiceAllowed: no pc or wrong choiceKey - pc="..tostring(pc).." choiceKey="..tostring(pc and pc.choiceKey)) end
     return false 
   end
   -- White player can use vocation cards as current turn color (for testing)
@@ -1456,11 +1492,11 @@ local function veChoiceAllowed(cardObj, player_color, veCode)
       turnColor = activeColor
     end
     if turnColor and turnColor ~= "White" then
-      if DEBUG then log("veChoiceAllowed: White player using turn color "..tostring(turnColor).." for vocation check") end
+      if DEBUG then EVT.log("veChoiceAllowed: White player using turn color "..tostring(turnColor).." for vocation check") end
       -- Use turn color for vocation check instead of White
       player_color = turnColor
     else
-      if DEBUG then log("veChoiceAllowed: White player bypass - no turn color, allowing") end
+      if DEBUG then EVT.log("veChoiceAllowed: White player bypass - no turn color, allowing") end
       return true
     end
   end
@@ -1473,13 +1509,13 @@ local function veChoiceAllowed(cardObj, player_color, veCode)
   local pcColorNorm = normColor(pc.color)
   -- Spectator (White): allow and treat as acting for pc.color (current turn player)
   if playerColorNorm ~= "White" and playerColorNorm ~= pcColorNorm then
-    if DEBUG then log("veChoiceAllowed: color mismatch - player='"..tostring(player_color).."' ("..tostring(playerColorNorm)..") pc.color='"..tostring(pc.color).."' ("..tostring(pcColorNorm)..")") end
+    if DEBUG then EVT.log("veChoiceAllowed: color mismatch - player='"..tostring(player_color).."' ("..tostring(playerColorNorm)..") pc.color='"..tostring(pc.color).."' ("..tostring(pcColorNorm)..")") end
     return false
   end
   -- VE_CODE_TO_VOCATION might be nil due to chunking - use fallback mapping
   local codeToVoc = VE_CODE_TO_VOCATION
   if not codeToVoc or type(codeToVoc) ~= "table" then
-    if DEBUG then log("veChoiceAllowed: VE_CODE_TO_VOCATION is nil, using fallback mapping") end
+    if DEBUG then EVT.log("veChoiceAllowed: VE_CODE_TO_VOCATION is nil, using fallback mapping") end
     -- Fallback mapping if VE_CODE_TO_VOCATION is not accessible
     codeToVoc = {
       SOC1 = "SOCIAL_WORKER", SOC2 = "SOCIAL_WORKER",
@@ -1492,66 +1528,66 @@ local function veChoiceAllowed(cardObj, player_color, veCode)
   end
   local requiredVoc = codeToVoc[veCode]
   if not requiredVoc then 
-    if DEBUG then log("veChoiceAllowed: requiredVoc not found for veCode="..tostring(veCode)) end
+    if DEBUG then EVT.log("veChoiceAllowed: requiredVoc not found for veCode="..tostring(veCode)) end
     return false 
   end
-  if DEBUG then log("veChoiceAllowed: requiredVoc="..tostring(requiredVoc).." for veCode="..tostring(veCode)) end
+  if DEBUG then EVT.log("veChoiceAllowed: requiredVoc="..tostring(requiredVoc).." for veCode="..tostring(veCode)) end
   local voc = findOneByTags({TAG_VOCATIONS_CTRL})
   if not voc or not voc.call then 
-    if DEBUG then log("veChoiceAllowed: VocationsController not found or no call method") end
+    if DEBUG then EVT.log("veChoiceAllowed: VocationsController not found or no call method") end
     return false 
   end
-  if DEBUG then log("veChoiceAllowed: calling VOC_GetVocation with color="..tostring(player_color)) end
+  if DEBUG then EVT.log("veChoiceAllowed: calling VOC_GetVocation with color="..tostring(player_color)) end
   local ok, gotVoc = pcall(function() return voc.call("VOC_GetVocation", { color = player_color }) end)
   if not ok then 
-    if DEBUG then log("veChoiceAllowed: VOC_GetVocation call failed for "..tostring(player_color).." error="..tostring(gotVoc)) end
+    if DEBUG then EVT.log("veChoiceAllowed: VOC_GetVocation call failed for "..tostring(player_color).." error="..tostring(gotVoc)) end
     return false 
   end
-  if DEBUG then log("veChoiceAllowed: VOC_GetVocation returned: "..tostring(gotVoc).." (type="..type(gotVoc)..")") end
+  if DEBUG then EVT.log("veChoiceAllowed: VOC_GetVocation returned: "..tostring(gotVoc).." (type="..type(gotVoc)..")") end
   -- Handle nil vocation (player has no vocation assigned)
   if not gotVoc or gotVoc == "" then
-    if DEBUG then log("veChoiceAllowed: player has no vocation - gotVoc=nil") end
+    if DEBUG then EVT.log("veChoiceAllowed: player has no vocation - gotVoc=nil") end
     return false
   end
   -- Normalize both values for comparison (handle case differences, whitespace)
   local gotVocStr = tostring(gotVoc):gsub("%s+", ""):upper()
   local requiredVocStr = tostring(requiredVoc):gsub("%s+", ""):upper()
   if gotVocStr == "" or requiredVocStr == "" then
-    if DEBUG then log("veChoiceAllowed: empty vocation after normalize - got='"..tostring(gotVoc).."' required='"..tostring(requiredVoc).."'") end
+    if DEBUG then EVT.log("veChoiceAllowed: empty vocation after normalize - got='"..tostring(gotVoc).."' required='"..tostring(requiredVoc).."'") end
     return false
   end
   if gotVocStr ~= requiredVocStr then
-    if DEBUG then log("veChoiceAllowed: mismatch - got='"..tostring(gotVoc).."' ("..gotVocStr..") required='"..tostring(requiredVoc).."' ("..requiredVocStr..")") end
+    if DEBUG then EVT.log("veChoiceAllowed: mismatch - got='"..tostring(gotVoc).."' ("..gotVocStr..") required='"..tostring(requiredVoc).."' ("..requiredVocStr..")") end
     return false
   end
-  if DEBUG then log("veChoiceAllowed: ✓ match - got='"..tostring(gotVoc).."' required='"..tostring(requiredVoc).."'") end
+  if DEBUG then EVT.log("veChoiceAllowed: ✓ match - got='"..tostring(gotVoc).."' required='"..tostring(requiredVoc).."'") end
   return true
 end
 
 function evt_veChoiceA(cardObj, player_color, alt_click)
   if not cardObj then return end
-  if DEBUG then log("evt_veChoiceA: called by "..tostring(player_color)) end
+  if DEBUG then EVT.log("evt_veChoiceA: called by "..tostring(player_color)) end
   if type(pendingChoice) ~= "table" then 
-    if DEBUG then log("evt_veChoiceA: pendingChoice is not a table") end
+    if DEBUG then EVT.log("evt_veChoiceA: pendingChoice is not a table") end
     return 
   end
   local g = cardObj.getGUID()
   local pc = pendingChoice[g]
   if not pc or pc.choiceKey ~= "VE_PICK_SIDE" then 
-    if DEBUG then log("evt_veChoiceA: no pendingChoice or wrong choiceKey - pc="..tostring(pc and pc.choiceKey)) end
+    if DEBUG then EVT.log("evt_veChoiceA: no pendingChoice or wrong choiceKey - pc="..tostring(pc and pc.choiceKey)) end
     return 
   end
   local meta = pc.meta
   if not meta or not meta.ve then 
-    if DEBUG then log("evt_veChoiceA: no meta or ve") end
+    if DEBUG then EVT.log("evt_veChoiceA: no meta or ve") end
     return 
   end
   local veCode = meta.ve.a
   if not veCode then 
-    if DEBUG then log("evt_veChoiceA: no veCode from meta.ve.a") end
+    if DEBUG then EVT.log("evt_veChoiceA: no veCode from meta.ve.a") end
     return 
   end
-  if DEBUG then log("evt_veChoiceA: veCode="..tostring(veCode).." checking if allowed...") end
+  if DEBUG then EVT.log("evt_veChoiceA: veCode="..tostring(veCode).." checking if allowed...") end
   if not veChoiceAllowed(cardObj, player_color, veCode) then
     -- Always use full vocation name, never show codes like ENT1 or NGO1
     local displayNames = VE_DISPLAY_NAMES
@@ -1604,13 +1640,13 @@ function evt_veChoiceA(cardObj, player_color, alt_click)
   if actionId then
     local voc = findOneByTags({TAG_VOCATIONS_CTRL})
     if voc and voc.call then
-      if DEBUG then log("evt_veChoiceA: calling RunVocationEventCardAction with actionId="..tostring(actionId)) end
+      if DEBUG then EVT.log("evt_veChoiceA: calling RunVocationEventCardAction with actionId="..tostring(actionId)) end
       pcall(function() voc.call("RunVocationEventCardAction", { playerColor = pc.color, actionId = actionId }) end)
     else
-      if DEBUG then log("evt_veChoiceA: VocationsController not found") end
+      if DEBUG then EVT.log("evt_veChoiceA: VocationsController not found") end
     end
   else
-    if DEBUG then log("evt_veChoiceA: no actionId for veCode="..tostring(veCode)) end
+    if DEBUG then EVT.log("evt_veChoiceA: no actionId for veCode="..tostring(veCode)) end
   end
   -- Clear veSlotExtraCharged flag since action completed successfully
   veSlotExtraCharged[g] = nil
@@ -1627,28 +1663,28 @@ end
 
 function evt_veChoiceB(cardObj, player_color, alt_click)
   if not cardObj then return end
-  if DEBUG then log("evt_veChoiceB: called by "..tostring(player_color)) end
+  if DEBUG then EVT.log("evt_veChoiceB: called by "..tostring(player_color)) end
   if type(pendingChoice) ~= "table" then 
-    if DEBUG then log("evt_veChoiceB: pendingChoice is not a table") end
+    if DEBUG then EVT.log("evt_veChoiceB: pendingChoice is not a table") end
     return 
   end
   local g = cardObj.getGUID()
   local pc = pendingChoice[g]
   if not pc or pc.choiceKey ~= "VE_PICK_SIDE" then 
-    if DEBUG then log("evt_veChoiceB: no pendingChoice or wrong choiceKey - pc="..tostring(pc and pc.choiceKey)) end
+    if DEBUG then EVT.log("evt_veChoiceB: no pendingChoice or wrong choiceKey - pc="..tostring(pc and pc.choiceKey)) end
     return 
   end
   local meta = pc.meta
   if not meta or not meta.ve then 
-    if DEBUG then log("evt_veChoiceB: no meta or ve") end
+    if DEBUG then EVT.log("evt_veChoiceB: no meta or ve") end
     return 
   end
   local veCode = meta.ve.b
   if not veCode then 
-    if DEBUG then log("evt_veChoiceB: no veCode from meta.ve.b") end
+    if DEBUG then EVT.log("evt_veChoiceB: no veCode from meta.ve.b") end
     return 
   end
-  if DEBUG then log("evt_veChoiceB: veCode="..tostring(veCode).." checking if allowed...") end
+  if DEBUG then EVT.log("evt_veChoiceB: veCode="..tostring(veCode).." checking if allowed...") end
   if not veChoiceAllowed(cardObj, player_color, veCode) then
     -- Always use full vocation name, never show codes like ENT1 or NGO1
     local displayNames = VE_DISPLAY_NAMES
@@ -1701,13 +1737,13 @@ function evt_veChoiceB(cardObj, player_color, alt_click)
   if actionId then
     local voc = findOneByTags({TAG_VOCATIONS_CTRL})
     if voc and voc.call then
-      if DEBUG then log("evt_veChoiceB: calling RunVocationEventCardAction with actionId="..tostring(actionId)) end
+      if DEBUG then EVT.log("evt_veChoiceB: calling RunVocationEventCardAction with actionId="..tostring(actionId)) end
       pcall(function() voc.call("RunVocationEventCardAction", { playerColor = pc.color, actionId = actionId }) end)
     else
-      if DEBUG then log("evt_veChoiceB: VocationsController not found") end
+      if DEBUG then EVT.log("evt_veChoiceB: VocationsController not found") end
     end
   else
-    if DEBUG then log("evt_veChoiceB: no actionId for veCode="..tostring(veCode)) end
+    if DEBUG then EVT.log("evt_veChoiceB: no actionId for veCode="..tostring(veCode)) end
   end
   -- Clear veSlotExtraCharged flag since action completed successfully
   veSlotExtraCharged[g] = nil
@@ -1728,8 +1764,7 @@ end
 
 local function getRealDie()
   if not REAL_DICE_GUID or REAL_DICE_GUID == "" then return nil end
-  if type(getObjectFromGUID) ~= "function" then return nil end
-  return getObjectFromGUID(REAL_DICE_GUID)
+  return EVT.getObjectFromGUID(REAL_DICE_GUID)
 end
 
 local function cacheDieHomeIfNeeded(die)
@@ -1774,9 +1809,7 @@ local function rollRealDieAsync(cardObj, onDone)
   pcall(function() die.randomize() end)
   pcall(function() die.roll() end)
 
-  local timeout = (os and os.time and os.time()) or 0
-  timeout = timeout + 6
-  if not (Wait and Wait.condition) then onDone(math.random(1,6), nil); return end
+  local timeout = os.time() + 6
   Wait.condition(
     function()
       local v = tryReadDieValue(die)
@@ -1793,11 +1826,14 @@ end
 
 -- Roll die: ONE physical roll, result used immediately. Exception: Entrepreneur L2 during their turn gets Reroll/Go on choice.
 local function rollDieForPlayer(color, requestPrefix, onDone)
+  if DEBUG then EVT.log("[CRIME_DIAG] rollDieForPlayer ENTER color="..tostring(color).." prefix="..tostring(requestPrefix)) end
   if not color then onDone(math.random(1,6), nil) return end
-  local voc = findOneByTags and findOneByTags({TAG_VOCATIONS_CTRL}) or nil
+  local voc = EVT.findOneByTags({TAG_VOCATIONS_CTRL})
+  if DEBUG then EVT.log("[CRIME_DIAG] rollDieForPlayer voc="..tostring(voc and "ok" or "nil")) end
   local needsEntRerollUI = false
   if voc and voc.call then
     local ok, res = pcall(function() return voc.call("VOC_CanUseEntrepreneurReroll", { color = color }) end)
+    if DEBUG then EVT.log("[CRIME_DIAG] rollDieForPlayer VOC_CanUseEntrepreneurReroll ok="..tostring(ok).." res="..tostring(res)) end
     needsEntRerollUI = (ok and res == true)
   end
   if not needsEntRerollUI then
@@ -1812,8 +1848,7 @@ local function rollDieForPlayer(color, requestPrefix, onDone)
   local requestId = (requestPrefix or "evt") .. "_" .. tostring(color) .. "_" .. tostring(ts)
   if not _G.VOC_DieRollResults then _G.VOC_DieRollResults = {} end
   pcall(function() voc.call("VOC_RollDieForPlayer", { requestId = requestId, color = color }) end)
-  local deadline = ((os and os.time) and os.time() or 0) + 12
-  if not (Wait and Wait.condition) then onDone(math.random(1,6), nil); return end
+  local deadline = (os.time and os.time() or 0) + 12
   Wait.condition(
     function()
       local v = _G.VOC_DieRollResults and _G.VOC_DieRollResults[requestId]
@@ -2053,7 +2088,6 @@ local VE_CRIME_TABLE = {
 if not _G.WLB_EVT then _G.WLB_EVT = {} end
 _G.WLB_EVT.CARD_TYPE = CARD_TYPE
 _G.WLB_EVT.VE_CRIME_TABLE = VE_CRIME_TABLE
-_G.WLB_EVT.rollDieForPlayer = rollDieForPlayer  -- chunk-safe: VECrimeTargetSelected calls this via .call()
 
 -- AP costs for vocation event actions (used to calculate minimum action AP cost)
 local VE_ACTION_AP_COSTS = {
@@ -2219,9 +2253,9 @@ local CHOICES = {
 
 local function applyChoice(color, choiceKey, optionKey)
   local ch = CHOICES[choiceKey]
-  if not ch then warn("No choice: "..tostring(choiceKey)); return false end
+  if not ch then EVT.warn("No choice: "..tostring(choiceKey)); return false end
   local eff = ch.options and ch.options[optionKey]
-  if not eff then warn("No choice option: "..tostring(optionKey)); return false end
+  if not eff then EVT.warn("No choice option: "..tostring(optionKey)); return false end
   return applyEffect_WithAPMove_NoCost(color, eff, "choice:"..tostring(choiceKey))
 end
 
@@ -2316,7 +2350,7 @@ local function handleSpecial(color, cardId, def, cardObj)
     -- DATING check already done in playCardById before AP/money spending
     -- This check here is redundant but kept for safety
     if not hasDatingStatus(color) then
-      warn("AD_MARRIAGE_MULTI: DATING check should have blocked this earlier")
+      EVT.warn("AD_MARRIAGE_MULTI: DATING check should have blocked this earlier")
       return STATUS.BLOCKED
     end
     
@@ -2331,7 +2365,7 @@ local function handleSpecial(color, cardId, def, cardObj)
 
   if def.special == "AD_AUCTION_SCHEDULE" then
     -- Call for Auction: hand off to Events Controller (card moves to auction area, JOINING phase)
-    local ctrl = getObjectFromGUID(EVENTS_CONTROLLER_GUID)
+    local ctrl = EVT.getObjectFromGUID(EVENTS_CONTROLLER_GUID)
     local cardGuid = cardObj and cardObj.getGUID and cardObj.getGUID()
     if ctrl and ctrl.call and cardGuid then
       if type(auctionHandoffCardGuids) ~= "table" then auctionHandoffCardGuids = {} end
@@ -2402,7 +2436,7 @@ local function handleSpecial(color, cardId, def, cardObj)
       -- This gives player a chance to resolve it by end of round
       local TAG_COSTS_CALC = "WLB_COSTS_CALC"
       local costsCalc = nil
-      for _, o in ipairs(getAllObjects()) do
+      for _, o in ipairs(EVT.getAllObjectsSafe()) do
         if o and o.hasTag and o.hasTag(TAG_COSTS_CALC) then
           costsCalc = o
           break
@@ -2414,7 +2448,7 @@ local function handleSpecial(color, cardId, def, cardObj)
           costsCalc.call("addCost", {color=color, amount=totalTax, label="Property Tax L"..tostring(estateLevel)})
         end)
         safeBroadcastTo(color, "🏠 Property Tax: "..tostring(totalTax).." WIN (Level L"..tostring(estateLevel).." × 300) added to Costs Calculator. Pay by end of round or lose satisfaction.", {1,0.7,0.3})
-        log("Property Tax: Added "..tostring(totalTax).." WIN to Costs Calculator for "..color.." (cannot afford)")
+        EVT.log("Property Tax: Added "..tostring(totalTax).." WIN to Costs Calculator for "..color.." (cannot afford)")
         return STATUS.DONE  -- Card is resolved (cost added to calculator)
       else
         -- Costs Calculator not found: fall back to blocking
@@ -2582,7 +2616,7 @@ local function handleSpecial(color, cardId, def, cardObj)
     local minActionAP = math.min(crimeAP, actionAAP, actionBAP)
     local minTotalAP = slotExtra + minActionAP
     
-    if DEBUG then log("VE card: slotExtra="..tostring(slotExtra).." minActionAP="..tostring(minActionAP).." minTotalAP="..tostring(minTotalAP).." for card "..tostring(g)) end
+    if DEBUG then EVT.log("VE card: slotExtra="..tostring(slotExtra).." minActionAP="..tostring(minActionAP).." minTotalAP="..tostring(minTotalAP).." for card "..tostring(g)) end
     
     -- Pre-check: ensure player has enough AP for slotExtra + minimum action
     -- Check even if slotExtra is 0, because there's still a minimum action cost
@@ -2605,7 +2639,7 @@ local function handleSpecial(color, cardId, def, cardObj)
     -- Store the adjusted slotExtra value that Events Controller will charge
     if slotExtra > 0 then
       veSlotExtraCharged[g] = slotExtra  -- Store the actual amount that will be charged (for accurate refund)
-      if DEBUG then log("VE card: marked slotExtra AP="..tostring(slotExtra).." will be charged by Events Controller for card "..tostring(g)) end
+      if DEBUG then EVT.log("VE card: marked slotExtra AP="..tostring(slotExtra).." will be charged by Events Controller for card "..tostring(g)) end
     end
     
     local labelA = VE_DISPLAY_NAMES[ve.a] or ve.a
@@ -2662,7 +2696,7 @@ local function resolveDiceByValue(color, diceKey, roll, cardId, def)
   end
 
   local tbl = DICE[diceKey]
-  if not tbl then warn("No dice table: "..tostring(diceKey)); return false end
+  if not tbl then EVT.warn("No dice table: "..tostring(diceKey)); return false end
 
   local eff = tbl[roll] or {}
   local special = eff.special
@@ -2722,12 +2756,12 @@ function evt_roll(cardObj, player_color, alt_click)
     end)
 
     if not okDice then
-      warn("resolveDiceByValue failed for "..tostring(pd.cardId)..
+      EVT.warn("resolveDiceByValue failed for "..tostring(pd.cardId)..
         " (diceKey="..tostring(pd.diceKey).." roll="..tostring(roll)..") err="..tostring(resOrErr))
       safeBroadcastTo(pd.color, "⚠️ Card resolution error occurred. Card will still be moved to used deck.", {1,0.7,0.3})
     elseif resOrErr == false then
       -- Normal failure path (no Lua error), e.g. missing money controller
-      warn("resolveDiceByValue returned false for "..tostring(pd.cardId)..
+      EVT.warn("resolveDiceByValue returned false for "..tostring(pd.cardId)..
         " (diceKey="..tostring(pd.diceKey).." roll="..tostring(roll)..")")
     end
 
@@ -2745,13 +2779,13 @@ function evt_roll(cardObj, player_color, alt_click)
         cardUI_clear(cardObj)
         local finalizeOk = pcall(function() finalizeCard(cardObj, pd.kind, pd.color) end)
         if not finalizeOk then
-          warn("finalizeCard failed for "..tostring(pd.cardId))
+          EVT.warn("finalizeCard failed for "..tostring(pd.cardId))
           local target = findDiscardTarget()
           if target and target.getPosition then
             local p = target.getPosition()
             pcall(function() cardObj.setPositionSmooth({p.x, p.y + 2, p.z}, false, true) end)
           else
-            warn("Discard target not found - card may remain in slot")
+            EVT.warn("Discard target not found - card may remain in slot")
           end
         end
         if die then returnDieHome(die) end
@@ -2761,13 +2795,13 @@ function evt_roll(cardObj, player_color, alt_click)
       pendingDice[g] = nil
       local finalizeOk = pcall(function() finalizeCard(cardObj, pd.kind, pd.color) end)
       if not finalizeOk then
-        warn("finalizeCard failed for "..tostring(pd.cardId))
+        EVT.warn("finalizeCard failed for "..tostring(pd.cardId))
         local target = findDiscardTarget()
         if target and target.getPosition then
           local p = target.getPosition()
           pcall(function() cardObj.setPositionSmooth({p.x, p.y + 2, p.z}, false, true) end)
         else
-          warn("Discard target not found - card may remain in slot")
+          EVT.warn("Discard target not found - card may remain in slot")
         end
       end
       if die then Wait.time(function() returnDieHome(die) end, 0.35) end
@@ -2829,12 +2863,12 @@ function evt_choiceA(cardObj, player_color, alt_click)
           pcall(function()
             -- Negative amount returns FROM area TO START
             apCtrl.call("moveAP", {to="INACTIVE", amount=-1})
-            log("Babysitter (1 AP): "..pc.color.." moved 1 AP from INACTIVE to START")
+            EVT.log("Babysitter (1 AP): "..pc.color.." moved 1 AP from INACTIVE to START")
           end)
         end
       end, 0.15)
     else
-      warn("Babysitter: AP Controller not found for "..tostring(pc.color))
+      EVT.warn("Babysitter: AP Controller not found for "..tostring(pc.color))
     end
     
     finishChoice(cardObj, pc)
@@ -2885,7 +2919,7 @@ function evt_choiceB(cardObj, player_color, alt_click)
           pcall(function()
             -- Negative amount returns FROM area TO START
             apCtrl.call("moveAP", {to="INACTIVE", amount=-1})
-            log("Babysitter (2 AP): "..pc.color.." moved 1 AP from INACTIVE to START")
+            EVT.log("Babysitter (2 AP): "..pc.color.." moved 1 AP from INACTIVE to START")
           end)
         end
       end, 0.15)
@@ -2894,12 +2928,12 @@ function evt_choiceB(cardObj, player_color, alt_click)
           pcall(function()
             -- Negative amount returns FROM area TO START
             apCtrl.call("moveAP", {to="INACTIVE", amount=-1})
-            log("Babysitter (2 AP): "..pc.color.." moved second 1 AP from INACTIVE to START")
+            EVT.log("Babysitter (2 AP): "..pc.color.." moved second 1 AP from INACTIVE to START")
           end)
         end
       end, 0.30)
     else
-      warn("Babysitter: AP Controller not found for "..tostring(pc.color))
+      EVT.warn("Babysitter: AP Controller not found for "..tostring(pc.color))
     end
     
     finishChoice(cardObj, pc)
@@ -2989,20 +3023,20 @@ end
 local function playCardById(cardId, cardObj, explicitSlotIdx)
   local color = getPlayerColor()
   if not color then
-    warn("No active player color.")
+    EVT.warn("No active player color.")
     return STATUS.ERROR
   end
 
   local typeKey = CARD_TYPE[cardId]
   if not typeKey then
-    warn("Unknown card ID: "..tostring(cardId))
+    EVT.warn("Unknown card ID: "..tostring(cardId))
     safeBroadcastTo(color, "⚠️ Unknown card ID: "..tostring(cardId), {1,0.6,0.2})
     return STATUS.ERROR
   end
 
   local def = TYPES[typeKey]
   if not def then
-    warn("No TYPES def for "..tostring(typeKey))
+    EVT.warn("No TYPES def for "..tostring(typeKey))
     safeBroadcastTo(color, "⚠️ No TYPES def for: "..tostring(typeKey), {1,0.6,0.2})
     return STATUS.ERROR
   end
@@ -3064,7 +3098,7 @@ local function playCardById(cardId, cardObj, explicitSlotIdx)
   local originalTotal = total
   if total > 0 and hasCarReduction(color) then
     total = math.max(0, total - 1)
-    log("CAR reduction: Total AP reduced by 1 (was: "..tostring(originalTotal)..", now: "..tostring(total)..") base="..tostring(base).." slotExtra="..tostring(slotExtra).." for "..tostring(color))
+    EVT.log("CAR reduction: Total AP reduced by 1 (was: "..tostring(originalTotal)..", now: "..tostring(total)..") base="..tostring(base).." slotExtra="..tostring(slotExtra).." for "..tostring(color))
   end
   
   -- Split reduced total back to base and extra (base gets priority - reduce base first, then extra)
@@ -3113,7 +3147,7 @@ local function playCardById(cardId, cardObj, explicitSlotIdx)
   end
 
   if not applyToPlayer_NoAP(color, rest, "play:"..tostring(cardId)) then
-    warn("Effect failed.")
+    EVT.warn("Effect failed.")
     return STATUS.ERROR
   end
 
@@ -3145,7 +3179,7 @@ local function playCardById(cardId, cardObj, explicitSlotIdx)
   -- TODO placeholder
   if def.todo == true and not def.ve then
     safeBroadcastTo(color, "ℹ️ "..tostring(cardId).." -> TODO (mechanika jeszcze nie wdrożona).", {0.7,0.9,1})
-    log("TODO played: "..tostring(cardId).." type="..tostring(typeKey).." note="..tostring(def.note or ""))
+    EVT.log("TODO played: "..tostring(cardId).." type="..tostring(typeKey).." note="..tostring(def.note or ""))
   end
 
   finalizeCard(cardObj, def.kind, color)
@@ -3157,20 +3191,20 @@ local function handleIncomingCard(cardObj, reason, explicitSlotIdx)
   local guid = cardObj.getGUID()
 
   if isLocked(guid) then
-    if DEBUG then log("LOCKED: "..guid.." ("..tostring(reason)..")") end
+    if DEBUG then EVT.log("LOCKED: "..guid.." ("..tostring(reason)..")") end
     return STATUS.IGNORED
   end
 
   local nowT = Time.time
   if recentlyPlayed[guid] and (nowT - recentlyPlayed[guid]) < DEBOUNCE_SEC then
-    if DEBUG then log("DEBOUNCE: "..guid.." ("..tostring(reason)..")") end
+    if DEBUG then EVT.log("DEBOUNCE: "..guid.." ("..tostring(reason)..")") end
     return STATUS.IGNORED
   end
   recentlyPlayed[guid] = nowT
 
   local cardId = extractCardId(cardObj)
   if not cardId then
-    warn("No cardId ("..tostring(reason)..") name="..tostring(cardObj.getName and cardObj.getName() or ""))
+    EVT.warn("No cardId ("..tostring(reason)..") name="..tostring(cardObj.getName and cardObj.getName() or ""))
     clearDebounce(guid)
     return STATUS.ERROR
   end
@@ -3191,13 +3225,13 @@ end
 function playCardFromUI(args)
   args = args or {}
   if not args.card_guid or args.card_guid == "" then
-    warn("playCardFromUI: missing card_guid")
+    EVT.warn("playCardFromUI: missing card_guid")
     return STATUS.ERROR
   end
 
-  local cardObj = getObjectFromGUID(args.card_guid)
+  local cardObj = EVT.getObjectFromGUID(args.card_guid)
   if not cardObj or cardObj.tag ~= "Card" then
-    warn("playCardFromUI: card not found / not Card guid="..tostring(args.card_guid))
+    EVT.warn("playCardFromUI: card not found / not Card guid="..tostring(args.card_guid))
     return STATUS.ERROR
   end
 
@@ -3295,20 +3329,20 @@ function CancelVECrimeTargetSelection(args)
   args = args or {}
   local cardGuid = args.card_guid or args.cardGuid
   if not cardGuid then
-    log("CancelVECrimeTargetSelection: missing cardGuid")
+    EVT.log("CancelVECrimeTargetSelection: missing cardGuid")
     return false
   end
   
   local g = cardGuid
   local data = pendingVECrime[g]
   if not data then
-    log("CancelVECrimeTargetSelection: no pendingVECrime for "..tostring(g))
+    EVT.log("CancelVECrimeTargetSelection: no pendingVECrime for "..tostring(g))
     return false
   end
   
   local color = data.color
   
-  log("CancelVECrimeTargetSelection: Starting refund for card "..tostring(g).." color="..tostring(color))
+  EVT.log("CancelVECrimeTargetSelection: Starting refund for card "..tostring(g).." color="..tostring(color))
   
   -- Refund slotExtra AP if it was charged
   -- Get slotExtra from veSlotExtraCharged[g] (stored when VE UI was shown)
@@ -3316,11 +3350,11 @@ function CancelVECrimeTargetSelection(args)
   local slotExtra = 0
   if veSlotExtraCharged[g] then
     slotExtra = tonumber(veSlotExtraCharged[g]) or 0
-    log("CancelVECrimeTargetSelection: slotExtra from veSlotExtraCharged="..tostring(slotExtra))
+    EVT.log("CancelVECrimeTargetSelection: slotExtra from veSlotExtraCharged="..tostring(slotExtra))
   else
     -- Fallback: read from slotExtraAPForCard (should be the same value)
     slotExtra = tonumber(slotExtraAPForCard[g]) or 0
-    log("CancelVECrimeTargetSelection: slotExtra from slotExtraAPForCard="..tostring(slotExtra))
+    EVT.log("CancelVECrimeTargetSelection: slotExtra from slotExtraAPForCard="..tostring(slotExtra))
   end
   
   -- Use a shared table to track refunds across async callbacks
@@ -3330,7 +3364,7 @@ function CancelVECrimeTargetSelection(args)
   if slotExtra > 0 then
     local apCtrl = getApCtrl(color)
     if apCtrl and apCtrl.call then
-      log("CancelVECrimeTargetSelection: Attempting to refund slotExtra AP="..tostring(slotExtra).." (one at a time, sequential)")
+      EVT.log("CancelVECrimeTargetSelection: Attempting to refund slotExtra AP="..tostring(slotExtra).." (one at a time, sequential)")
       -- Use sequential Wait.time callbacks to ensure each refund completes before the next
       -- Use longer delay (0.4s) to ensure each token fully settles before next one moves
       for i = 1, slotExtra do
@@ -3343,35 +3377,35 @@ function CancelVECrimeTargetSelection(args)
               local moved = tonumber(result.moved or 0) or 0
               if moved > 0 then
                 refundTracker.slotExtra = refundTracker.slotExtra + moved
-                log("CancelVECrimeTargetSelection: Refunded slotExtra AP chunk "..tostring(i)..": moved="..tostring(moved))
+                EVT.log("CancelVECrimeTargetSelection: Refunded slotExtra AP chunk "..tostring(i)..": moved="..tostring(moved))
               else
-                log("CancelVECrimeTargetSelection: WARNING slotExtra refund chunk "..tostring(i).." succeeded but moved=0")
+                EVT.log("CancelVECrimeTargetSelection: WARNING slotExtra refund chunk "..tostring(i).." succeeded but moved=0")
               end
             else
-              log("CancelVECrimeTargetSelection: FAILED slotExtra refund chunk "..tostring(i).." okRefund="..tostring(okRefund).." result="..tostring(result))
+              EVT.log("CancelVECrimeTargetSelection: FAILED slotExtra refund chunk "..tostring(i).." okRefund="..tostring(okRefund).." result="..tostring(result))
             end
             -- Log total after last refund
             if i == slotExtra then
-              log("CancelVECrimeTargetSelection: Total slotExtra refunded="..tostring(refundTracker.slotExtra).." (requested "..tostring(slotExtra)..")")
+              EVT.log("CancelVECrimeTargetSelection: Total slotExtra refunded="..tostring(refundTracker.slotExtra).." (requested "..tostring(slotExtra)..")")
             end
           end
         end, 0.4 * i) -- Increased delay to 0.4s per token to ensure full settlement
       end
     else
-      log("CancelVECrimeTargetSelection: FAILED no apCtrl for color="..tostring(color))
+      EVT.log("CancelVECrimeTargetSelection: FAILED no apCtrl for color="..tostring(color))
     end
     -- Don't clear veSlotExtraCharged until refunds complete - cleared in final callback
   else
-    log("CancelVECrimeTargetSelection: slotExtra is 0, skipping refund")
+    EVT.log("CancelVECrimeTargetSelection: slotExtra is 0, skipping refund")
   end
   
   -- Refund crime action AP - refund one AP at a time using sequential Wait.time callbacks
   local crimeAP = data.crimeAP or 0
-  log("CancelVECrimeTargetSelection: crimeAP="..tostring(crimeAP))
+  EVT.log("CancelVECrimeTargetSelection: crimeAP="..tostring(crimeAP))
   if crimeAP > 0 then
     local apCtrl = getApCtrl(color)
     if apCtrl and apCtrl.call then
-      log("CancelVECrimeTargetSelection: Attempting to refund crime AP="..tostring(crimeAP).." (one at a time, sequential)")
+      EVT.log("CancelVECrimeTargetSelection: Attempting to refund crime AP="..tostring(crimeAP).." (one at a time, sequential)")
       -- Start crime AP refunds after slotExtra refunds complete
       -- Use longer delay (0.4s) to ensure each token fully settles before next one moves
       local startDelay = 0.4 * (slotExtra + 1)
@@ -3385,18 +3419,18 @@ function CancelVECrimeTargetSelection(args)
               local moved = tonumber(result.moved or 0) or 0
               if moved > 0 then
                 refundTracker.crime = refundTracker.crime + moved
-                log("CancelVECrimeTargetSelection: Refunded crime AP chunk "..tostring(i)..": moved="..tostring(moved))
+                EVT.log("CancelVECrimeTargetSelection: Refunded crime AP chunk "..tostring(i)..": moved="..tostring(moved))
               else
-                log("CancelVECrimeTargetSelection: WARNING crime refund chunk "..tostring(i).." succeeded but moved=0")
+                EVT.log("CancelVECrimeTargetSelection: WARNING crime refund chunk "..tostring(i).." succeeded but moved=0")
               end
             else
-              log("CancelVECrimeTargetSelection: FAILED crime refund chunk "..tostring(i).." okRefund="..tostring(okRefund).." result="..tostring(result))
+              EVT.log("CancelVECrimeTargetSelection: FAILED crime refund chunk "..tostring(i).." okRefund="..tostring(okRefund).." result="..tostring(result))
             end
             -- Log total and send message after last refund
             if i == crimeAP then
-              log("CancelVECrimeTargetSelection: Total crime AP refunded="..tostring(refundTracker.crime).." (requested "..tostring(crimeAP)..")")
+              EVT.log("CancelVECrimeTargetSelection: Total crime AP refunded="..tostring(refundTracker.crime).." (requested "..tostring(crimeAP)..")")
               local totalRefunded = refundTracker.slotExtra + refundTracker.crime
-              log("CancelVECrimeTargetSelection: Total refunded="..tostring(totalRefunded))
+              EVT.log("CancelVECrimeTargetSelection: Total refunded="..tostring(totalRefunded))
               -- Add small delay to let tokens settle before clearing state
               Wait.time(function()
                 -- Clear state after all refunds complete and tokens settle
@@ -3413,7 +3447,7 @@ function CancelVECrimeTargetSelection(args)
                 clearDebounce(g)
                 -- Notify Events Controller
                 pcall(function()
-                  local ctrl = getObjectFromGUID(EVENTS_CONTROLLER_GUID)
+                  local ctrl = EVT.getObjectFromGUID(EVENTS_CONTROLLER_GUID)
                   if ctrl and ctrl.call then
                     ctrl.call("onCardCancelled", { card_guid = g })
                   end
@@ -3424,14 +3458,14 @@ function CancelVECrimeTargetSelection(args)
                 else
                   safeBroadcastTo(color, "Cancelled crime. (No AP refunded - check logs)", {1,0.6,0.2})
                 end
-                log("CancelVECrimeTargetSelection: cancelled VE crime for card "..tostring(g)..", refunded "..tostring(totalRefunded).." AP")
+                EVT.log("CancelVECrimeTargetSelection: cancelled VE crime for card "..tostring(g)..", refunded "..tostring(totalRefunded).." AP")
               end, 0.2) -- Small delay to let tokens settle
             end
           end
         end, startDelay + 0.4 * i) -- Increased delay to 0.4s per token to ensure full settlement
       end
     else
-      log("CancelVECrimeTargetSelection: FAILED no apCtrl for color="..tostring(color))
+      EVT.log("CancelVECrimeTargetSelection: FAILED no apCtrl for color="..tostring(color))
       -- Clear state immediately if no AP controller
       pendingVECrime[g] = nil
       pendingChoice[g] = nil
@@ -3440,20 +3474,20 @@ function CancelVECrimeTargetSelection(args)
       if lockUntil then lockUntil[g] = nil end
       clearDebounce(g)
       pcall(function()
-        local ctrl = getObjectFromGUID(EVENTS_CONTROLLER_GUID)
+        local ctrl = EVT.getObjectFromGUID(EVENTS_CONTROLLER_GUID)
         if ctrl and ctrl.call then
           ctrl.call("onCardCancelled", { card_guid = g })
         end
       end)
     end
   else
-    log("CancelVECrimeTargetSelection: crimeAP is 0, skipping refund")
+    EVT.log("CancelVECrimeTargetSelection: crimeAP is 0, skipping refund")
     -- If no crime AP to refund, send message after slotExtra refunds complete
     if slotExtra > 0 then
       -- Wait for all slotExtra refunds to complete, then add delay for tokens to settle
       Wait.time(function()
         local totalRefunded = refundTracker.slotExtra
-        log("CancelVECrimeTargetSelection: Total refunded="..tostring(totalRefunded))
+        EVT.log("CancelVECrimeTargetSelection: Total refunded="..tostring(totalRefunded))
           -- Add small delay to let tokens settle before clearing state
           Wait.time(function()
             -- Clear state after all refunds complete and tokens settle
@@ -3466,7 +3500,7 @@ function CancelVECrimeTargetSelection(args)
             clearDebounce(g)
             -- Notify Events Controller
             pcall(function()
-              local ctrl = getObjectFromGUID(EVENTS_CONTROLLER_GUID)
+              local ctrl = EVT.getObjectFromGUID(EVENTS_CONTROLLER_GUID)
               if ctrl and ctrl.call then
                 ctrl.call("onCardCancelled", { card_guid = g })
               end
@@ -3477,7 +3511,7 @@ function CancelVECrimeTargetSelection(args)
             else
               safeBroadcastTo(color, "Cancelled crime. (No AP refunded - check logs)", {1,0.6,0.2})
             end
-            log("CancelVECrimeTargetSelection: cancelled VE crime for card "..tostring(g)..", refunded "..tostring(totalRefunded).." AP")
+            EVT.log("CancelVECrimeTargetSelection: cancelled VE crime for card "..tostring(g)..", refunded "..tostring(totalRefunded).." AP")
           end, 0.2) -- Small delay to let tokens settle
         end, 0.4 * (slotExtra + 1)) -- Increased delay to match refund timing
     else
@@ -3489,7 +3523,7 @@ function CancelVECrimeTargetSelection(args)
       if lockUntil then lockUntil[g] = nil end
       clearDebounce(g)
       pcall(function()
-        local ctrl = getObjectFromGUID(EVENTS_CONTROLLER_GUID)
+        local ctrl = EVT.getObjectFromGUID(EVENTS_CONTROLLER_GUID)
         if ctrl and ctrl.call then
           ctrl.call("onCardCancelled", { card_guid = g })
         end
@@ -3506,7 +3540,7 @@ function isObligatoryCard(args)
   local guid = args.card_guid or args.cardGuid
   if not guid or guid == "" then return false end
 
-  local cardObj = getObjectFromGUID(guid)
+  local cardObj = EVT.getObjectFromGUID(guid)
   if not cardObj or cardObj.tag ~= "Card" then return false end
 
   local cardId = extractCardId(cardObj)
@@ -3524,7 +3558,7 @@ function isGoodKarmaCard(args)
   args = args or {}
   local guid = args.card_guid or args.cardGuid
   if not guid or guid == "" then return false end
-  local cardObj = getObjectFromGUID(guid)
+  local cardObj = EVT.getObjectFromGUID(guid)
   if not cardObj or cardObj.tag ~= "Card" then return false end
   local cardId = extractCardId(cardObj)
   if not cardId then return false end
@@ -3559,7 +3593,7 @@ function applyEndOfRoundForColor(args)
     if canAfford(color, -cost) then
       applyToPlayer_NoAP(color, { money = -cost }, "ChildRoundMoney")
     else
-      warn("ChildRoundMoney blocked (not enough money).")
+      EVT.warn("ChildRoundMoney blocked (not enough money).")
     end
   end
 
@@ -3574,7 +3608,7 @@ function applyEndOfRoundForColor(args)
   end
 
   if DEBUG then
-    log("Child EOR: "..tostring(color).." block="..tostring(block).." unlock="..tostring(unlock).." final="..tostring(finalBlock))
+    EVT.log("Child EOR: "..tostring(color).." block="..tostring(block).." unlock="..tostring(unlock).." final="..tostring(finalBlock))
   end
 
   childUnlock[color] = 0
@@ -3625,17 +3659,17 @@ function onLoad(saved_data)
 
   if DEBUG then
     for _, c in ipairs({"Yellow","Blue","Red","Green"}) do
-      local o = getObjectFromGUID(SAT_TOKEN_GUIDS[c])
+      local o = EVT.getObjectFromGUID(SAT_TOKEN_GUIDS[c])
       if o then
-        log("SAT GUID OK: "..c.." -> "..SAT_TOKEN_GUIDS[c].." name="..tostring(o.getName and o.getName() or ""))
+        EVT.log("SAT GUID OK: "..c.." -> "..SAT_TOKEN_GUIDS[c].." name="..tostring(o.getName and o.getName() or ""))
       else
-        warn("SAT GUID MISSING IN SAVE: "..c.." -> "..tostring(SAT_TOKEN_GUIDS[c]))
+        EVT.warn("SAT GUID MISSING IN SAVE: "..c.." -> "..tostring(SAT_TOKEN_GUIDS[c]))
       end
     end
   end
 end
 
-function setActiveYellow() activeColor="Yellow"; log("ActiveColor=Yellow (fallback)") end
-function setActiveBlue()   activeColor="Blue";   log("ActiveColor=Blue (fallback)") end
-function setActiveRed()    activeColor="Red";    log("ActiveColor=Red (fallback)") end
-function setActiveGreen()  activeColor="Green";  log("ActiveColor=Green (fallback)") end
+function setActiveYellow() activeColor="Yellow"; EVT.log("ActiveColor=Yellow (fallback)") end
+function setActiveBlue()   activeColor="Blue";   EVT.log("ActiveColor=Blue (fallback)") end
+function setActiveRed()    activeColor="Red";    EVT.log("ActiveColor=Red (fallback)") end
+function setActiveGreen()  activeColor="Green";  EVT.log("ActiveColor=Green (fallback)") end

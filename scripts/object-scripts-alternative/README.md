@@ -12,7 +12,9 @@ Use these files when you want to **revert** the main scripts to an earlier state
 |------|-------------|
 | `c9ee1a_TurnController.lua` | Turn Controller v2.9.2 — **saved** |
 | `7b92b3_EventEngine.lua` | Event Engine — *pending (paste when ready)* |
+| `EventEngine_Refactored.lua` | Event Engine z architekturą _G.WLB.EVT — **chunk-safe** (patrz EVENT_ENGINE_REFACTOR_PLAN.md) |
 | `1339d3_EventsController.lua` | Events Controller — *pending (paste when ready)* |
+| `VocationsController_Refactored.lua` | VocationsController z architekturą _G.WLB.VOC — **chunk-safe** (patrz VOCATIONS_CONTROLLER_REFACTOR_PLAN.md) |
 
 ## How to use
 

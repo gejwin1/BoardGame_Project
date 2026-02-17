@@ -1207,16 +1207,18 @@ local DICE_ROLL_TIMEOUT  = 6.0  -- seconds to wait for roll
 local DICE_STABLE_READS  = 4     -- number of consecutive stable reads needed
 local DICE_POLL          = 0.12  -- seconds between polls
 
--- Roll die via VocationsController (Entrepreneur L2 Reroll/Go on support). Uses _G.VOC_DieRollResults bridge.
+-- Roll die: ONE physical roll, result used immediately. Exception: Entrepreneur L2 during their turn gets Reroll/Go on choice.
 local function rollDieForPlayer(color, requestPrefix, onDone)
   color = normalizeColor(color)
   if not color then onDone(math.random(1,6)) return end
-  local ts = 0
-  if Time and Time.time then ts = (type(Time.time) == "function") and Time.time() or Time.time
-  elseif os and os.time then ts = os.time() end
-  local requestId = (requestPrefix or "shop") .. "_" .. tostring(color) .. "_" .. tostring(ts)
   local voc = firstWithTag(TAG_VOCATIONS_CTRL)
-  if not voc or not voc.call then
+  local needsEntRerollUI = false
+  if voc and voc.call then
+    local ok, res = pcall(function() return voc.call("VOC_CanUseEntrepreneurReroll", { color = color }) end)
+    needsEntRerollUI = (ok and res == true)
+  end
+  if not needsEntRerollUI then
+    -- Default: direct physical roll, one roll, immediate result
     local die = getObjectFromGUID(DIE_GUID)
     if not die then onDone(math.random(1,6)) return end
     pcall(function() die.randomize() end)
@@ -1235,6 +1237,11 @@ local function rollDieForPlayer(color, requestPrefix, onDone)
     )
     return
   end
+  -- Entrepreneur L2 during their turn: use VocationsController for Reroll/Go on UI
+  local ts = 0
+  if Time and Time.time then ts = (type(Time.time) == "function") and Time.time() or Time.time
+  elseif os and os.time then ts = os.time() end
+  local requestId = (requestPrefix or "shop") .. "_" .. tostring(color) .. "_" .. tostring(ts)
   if not _G.VOC_DieRollResults then _G.VOC_DieRollResults = {} end
   pcall(function() voc.call("VOC_RollDieForPlayer", { requestId = requestId, color = color }) end)
   local deadline = (os.time and os.time() or 0) + 12
@@ -2839,11 +2846,9 @@ local function applyConsumableEffect(color, card, def, rollValue)
     return true
 
   elseif def.kind == "NATURE_TRIP" then
-    -- Add +3 rest-equivalent bonus
-    S.restEquivalent[color] = (S.restEquivalent[color] or 0) + 3
-    
-    -- If rollValue not provided, show ROLL DICE button
+    -- If rollValue not provided, add +3 rest bonus and show ROLL DICE button (only once; do NOT add again when processing die)
     if rollValue == nil then
+      S.restEquivalent[color] = (S.restEquivalent[color] or 0) + 3
       local g = card.getGUID()
       pendingDice[g] = { color=color, def=def, card=card, kind="NATURE_TRIP" }
       uiAttachRollDiceButton(card)
@@ -4135,52 +4140,77 @@ function shop_voucherNo(card, player_color, alt_click)
   if ok and not pendingDice[g] then refreshShopOpenUI_later(0.25) end
 end
 
+-- Chunk-safe: store for button callbacks (TTS may invoke in different chunk -> locals nil)
+_G.SHOP_isCard = _G.SHOP_isCard or isCard
+_G.SHOP_checkBusyGate = _G.SHOP_checkBusyGate or checkBusyGate
+_G.SHOP_uiEnsureIdle = _G.SHOP_uiEnsureIdle or uiEnsureIdle
+_G.SHOP_uiReturnHome = _G.SHOP_uiReturnHome or uiReturnHome
+_G.SHOP_uiAttachVoucherCountModal = _G.SHOP_uiAttachVoucherCountModal or uiAttachVoucherCountModal
+_G.SHOP_classifyRowByName = _G.SHOP_classifyRowByName or classifyRowByName
+_G.SHOP_attemptBuyCard = _G.SHOP_attemptBuyCard or attemptBuyCard
+_G.SHOP_refreshShopOpenUI_later = _G.SHOP_refreshShopOpenUI_later or refreshShopOpenUI_later
+
 -- Voucher: "Use discount? (S)" Yes -> if S==1 buy with 1 token; if S>1 show "How many?"
 function shop_voucherYes(card, player_color, alt_click)
-  if not isCard(card) then return end
-  if checkBusyGate(player_color) then return end
+  local ic = isCard or _G.SHOP_isCard
+  if not ic or not ic(card) then return end
+  local cbg = checkBusyGate or _G.SHOP_checkBusyGate
+  if cbg and cbg(player_color) then return end
   local g = card.getGUID()
   local pending = pendingVoucherChoice[g]
   if not pending or not pending.buyer then
     pendingVoucherChoice[g] = nil
-    uiEnsureIdle(card)
+    local uei = uiEnsureIdle or _G.SHOP_uiEnsureIdle
+    if uei then uei(card) end
     return
   end
   if pending.voucherCount == 1 then
     pendingVoucherChoice[g] = nil
     UI.modalOpen[g] = nil
-    local ok = attemptBuyCard(card, pending.buyer, { discountTokens = 1, voucherTag = pending.voucherTag })
-    -- Hi-Tech: card moved to player board. WAIT_DICE (Nature Trip, PILLS, Lottery, etc.): card must stay lifted for die roll.
-    if classifyRowByName(card) ~= "H" and not pendingDice[g] then
-      uiReturnHome(card)
-      uiEnsureIdle(card)
+    local abc = attemptBuyCard or _G.SHOP_attemptBuyCard
+    local ok = abc and abc(card, pending.buyer, { discountTokens = 1, voucherTag = pending.voucherTag })
+    local crn = classifyRowByName or _G.SHOP_classifyRowByName
+    if crn and crn(card) ~= "H" and not pendingDice[g] then
+      local urh = uiReturnHome or _G.SHOP_uiReturnHome
+      if urh then urh(card) end
+      local uei = uiEnsureIdle or _G.SHOP_uiEnsureIdle
+      if uei then uei(card) end
     end
-    if ok and not pendingDice[g] then refreshShopOpenUI_later(0.25) end
+    local rso = refreshShopOpenUI_later or _G.SHOP_refreshShopOpenUI_later
+    if ok and not pendingDice[g] and rso then rso(0.25) end
     return
   end
   pending.step = "ask_count"
-  uiAttachVoucherCountModal(card, pending.voucherCount)
+  local uav = uiAttachVoucherCountModal or _G.SHOP_uiAttachVoucherCountModal
+  if uav then uav(card, pending.voucherCount) end
 end
 
 -- Voucher: "How many?" -> use N tokens (N=1..4)
 function shop_voucherUseN(card, player_color, N)
-  if not isCard(card) or not N or N < 1 or N > 4 then return end
-  if checkBusyGate(player_color) then return end
+  local ic = isCard or _G.SHOP_isCard
+  if not ic or not ic(card) or not N or N < 1 or N > 4 then return end
+  local cbg = checkBusyGate or _G.SHOP_checkBusyGate
+  if cbg and cbg(player_color) then return end
   local g = card.getGUID()
   local pending = pendingVoucherChoice[g]
   pendingVoucherChoice[g] = nil
   UI.modalOpen[g] = nil
   if not pending or not pending.buyer then
-    uiEnsureIdle(card)
+    local uei = uiEnsureIdle or _G.SHOP_uiEnsureIdle
+    if uei then uei(card) end
     return
   end
-  local ok = attemptBuyCard(card, pending.buyer, { discountTokens = N, voucherTag = pending.voucherTag })
-  -- Hi-Tech: card moved to player board. WAIT_DICE (Nature Trip, PILLS, Lottery, etc.): card must stay lifted for die roll.
-  if classifyRowByName(card) ~= "H" and not pendingDice[g] then
-    uiReturnHome(card)
-    uiEnsureIdle(card)
+  local abc = attemptBuyCard or _G.SHOP_attemptBuyCard
+  local ok = abc and abc(card, pending.buyer, { discountTokens = N, voucherTag = pending.voucherTag })
+  local crn = classifyRowByName or _G.SHOP_classifyRowByName
+  if crn and crn(card) ~= "H" and not pendingDice[g] then
+    local urh = uiReturnHome or _G.SHOP_uiReturnHome
+    if urh then urh(card) end
+    local uei = uiEnsureIdle or _G.SHOP_uiEnsureIdle
+    if uei then uei(card) end
   end
-  if ok and not pendingDice[g] then refreshShopOpenUI_later(0.25) end
+  local rso = refreshShopOpenUI_later or _G.SHOP_refreshShopOpenUI_later
+  if ok and not pendingDice[g] and rso then rso(0.25) end
 end
 function shop_voucherUse1(card, pc, alt) shop_voucherUseN(card, pc, 1) end
 function shop_voucherUse2(card, pc, alt) shop_voucherUseN(card, pc, 2) end
@@ -5081,6 +5111,7 @@ local function pipeline_RESET()
   S.boughtThisTurn = {}
   S.ownedHiTech = { Yellow={}, Blue={}, Red={}, Green={} }
   S.permanentRestEquivalent = { Yellow=0, Blue=0, Red=0, Green=0 }
+  S.investments = { Yellow={}, Blue={}, Red={}, Green={} }  -- Clear loans, debentures, stock, etc. from previous game
   -- Return Health Monitor / Alarm / Car tiles to parking with staggered delays to avoid overlap
   if S.healthMonitorAccessOwner then
     local card = getObjectFromGUID(TEMPLATE_HEALTH_MONITOR_GUID)

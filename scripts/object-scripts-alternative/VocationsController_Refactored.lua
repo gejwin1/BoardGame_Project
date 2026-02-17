@@ -1,11 +1,161 @@
 -- =========================================================
--- WLB VOCATIONS CONTROLLER v1.0.0
+-- WLB VOCATIONS CONTROLLER v1.0.0 (REFACTORED - _G.WLB.VOC)
 -- GOAL: Track player vocations, levels, and promotion progress
 -- Manages vocation selection, tile placement, work income, and promotions
+-- REFACTOR: All cross-chunk helpers in _G.WLB.VOC to avoid TTS chunk nil errors
 -- =========================================================
 
-local DEBUG = true
-local VERSION = "1.0.0"
+-- =========================================================
+-- BOOTSTRAP: _G.WLB.VOC namespace (chunk-safe - _G is shared)
+-- =========================================================
+_G.WLB = _G.WLB or {}
+_G.WLB.VOC = _G.WLB.VOC or {}
+VOC = _G.WLB.VOC  -- Global (no local): any TTS chunk can access via _G.VOC
+-- Ensure VOC is globally reachable from any TTS chunk (chunks may have separate scope)
+_G.VOC = _G.WLB.VOC
+
+-- KONSULTANT: accessor - w TTS "goły" VOC może być nil w innym chunku; _G jest wspólne
+local function VOC_NS()
+  return (_G and (_G.VOC or (_G.WLB and _G.WLB.VOC))) or nil
+end
+_G.VOC_NS = VOC_NS  -- chunk-safe: dostępny z każdego chunku
+
+VOC.DEBUG = true
+VOC.VERSION = "1.0.0"
+VOC.TAGS = {
+  SELF = "WLB_VOCATIONS_CTRL",
+  BOARD = "WLB_BOARD",
+  TURN_CTRL = "WLB_TURN_CTRL",
+  TURN_CTRL_ALT = "WLB_TURN_CONTROLLER",
+  TOKEN_ENGINE = "WLB_TOKEN_ENGINE",
+  STATS_CTRL = "WLB_STATS_CTRL",
+  AP_CTRL = "WLB_AP_CTRL",
+  MONEY = "WLB_MONEY",
+  PLAYER_STATUS_CTRL = "WLB_PLAYER_STATUS_CTRL",
+  HEAT_POLICE = "WLB_POLICE",
+  VOCATION_TILE = "WLB_VOCATION_TILE",
+  COLOR_PREFIX = "WLB_COLOR_",
+  STATUS_EXPERIENCE = "WLB_STATUS_EXPERIENCE",
+}
+VOC.COLORS = {"Yellow", "Blue", "Red", "Green"}
+
+-- Safe TTS API (guard - TTS globals may be nil in some chunks)
+VOC.getAllObjectsSafe = function()
+  return (type(getAllObjects) == "function" and getAllObjects()) or {}
+end
+VOC.getObjectsWithTagSafe = function(tag)
+  if type(getObjectsWithTag) ~= "function" then return {} end
+  return getObjectsWithTag(tag) or {}
+end
+VOC.safeCall = function(obj, fn, params)
+  if not obj or type(obj.call) ~= "function" then return false, "no obj/call" end
+  local ok, res = pcall(function() return obj.call(fn, params or {}) end)
+  return ok, res
+end
+VOC.getObjectFromGUID = function(guid)
+  if type(getObjectFromGUID) ~= "function" then return nil end
+  return getObjectFromGUID(guid)
+end
+VOC.log = function(msg)
+  if VOC.DEBUG then print("[VOC_CTRL] " .. tostring(msg)) end
+end
+VOC.warn = function(msg)
+  print("[VOC_CTRL][WARN] " .. tostring(msg))
+end
+VOC.normalizeColor = function(color)
+  if not color then return nil end
+  local c = tostring(color or "")
+  if string.sub(c, 1, 7) == "Player " then c = string.sub(c, 8) end
+  c = c:lower()
+  if c == "white" then return "White" end
+  local map = { yellow = "Yellow", blue = "Blue", red = "Red", green = "Green" }
+  return map[c]
+end
+VOC.findTurnCtrl = function()
+  local all = VOC.getAllObjectsSafe()
+  for _, obj in ipairs(all) do
+    if obj and obj.hasTag and (obj.hasTag(VOC.TAGS.TURN_CTRL) or obj.hasTag(VOC.TAGS.TURN_CTRL_ALT)) then
+      return obj
+    end
+  end
+  for _, obj in ipairs(all) do
+    if obj and obj.call then
+      local ok, r = pcall(function() return obj.call("API_GetSciencePoints", {color = "Yellow"}) end)
+      if ok and type(r) == "number" then return obj end
+    end
+  end
+  return nil
+end
+VOC.findTokenEngine = function()
+  local list = VOC.getObjectsWithTagSafe(VOC.TAGS.TOKEN_ENGINE)
+  for _, o in ipairs(list) do
+    if o and o.call then return o end
+  end
+  local all = VOC.getAllObjectsSafe()
+  for _, o in ipairs(all) do
+    if o and o.hasTag and o.hasTag(VOC.TAGS.TOKEN_ENGINE) and o.call then return o end
+  end
+  return nil
+end
+VOC.findStatsCtrl = function(color)
+  local tag = VOC.TAGS.COLOR_PREFIX .. tostring(color or "")
+  local list = VOC.getObjectsWithTagSafe(tag)
+  for _, o in ipairs(list) do
+    if o and o.hasTag and o.hasTag(VOC.TAGS.STATS_CTRL) and o.call then return o end
+  end
+  for _, o in ipairs(VOC.getAllObjectsSafe()) do
+    if o and o.hasTag and o.hasTag(VOC.TAGS.STATS_CTRL) and o.hasTag(tag) and o.call then return o end
+  end
+  return nil
+end
+VOC.findPlayerStatusCtrl = function()
+  local all = VOC.getAllObjectsSafe()
+  for _, o in ipairs(all) do
+    if o and o.hasTag and o.hasTag(VOC.TAGS.PLAYER_STATUS_CTRL) and o.call then return o end
+  end
+  return nil
+end
+VOC.findEventEngine = function()
+  return VOC.getObjectFromGUID("7b92b3")
+end
+VOC.findByTags = function(tags)
+  local all = VOC.getAllObjectsSafe()
+  for _, o in ipairs(all) do
+    local ok = true
+    for _, t in ipairs(tags) do
+      if not (o and o.hasTag and o.hasTag(t)) then ok = false break end
+    end
+    if ok then return o end
+  end
+  return nil
+end
+VOC.findHeatPawn = function()
+  for _, o in ipairs(VOC.getAllObjectsSafe()) do
+    if o and o.hasTag and o.hasTag(VOC.TAGS.HEAT_POLICE) then return o end
+  end
+  return nil
+end
+VOC.YEAR_TOKEN_TAG = "WLB_YEAR"
+VOC.findYearToken = function()
+  for _, o in ipairs(VOC.getAllObjectsSafe()) do
+    if o and o.hasTag and o.hasTag(VOC.YEAR_TOKEN_TAG) then return o end
+  end
+  return nil
+end
+VOC.findPlayerBoard = function(color)
+  local c = VOC.normalizeColor and VOC.normalizeColor(color) or nil
+  if not c then return nil end
+  local tag = (VOC.TAGS.COLOR_PREFIX or "WLB_COLOR_") .. tostring(c)
+  local list = VOC.getObjectsWithTagSafe(tag) or {}
+  for _, o in ipairs(list) do
+    if o and o.hasTag and o.hasTag(VOC.TAGS.BOARD) then return o end
+  end
+  return nil
+end
+
+-- Legacy aliases (for gradual migration; code can use VOC.* or these)
+local DEBUG = VOC.DEBUG
+local VERSION = VOC.VERSION
 
 -- =========================================================
 -- TAGS
@@ -39,31 +189,18 @@ _G.VOC_log = _G.VOC_log or function(msg)
 end
 
 _G.VOC_normalizeColor = _G.VOC_normalizeColor or function(color)
-  local c = tostring(color or ""):lower()
+  if not color then return nil end
+  local c = tostring(color or "")
+  if string.sub(c, 1, 7) == "Player " then c = string.sub(c, 8) end
+  c = c:lower()
   if c == "white" then return "White" end
   local map = { yellow = "Yellow", blue = "Blue", red = "Red", green = "Green" }
   return map[c]
 end
 
--- CHUNK-SAFE: Define getTurnCtrl at top so it's in chunk 1, visible everywhere
-_G.getTurnCtrl = _G.getTurnCtrl or function()
-  local allObjects = getAllObjects and getAllObjects() or {}
-  for _, obj in ipairs(allObjects) do
-    if obj and obj.hasTag and (obj.hasTag("WLB_TURN_CTRL") or obj.hasTag("WLB_TURN_CONTROLLER")) then
-      return obj
-    end
-  end
-  for _, obj in ipairs(allObjects) do
-    if obj and obj.call then
-      local ok, result = pcall(function()
-        return obj.call("API_GetSciencePoints", {color = "Yellow"})
-      end)
-      if ok and type(result) == "number" then return obj end
-    end
-  end
-  return nil
-end
-getTurnCtrl = _G.getTurnCtrl  -- Global alias so getTurnCtrl() works in any chunk
+-- CHUNK-SAFE: delegate to VOC.findTurnCtrl (single source of truth)
+_G.getTurnCtrl = _G.getTurnCtrl or function() return _G.WLB and _G.WLB.VOC and _G.WLB.VOC.findTurnCtrl and _G.WLB.VOC.findTurnCtrl() or nil end
+getTurnCtrl = _G.getTurnCtrl
 
 -- Die GUID (same as TurnController)
 local DIE_GUID = "14d4a4"
@@ -229,7 +366,7 @@ local function countTilesNearStorage()
   -- Best-effort: count vocation tiles already near the stack origin (so single returns stack on top)
   local origin = getVocationStorageWorldPosForIndex(1)
   local count = 0
-  for _, obj in ipairs(getAllObjects()) do
+  for _, obj in ipairs(VOC.getAllObjectsSafe()) do
     -- Guard: some TTS objects (e.g. bags, dice) may not have callable hasTag
     if obj and type(obj.hasTag) == "function" and obj.getPosition and (obj.hasTag(TAG_VOCATION_TILE) or obj.hasTag("WLB_VOCATION_TILE")) then
       -- Ignore currently assigned-to-player tiles
@@ -533,14 +670,9 @@ local state = {
 -- =========================================================
 -- UTILS
 -- =========================================================
--- GLOBAL so chunk_4 can reach (consultant fix: local in other chunk = nil)
-function log(msg)
-  if DEBUG then print("[VOC_CTRL] " .. tostring(msg)) end
-end
-
-function warn(msg)
-  print("[VOC_CTRL][WARN] " .. tostring(msg))
-end
+-- CHUNK-SAFE: alias to VOC (globals may be nil in other chunks, VOC is in _G.WLB.VOC)
+log = function(msg) if VOC and VOC.log then VOC.log(msg) end end
+warn = function(msg) if VOC and VOC.warn then VOC.warn(msg) else print("[VOC_CTRL][WARN] " .. tostring(msg)) end end
 
 local function safeBroadcastAll(msg, rgb)
   pcall(function() broadcastToAll(tostring(msg), rgb or {1,1,1}) end)
@@ -569,26 +701,8 @@ local function safeBroadcastToColor(msg, color, rgb)
   end
 end
 
--- GLOBAL so chunk_4 can reach (uses global COLORS)
-function normalizeColor(color)
-  if not color then return nil end
-  color = tostring(color)
-
-  -- Remove "Player " prefix if present
-  if string.sub(color, 1, 7) == "Player " then
-    color = string.sub(color, 8)
-  end
-
-  -- ✅ Allow White (host/spectator clicks in Global UI)
-  if color == "White" then return "White" end
-
-  -- Check if valid player color (COLORS is global)
-  local colors = COLORS or {"Yellow", "Blue", "Red", "Green"}
-  for _, c in ipairs(colors) do
-    if c == color then return c end
-  end
-  return nil
-end
+-- CHUNK-SAFE: use ONLY _G (bare VOC may be nil in another chunk)
+normalizeColor = function(color) return (_G.VOC_normalizeColor and _G.VOC_normalizeColor(color)) or nil end
 
 local function colorTag(color)
   return COLOR_TAG_PREFIX .. tostring(color)
@@ -596,18 +710,7 @@ end
 
 -- Generic helper: find first object with all given tags
 local function findByTags(tags)
-  local all = getAllObjects()
-  for _, o in ipairs(all) do
-    local ok = true
-    for _, t in ipairs(tags) do
-      if not (o and o.hasTag and o.hasTag(t)) then
-        ok = false
-        break
-      end
-    end
-    if ok then return o end
-  end
-  return nil
+  return VOC.findByTags(tags)
 end
 
 -- AP helpers (EVENT/Events area = "E")
@@ -634,7 +737,7 @@ local function getApUnspentCount(color)
     end
   end
 
-  warn("AP_CTRL for "..tostring(color).." has no unspent getter.")
+  VOC.warn("AP_CTRL for "..tostring(color).." has no unspent getter.")
   return 0
 end
 
@@ -644,7 +747,7 @@ local function canSpendAP(color, amount)
   
   local ap = findApCtrlForColor(color)
   if not ap or not ap.call then
-    warn("AP controller not found for "..tostring(color))
+    VOC.warn("AP controller not found for "..tostring(color))
     return false
   end
   local ok, can = pcall(function()
@@ -659,13 +762,13 @@ local function spendAP(color, amount, reason)
   
   -- Bypass only when spending from White (no AP track). When White triggers for effectsTarget (e.g. Red), we resolve to Red and actually spend from Red.
   if color == "White" then 
-    log("spendAP: Bypassing AP spend for White (no AP track)")
+    VOC.log("spendAP: Bypassing AP spend for White (no AP track)")
     return true 
   end
   
   local ap = findApCtrlForColor(color)
   if not ap or not ap.call then
-    warn("AP controller not found for "..tostring(color))
+    VOC.warn("AP controller not found for "..tostring(color))
     safeBroadcastToColor("⚠️ No AP controller — cannot deduct "..tostring(amount).." AP ("..tostring(reason)..").", color, {1,0.7,0.2})
     return false
   end
@@ -686,12 +789,12 @@ local SAT_TOKEN_GUIDS = {
 local function getSatToken(color)
   local guid = SAT_TOKEN_GUIDS[tostring(color or "")]
   if not guid then
-    warn("SAT GUID missing for color="..tostring(color))
+    VOC.warn("SAT GUID missing for color="..tostring(color))
     return nil
   end
-  local obj = getObjectFromGUID(guid)
+  local obj = VOC.getObjectFromGUID(guid)
   if not obj then
-    warn("SAT token GUID not found: "..tostring(color).." guid="..tostring(guid))
+    VOC.warn("SAT token GUID not found: "..tostring(color).." guid="..tostring(guid))
     return nil
   end
   return obj
@@ -703,7 +806,7 @@ local function satAdd(color, amount)
   
   -- White doesn't have SAT token - skip
   if color == "White" then
-    log("satAdd: Skipping White (testing mode, no SAT token)")
+    VOC.log("satAdd: Skipping White (testing mode, no SAT token)")
     return true
   end
 
@@ -728,7 +831,7 @@ local function satAdd(color, amount)
     for _=1,n do
       local ok2 = pcall(function() satObj.call(stepFn) end)
       if not ok2 then
-        warn("SAT CALL FAILED: "..tostring(stepFn))
+        VOC.warn("SAT CALL FAILED: "..tostring(stepFn))
         safeBroadcastAll("⚠️ SAT +"..tostring(amount).." for "..tostring(color).." (SAT API call failed)", {1,0.7,0.2})
         return false
       end
@@ -754,7 +857,7 @@ end
 local function getActorColor()
   local c = getActiveTurnColor()
   if not c then
-    warn("No active player from Turns.turn_color. Action blocked.")
+    VOC.warn("No active player from Turns.turn_color. Action blocked.")
     broadcastToAll("[VOC] ⛔ No active player with Turns.turn_color. Enable Turns and set turn.", {1,0.6,0.2})
     return nil
   end
@@ -762,39 +865,13 @@ local function getActorColor()
 end
 
 local function findPlayerBoard(color)
-  color = normalizeColor(color)
-  if not color then return nil end
-  
-  local list = getObjectsWithTag(colorTag(color)) or {}
-  for _, o in ipairs(list) do
-    if o and o.hasTag and o.hasTag(TAG_BOARD) then
-      return o
-    end
-  end
-  return nil
+  return VOC.findPlayerBoard(color)
 end
-
 local function findStatsController(color)
-  color = normalizeColor(color)
-  if not color then return nil end
-  
-  local list = getObjectsWithTag(colorTag(color)) or {}
-  for _, o in ipairs(list) do
-    if o and o.hasTag and o.hasTag("WLB_STATS_CTRL") then
-      return o
-    end
-  end
-  return nil
+  return VOC.findStatsCtrl(color)
 end
-
 local function findPlayerStatusController()
-  local list = getObjectsWithTag(TAG_PLAYER_STATUS_CTRL) or {}
-  for _, o in ipairs(list) do
-    if o and o.call then
-      return o
-    end
-  end
-  return nil
+  return VOC.findPlayerStatusCtrl()
 end
 
 -- Check if player has at least one child
@@ -824,13 +901,13 @@ local function addWoundedStatus(color)
   
   -- White doesn't get status tokens
   if color == "White" then
-    log("addWoundedStatus: Skipping White (testing mode)")
+    VOC.log("addWoundedStatus: Skipping White (testing mode)")
     return true
   end
   
   local psc = findPlayerStatusController()
   if not psc or not psc.call then
-    warn("Player Status Controller not found when adding WOUNDED status")
+    VOC.warn("Player Status Controller not found when adding WOUNDED status")
     return false
   end
   
@@ -839,7 +916,7 @@ local function addWoundedStatus(color)
   end)
   
   if not ok then
-    warn("Failed to add WOUNDED status to "..tostring(color))
+    VOC.warn("Failed to add WOUNDED status to "..tostring(color))
   end
   
   return ok
@@ -847,9 +924,11 @@ end
 
 -- Social Worker L1: Use Good Karma — grant one Good Karma token to the player, once per game.
 local function VOC_StartSocialWorkerUseGoodKarma(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
   local color = params.color
-  local actorColor = normalizeColor(params.effectsTarget or color)
+  local actorColor = (VOC.normalizeColor and VOC.normalizeColor(params.effectsTarget or color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.effectsTarget or color)) or nil
   if not actorColor or actorColor == "White" then
     safeBroadcastToColor("Invalid player for Use Good Karma.", color or "White", {1,0.6,0.2})
     return false
@@ -886,8 +965,11 @@ local TAG_VOUCH_H = "WLB_STATUS_VOUCH_H"
 
 -- Social Worker L2: Once per game, grant 4 consumable voucher tokens (100% = one free consumable).
 function VOC_StartSocialWorkerConsumableFree(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   local actorColor = params.effectsTarget or color
   if actorColor == "White" then
@@ -923,8 +1005,11 @@ end
 
 -- Social Worker L3: Once per game, grant 4 hi-tech voucher tokens (100% = one free hi-tech).
 function VOC_StartSocialWorkerHitechFree(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   local actorColor = params.effectsTarget or color
   if actorColor == "White" then
@@ -970,7 +1055,7 @@ local function stealMoney(fromColor, toColor, amount)
   
   local gm = (type(getMoney) == "function" and getMoney) or (type(_G.VOC_CTRL) == "table" and type(_G.VOC_CTRL.getMoney) == "function" and _G.VOC_CTRL.getMoney)
   if not gm then
-    warn("stealMoney: getMoney not available (chunk)")
+    VOC.warn("stealMoney: getMoney not available (chunk)")
     return false, 0
   end
   local targetMoney = gm(fromColor)
@@ -980,12 +1065,12 @@ local function stealMoney(fromColor, toColor, amount)
     local spendFn = (type(moneySpend) == "function" and moneySpend) or (type(_G.VOC_CTRL) == "table" and type(_G.VOC_CTRL.moneySpend) == "function" and _G.VOC_CTRL.moneySpend)
     local addFn = (type(moneyAdd) == "function" and moneyAdd) or (type(_G.VOC_CTRL) == "table" and type(_G.VOC_CTRL.moneyAdd) == "function" and _G.VOC_CTRL.moneyAdd)
     if not spendFn or not addFn then
-      warn("stealMoney: moneySpend/moneyAdd not available (chunk)")
+      VOC.warn("stealMoney: moneySpend/moneyAdd not available (chunk)")
       return false, 0
     end
     if spendFn(fromColor, amountToSteal) then
       addFn(toColor, amountToSteal)
-      log("stealMoney: "..tostring(toColor).." stole "..amountToSteal.." VIN from "..tostring(fromColor))
+      VOC.log("stealMoney: "..tostring(toColor).." stole "..amountToSteal.." VIN from "..tostring(fromColor))
       return true, amountToSteal
     end
   end
@@ -1000,20 +1085,20 @@ local function addKnowledge(color, n)
   
   -- White doesn't have Stats controller - skip
   if color == "White" then
-    log("addKnowledge: Skipping White (testing mode, no Stats controller)")
+    VOC.log("addKnowledge: Skipping White (testing mode, no Stats controller)")
     return true
   end
   
   local stats = findStatsController(color)
   if not stats or not stats.call then
-    warn("Stats controller not found for "..tostring(color).." when adding Knowledge")
+    VOC.warn("Stats controller not found for "..tostring(color).." when adding Knowledge")
     return false
   end
   local ok, err = pcall(function()
     return stats.call("applyDelta", { k = n })
   end)
   if not ok then
-    warn("Stats applyDelta(k="..tostring(n)..") failed for "..tostring(color)..": "..tostring(err))
+    VOC.warn("Stats applyDelta(k="..tostring(n)..") failed for "..tostring(color)..": "..tostring(err))
   end
   return ok
 end
@@ -1024,20 +1109,20 @@ local function addSkills(color, n)
   
   -- White doesn't have Stats controller - skip
   if color == "White" then
-    log("addSkills: Skipping White (testing mode, no Stats controller)")
+    VOC.log("addSkills: Skipping White (testing mode, no Stats controller)")
     return true
   end
   
   local stats = findStatsController(color)
   if not stats or not stats.call then
-    warn("Stats controller not found for "..tostring(color).." when adding Skills")
+    VOC.warn("Stats controller not found for "..tostring(color).." when adding Skills")
     return false
   end
   local ok, err = pcall(function()
     return stats.call("applyDelta", { s = n })
   end)
   if not ok then
-    warn("Stats applyDelta(s="..tostring(n)..") failed for "..tostring(color)..": "..tostring(err))
+    VOC.warn("Stats applyDelta(s="..tostring(n)..") failed for "..tostring(color)..": "..tostring(err))
   end
   return ok
 end
@@ -1048,20 +1133,20 @@ local function addHealth(color, n)
   
   -- White doesn't have Stats controller - skip
   if color == "White" then
-    log("addHealth: Skipping White (testing mode, no Stats controller)")
+    VOC.log("addHealth: Skipping White (testing mode, no Stats controller)")
     return true
   end
   
   local stats = findStatsController(color)
   if not stats or not stats.call then
-    warn("Stats controller not found for "..tostring(color).." when adding Health")
+    VOC.warn("Stats controller not found for "..tostring(color).." when adding Health")
     return false
   end
   local ok, err = pcall(function()
     return stats.call("applyDelta", { h = n })
   end)
   if not ok then
-    warn("Stats applyDelta(h="..tostring(n)..") failed for "..tostring(color)..": "..tostring(err))
+    VOC.warn("Stats applyDelta(h="..tostring(n)..") failed for "..tostring(color)..": "..tostring(err))
   end
   return ok
 end
@@ -1079,7 +1164,7 @@ local function resolveMoney(color)
   end
   
   -- Fallback: legacy money tile
-  local list = getObjectsWithTag(colorTag(color)) or {}
+  local list = VOC.getObjectsWithTagSafe(colorTag(color)) or {}
   for _, o in ipairs(list) do
     if o and o.hasTag and o.hasTag(TAG_MONEY) then
       return o
@@ -1098,13 +1183,13 @@ local function moneyAdd(color, amount)
   
   -- White doesn't have money controller - skip
   if color == "White" then
-    log("moneyAdd: Skipping White (testing mode, no money controller)")
+    VOC.log("moneyAdd: Skipping White (testing mode, no money controller)")
     return true
   end
   
   local m = resolveMoney(color)
   if not m or not m.call then
-    warn("Money controller not found for "..tostring(color))
+    VOC.warn("Money controller not found for "..tostring(color))
     safeBroadcastToColor("⚠️ No MoneyCtrl — cannot adjust "..amount.." VIN.", color, {1,0.7,0.2})
     return false
   end
@@ -1114,7 +1199,7 @@ local function moneyAdd(color, amount)
   
   ok = pcall(function() m.call("addMoney", { delta = amount }) end)
   if not ok then
-    warn("Money addMoney failed for "..tostring(color).." amount="..tostring(amount))
+    VOC.warn("Money addMoney failed for "..tostring(color).." amount="..tostring(amount))
   end
   return ok
 end
@@ -1128,7 +1213,7 @@ local function moneySpend(color, amount)
   
   local m = resolveMoney(color)
   if not m or not m.call then
-    warn("Money controller not found for "..tostring(color))
+    VOC.warn("Money controller not found for "..tostring(color))
     safeBroadcastToColor("⚠️ No MoneyCtrl — cannot spend "..amount.." VIN.", color, {1,0.7,0.2})
     return false
   end
@@ -1196,7 +1281,7 @@ local function moneySpend(color, amount)
   
   ok = pcall(function() m.call("addMoney", { delta = -amount }) end)
   if not ok then
-    warn("Money spend failed for "..tostring(color).." amount="..tostring(amount))
+    VOC.warn("Money spend failed for "..tostring(color).." amount="..tostring(amount))
   end
   return ok
 end
@@ -1230,22 +1315,13 @@ _G.VOC_CTRL.stealMoney = stealMoney
 _G.VOC_CTRL.addWoundedStatus = addWoundedStatus
 _G.VOC_CTRL.getActiveTurnColor = getActiveTurnColor
 
--- Heat / Police pawn (Crime & Investigation system)
+-- Heat / Police pawn (Crime & Investigation system) - delegate to VOC
 local function findHeatPawn()
-  for _, o in ipairs(getAllObjects()) do
-    if o and o.hasTag and o.hasTag(TAG_HEAT_POLICE) then return o end
-  end
-  return nil
+  return VOC.findHeatPawn()
 end
-
--- Year/Round token: used for Time (experience in rounds) for promotion
-local YEAR_TOKEN_TAG = "WLB_YEAR"
+local YEAR_TOKEN_TAG = VOC.YEAR_TOKEN_TAG or "WLB_YEAR"
 local function findYearToken()
-  local list = getAllObjects()
-  for _, o in ipairs(list) do
-    if o and o.hasTag and o.hasTag(YEAR_TOKEN_TAG) then return o end
-  end
-  return nil
+  return VOC.findYearToken()
 end
 local function getCurrentRound()
   local yt = findYearToken()
@@ -1256,31 +1332,21 @@ local function getCurrentRound()
 end
 
 -- Helper to find Token Engine (for experience token)
+-- CHUNK-SAFE: use VOC.* (getAllObjects/getObjectsWithTag may be nil in some TTS chunks)
 local function findTokenEngine()
-  local list = getObjectsWithTag and getObjectsWithTag(TAG_TOKEN_ENGINE) or {}
-  for _, o in ipairs(list) do
-    if o and o.call then return o end
-  end
-  for _, o in ipairs(getAllObjects()) do
-    if o and o.hasTag and o.hasTag(TAG_TOKEN_ENGINE) and o.call then return o end
-  end
-  return nil
+  return VOC.findTokenEngine()
 end
 
 -- getTurnCtrl defined at top of file in _G
 
 -- Get science points for a color by querying Turn Controller
--- Uses ONLY _G.* so chunk_4 sees them (TTS chunks may have separate globals, _G is shared)
+-- CHUNK-SAFE: uses ONLY VOC.* (_G.WLB.VOC is shared across TTS chunks)
 function getSciencePointsForColor(color)
-  if _G.VOC_log then
-    _G.VOC_log("DBG types: norm=" .. tostring(type(_G.VOC_normalizeColor)) .. " getTurn=" .. tostring(type(_G.getTurnCtrl)))
-  end
-
   local ok, res = pcall(function()
-    local norm = (_G.VOC_normalizeColor and _G.VOC_normalizeColor(color)) or nil
+    local norm = (VOC.normalizeColor and VOC.normalizeColor(color)) or nil
     if not norm then return 0 end
 
-    local turnCtrl = (_G.getTurnCtrl and _G.getTurnCtrl()) or nil
+    local turnCtrl = (VOC.findTurnCtrl and VOC.findTurnCtrl()) or nil
     if not turnCtrl or type(turnCtrl.call) ~= "function" then return 0 end
 
     local pts = turnCtrl.call("API_GetSciencePoints", { color = norm })
@@ -1288,7 +1354,7 @@ function getSciencePointsForColor(color)
   end)
 
   if not ok then
-    if _G.VOC_log then _G.VOC_log("getSciencePointsForColor error: " .. tostring(res)) end
+    if VOC.log then VOC.log("getSciencePointsForColor error: " .. tostring(res)) end
     return 0
   end
 
@@ -1312,7 +1378,7 @@ local interaction = {
   customData = nil, -- Custom data for multi-stage interactions
 }
 
-local function updateInteractionTimerText()
+VOC.updateInteractionTimerText = function()
   if not UI then return end
   if not interaction.active or (interaction.timer or 0) <= 0 then
     UI.setAttribute("interactionTimer", "text", "")
@@ -1321,7 +1387,7 @@ local function updateInteractionTimerText()
   end
 end
 
-local function clearInteraction()
+VOC.clearInteraction = function()
   interaction.active = false
   interaction.id = nil
   interaction.initiator = nil
@@ -1333,7 +1399,7 @@ local function clearInteraction()
   if UI then
     UI.setAttribute("interactionOverlay", "active", "false")
   end
-  updateInteractionTimerText()
+  if VOC.updateInteractionTimerText then VOC.updateInteractionTimerText() end
 end
 
 -- =========================================================
@@ -1349,7 +1415,9 @@ local targetSelection = {
   requireChildren = false,  -- If true, only show players with children
 }
 
-local function clearTargetSelection()
+VOC.clearTargetSelection = function()
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return end
   targetSelection.active = false
   targetSelection.initiator = nil
   targetSelection.actionId = nil
@@ -1362,14 +1430,16 @@ end
 local isPlayableColor
 local handleInteractionResponse
 
-local function startTargetSelection(params)
-  -- params: initiator, actionId, callback, requireChildren, title, subtitle
+VOC.startTargetSelection = function(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing in this chunk") return false end
   if not UI then return false end
-  
-  local initiator = normalizeColor(params.initiator)
+
+  local initiator = (VOC.normalizeColor and VOC.normalizeColor(params.initiator))
+    or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.initiator))
   if not initiator then return false end
   
-  clearTargetSelection()
+  if VOC.clearTargetSelection then VOC.clearTargetSelection() end
   targetSelection.active = true
   targetSelection.initiator = initiator
   targetSelection.actionId = params.actionId
@@ -1377,14 +1447,15 @@ local function startTargetSelection(params)
   targetSelection.callbackParams = params.callbackParams
   targetSelection.requireChildren = params.requireChildren or false
   
-  log("startTargetSelection: callback="..tostring(targetSelection.callback).." callbackParams="..tostring(targetSelection.callbackParams and targetSelection.callbackParams.cardGuid or "nil"))
+  VOC.log("startTargetSelection: callback="..tostring(targetSelection.callback).." callbackParams="..tostring(targetSelection.callbackParams and targetSelection.callbackParams.cardGuid or "nil"))
   
   -- Set title and subtitle
   UI.setAttribute("targetSelectionTitle", "text", params.title or "SELECT TARGET PLAYER")
   UI.setAttribute("targetSelectionSubtitle", "text", params.subtitle or "Choose which player to target:")
   
   -- Show/hide buttons based on valid targets
-  for _, c in ipairs(COLORS) do
+  local colors = (VOC and VOC.COLORS) or COLORS or {"Yellow", "Blue", "Red", "Green"}
+  for _, c in ipairs(colors) do
     local btnId = "btnTarget"..c
     local isValid = true
     local reason = ""
@@ -1410,10 +1481,10 @@ local function startTargetSelection(params)
     if isValid then
       UI.setAttribute(btnId, "active", "true")
       UI.setAttribute(btnId, "interactable", "true")
-      log("startTargetSelection: showing button for "..c.." (initiator="..tostring(initiator)..")")
+      VOC.log("startTargetSelection: showing button for "..c.." (initiator="..tostring(initiator)..")")
     else
       UI.setAttribute(btnId, "active", "false")
-      log("startTargetSelection: hiding button for "..c.." - reason: "..reason)
+      VOC.log("startTargetSelection: hiding button for "..c.." - reason: "..reason)
     end
   end
   
@@ -1421,9 +1492,20 @@ local function startTargetSelection(params)
   return true
 end
 
--- Make hideTargetSelection global so it can be called from Global_Script_Complete.lua
--- isCancel: if true, this is a cancellation (should refund AP). If false/nil, target was selected (don't refund)
-function hideTargetSelection(isCancel)
+-- Wrapper: VOC_Start* and other entry points may call startTargetSelection(...) directly
+function startTargetSelection(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC or not VOC.startTargetSelection then
+    print("[VOC_CTRL][FATAL] startTargetSelection wrapper: missing VOC or handler")
+    return false
+  end
+  return VOC.startTargetSelection(params)
+end
+
+-- VOC.hideTargetSelection: chunk-safe (called via VOC.*)
+VOC.hideTargetSelection = function(isCancel)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing in this chunk") return end
   -- Check if this is a VE crime cancellation (actionId is "VE_CRIME")
   -- Only refund if isCancel is true AND there's no callback (meaning it was actually canceled, not a target selection)
   local wasVECrime = (targetSelection.actionId == "VE_CRIME")
@@ -1435,7 +1517,8 @@ function hideTargetSelection(isCancel)
   if UI then
     UI.setAttribute("targetSelectionOverlay", "active", "false")
     -- Reset all target buttons to inactive state
-    for _, c in ipairs(COLORS) do
+    local colors = (VOC and VOC.COLORS) or COLORS or {"Yellow", "Blue", "Red", "Green"}
+    for _, c in ipairs(colors) do
       local btnId = "btnTarget"..c
       UI.setAttribute(btnId, "active", "false")
       UI.setAttribute(btnId, "interactable", "false")
@@ -1446,24 +1529,37 @@ function hideTargetSelection(isCancel)
   -- If a target was selected, handleTargetSelection will call hideTargetSelection with isCancel=false/nil
   -- and then execute the callback, so we should NOT refund
   if wasVECrime and cardGuid and isCancel == true then
-    local engine = getObjectFromGUID("7b92b3")
+    local engine = (VOC.getObjectFromGUID and VOC.getObjectFromGUID("7b92b3")) or (type(getObjectFromGUID)=="function" and getObjectFromGUID("7b92b3")) or nil
     if engine and engine.call then
-      log("hideTargetSelection: VE crime cancelled, notifying Event Engine to refund AP for cardGuid="..tostring(cardGuid))
+      VOC.log("hideTargetSelection: VE crime cancelled, notifying Event Engine to refund AP for cardGuid="..tostring(cardGuid))
       pcall(function()
         engine.call("CancelVECrimeTargetSelection", { card_guid = cardGuid })
       end)
     end
   end
   
-  clearTargetSelection()
+  if VOC.clearTargetSelection then VOC.clearTargetSelection() end
 end
 
--- Make handleTargetSelection global so it can be called from Global_Script_Complete.lua
-function handleTargetSelection(targetColor)
+-- Wrapper: Global_Script_Complete.lua and button callbacks call this
+function hideTargetSelection(isCancel)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC or not VOC.hideTargetSelection then
+    print("[VOC_CTRL][FATAL] hideTargetSelection wrapper: missing VOC or handler")
+    return
+  end
+  return VOC.hideTargetSelection(isCancel)
+end
+
+-- VOC.handleTargetSelection: chunk-safe (called via VOC.*)
+VOC.handleTargetSelection = function(targetColor)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing in this chunk") return end
   if not targetSelection.active then return end
   if not targetSelection.callback then return end
-  
-  targetColor = normalizeColor(targetColor)
+
+  targetColor = (VOC.normalizeColor and VOC.normalizeColor(targetColor))
+    or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(targetColor))
   if not targetColor then return end
   
   -- Validate target
@@ -1483,7 +1579,7 @@ function handleTargetSelection(targetColor)
   
   -- Hide UI (this clears targetSelection, so we must save callback first)
   -- Pass false to indicate this is NOT a cancel - a target was selected
-  hideTargetSelection(false)
+  if VOC.hideTargetSelection then VOC.hideTargetSelection(false) end
   
   -- Execute callback with selected target
   if callback then
@@ -1496,44 +1592,57 @@ function handleTargetSelection(targetColor)
       local params = callbackParams or {}
       params.targetColor = targetColor
       if callback == "VECrimeTargetSelected" then
-        log("handleTargetSelection: forwarding to Event Engine VECrimeTargetSelected cardGuid="..tostring(params.cardGuid).." targetColor="..tostring(targetColor))
-        local engine = getObjectFromGUID("7b92b3")
+        VOC.log("handleTargetSelection: forwarding to Event Engine VECrimeTargetSelected cardGuid="..tostring(params.cardGuid).." targetColor="..tostring(targetColor))
+        local engine = (VOC.getObjectFromGUID and VOC.getObjectFromGUID("7b92b3")) or (type(getObjectFromGUID)=="function" and getObjectFromGUID("7b92b3")) or nil
         if engine and engine.call then
           pcall(function() engine.call("VECrimeTargetSelected", params or {}) end)
         else
-          log("handleTargetSelection: Event Engine not found, cannot forward VE crime target")
+          VOC.log("handleTargetSelection: Event Engine not found, cannot forward VE crime target")
         end
       else
-        local engine = getObjectFromGUID("7b92b3")
+        local engine = (VOC.getObjectFromGUID and VOC.getObjectFromGUID("7b92b3")) or (type(getObjectFromGUID)=="function" and getObjectFromGUID("7b92b3")) or nil
         if engine and engine.call then
-          log("handleTargetSelection: calling Event Engine function '"..callback.."' with params")
+          VOC.log("handleTargetSelection: calling Event Engine function '"..callback.."' with params")
           local ok, result = pcall(function() return engine.call(callback, params) end)
           if not ok then
-            log("handleTargetSelection: ERROR calling Event Engine - "..tostring(result))
+            VOC.log("handleTargetSelection: ERROR calling Event Engine - "..tostring(result))
           else
-            log("handleTargetSelection: Event Engine call successful")
+            VOC.log("handleTargetSelection: Event Engine call successful")
           end
         else
-          log("handleTargetSelection: Event Engine not found or no call method")
+          VOC.log("handleTargetSelection: Event Engine not found or no call method")
         end
       end
     end
   else
-    log("handleTargetSelection: no callback set (callback was nil)")
+    VOC.log("handleTargetSelection: no callback set (callback was nil)")
   end
+end
+
+-- Wrapper: Global_Script_Complete.lua and VECrimeTargetSelected call this
+function handleTargetSelection(targetColor)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC or not VOC.handleTargetSelection then
+    print("[VOC_CTRL][FATAL] handleTargetSelection wrapper: missing VOC or handler")
+    return
+  end
+  return VOC.handleTargetSelection(targetColor)
 end
 
 -- Pass-through: VECrimeTargetSelected lives on Event Engine.
 -- Hybrid: supports BOTH script call (params table) AND UI call (player, value, id).
 function VECrimeTargetSelected(a, b, c)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing") return end
+
   -- Case 1: called from code with params table
   if type(a) == "table" then
     local params = a
-    local engine = getObjectFromGUID("7b92b3")
+    local engine = (VOC.getObjectFromGUID and VOC.getObjectFromGUID("7b92b3")) or (type(getObjectFromGUID)=="function" and getObjectFromGUID("7b92b3")) or nil
     if engine and engine.call then
       pcall(function() engine.call("VECrimeTargetSelected", params or {}) end)
     else
-      log("VECrimeTargetSelected: Event Engine not found, cannot forward")
+      VOC.log("VECrimeTargetSelected: Event Engine not found, cannot forward")
     end
     return
   end
@@ -1542,10 +1651,12 @@ function VECrimeTargetSelected(a, b, c)
   local playerColor = a
   local value = b
   local id = c
-  local targetColor = normalizeColor(value)
+  local targetColor = (VOC.normalizeColor and VOC.normalizeColor(value))
+    or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(value))
 
   if not targetColor and type(id) == "string" then
-    for _, col in ipairs(COLORS) do
+    local colors = (VOC and VOC.COLORS) or COLORS or {"Yellow", "Blue", "Red", "Green"}
+    for _, col in ipairs(colors) do
       if string.find(id or "", col) then
         targetColor = col
         break
@@ -1554,27 +1665,33 @@ function VECrimeTargetSelected(a, b, c)
   end
 
   if not targetColor then
-    log("VECrimeTargetSelected(UI): cannot resolve targetColor. player="..tostring(playerColor).." value="..tostring(value).." id="..tostring(id))
+    VOC.log("VECrimeTargetSelected(UI): cannot resolve targetColor. player="..tostring(playerColor).." value="..tostring(value).." id="..tostring(id))
     return
   end
 
-  handleTargetSelection(targetColor)
+  if type(VOC.handleTargetSelection) ~= "function" then
+    VOC.warn("VOC.handleTargetSelection is not a function: "..tostring(type(VOC.handleTargetSelection)))
+    return
+  end
+  VOC.handleTargetSelection(targetColor)
 end
 
 -- Called by Event Engine to start VE crime target selection
 function StartVECrimeTargetSelection(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing in this chunk") return false end
   if not params or not params.initiator or not params.cardGuid then 
-    log("StartVECrimeTargetSelection: missing params - initiator="..tostring(params and params.initiator).." cardGuid="..tostring(params and params.cardGuid))
+    VOC.log("StartVECrimeTargetSelection: missing params - initiator="..tostring(params and params.initiator).." cardGuid="..tostring(params and params.cardGuid))
     return false 
   end
-  local engine = getObjectFromGUID("7b92b3")
+  local engine = (VOC.getObjectFromGUID and VOC.getObjectFromGUID("7b92b3")) or (type(getObjectFromGUID)=="function" and getObjectFromGUID("7b92b3")) or nil
   if not engine then 
-    log("StartVECrimeTargetSelection: Event Engine not found")
+    VOC.log("StartVECrimeTargetSelection: Event Engine not found")
     return false 
   end
   
-  log("StartVECrimeTargetSelection: calling startTargetSelection with callback='VECrimeTargetSelected' cardGuid="..tostring(params.cardGuid))
-  local result = startTargetSelection({
+  VOC.log("StartVECrimeTargetSelection: calling startTargetSelection with callback='VECrimeTargetSelected' cardGuid="..tostring(params.cardGuid))
+  local result = VOC.startTargetSelection and VOC.startTargetSelection({
     initiator = params.initiator,
     actionId = "VE_CRIME",
     title = "SELECT TARGET FOR CRIME",
@@ -1582,12 +1699,12 @@ function StartVECrimeTargetSelection(params)
     requireChildren = false,
     callback = "VECrimeTargetSelected",
     callbackParams = { cardGuid = params.cardGuid }
-  })
-  log("StartVECrimeTargetSelection: startTargetSelection returned "..tostring(result))
+  }) or false
+  VOC.log("StartVECrimeTargetSelection: startTargetSelection returned "..tostring(result))
   return result
 end
 
-local function updateInteractionStatusText()
+VOC.updateInteractionStatusText = function()
   if not UI then return end
   if not interaction.active then
     UI.setAttribute("interactionStatus", "text", "")
@@ -1609,17 +1726,20 @@ local function updateInteractionStatusText()
 end
 
 -- Define isPlayableColor (forward-declared earlier for use in startTargetSelection)
+-- CHUNK-SAFE: use _G.VOC inline resolve (no function call - avoids nil() crash)
 isPlayableColor = function(c)
-  c = normalizeColor(c)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  c = (VOC and VOC.normalizeColor and VOC.normalizeColor(c)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(c))
   if not c then return false end
 
   -- Primary source: TurnController's configured player colors (W.colors)
-  local turnCtrl = findTurnController()
+  local turnCtrl = (VOC and VOC.findTurnCtrl and VOC.findTurnCtrl()) or (findTurnController and findTurnController())
   if turnCtrl and turnCtrl.call then
     local ok, data = pcall(function() return turnCtrl.call("API_GetPlayerColors", {}) end)
     if ok and type(data) == "table" then
       for _, col in ipairs(data) do
-        if normalizeColor(col) == c then
+        local nc = (VOC and VOC.normalizeColor and VOC.normalizeColor(col)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(col))
+        if nc == c then
           return true
         end
       end
@@ -1637,7 +1757,7 @@ isPlayableColor = function(c)
   return false
 end
 
-local function resetInteractionButtonsForColor(color, active)
+VOC.resetInteractionButtonsForColor = function(color, active)
   if not UI then return end
   local idPrefix = "interaction"..color
   local joinId = idPrefix.."Join"
@@ -1649,7 +1769,7 @@ local function resetInteractionButtonsForColor(color, active)
   UI.setAttribute(ignoreId, "interactable", val)
 end
 
-local function setInteractionPanelVisibility()
+VOC.setInteractionPanelVisibility = function()
   if not UI then return end
 
   local function activeFor(c)
@@ -1661,10 +1781,12 @@ local function setInteractionPanelVisibility()
   UI.setAttribute("interactionRedPanel",    "active", activeFor("Red"))
   UI.setAttribute("interactionGreenPanel",  "active", activeFor("Green"))
 
-  resetInteractionButtonsForColor("Yellow", interaction.targets["Yellow"] == true)
-  resetInteractionButtonsForColor("Blue",   interaction.targets["Blue"]   == true)
-  resetInteractionButtonsForColor("Red",    interaction.targets["Red"]    == true)
-  resetInteractionButtonsForColor("Green",  interaction.targets["Green"]  == true)
+  if VOC.resetInteractionButtonsForColor then
+    VOC.resetInteractionButtonsForColor("Yellow", interaction.targets["Yellow"] == true)
+    VOC.resetInteractionButtonsForColor("Blue",   interaction.targets["Blue"]   == true)
+    VOC.resetInteractionButtonsForColor("Red",    interaction.targets["Red"]    == true)
+    VOC.resetInteractionButtonsForColor("Green",  interaction.targets["Green"]  == true)
+  end
 end
 
 local function disableInteractionButtonsForColor(color)
@@ -1693,12 +1815,12 @@ local function tickInteractionTimer(expectedId)
         disableInteractionButtonsForColor(c)
       end
     end
-    updateInteractionStatusText()
+    if VOC and VOC.updateInteractionStatusText then VOC.updateInteractionStatusText() end
     if resolveInteractionEffects_impl then
       resolveInteractionEffects_impl()
     end
   else
-    updateInteractionTimerText()
+    if VOC and VOC.updateInteractionTimerText then VOC.updateInteractionTimerText() end
     if Wait and Wait.time then
       local id = interaction.id
       Wait.time(function() tickInteractionTimer(id) end, 1)
@@ -1709,19 +1831,19 @@ end
 local function startInteraction(params)
   -- params: id, initiator, title, subtitle, joinCostText, effectText, joinCostAP, duration, onlyTargets, customData
   if not UI then
-    log("startInteraction: UI is nil")
+    VOC.log("startInteraction: UI is nil")
     return
   end
 
   local initiator = normalizeColor(params.initiator)
   if not initiator then 
-    warn("startInteraction: Invalid initiator="..tostring(params.initiator))
+    VOC.warn("startInteraction: Invalid initiator="..tostring(params.initiator))
     return 
   end
   
-  log("startInteraction: initiator="..tostring(initiator)..", id="..tostring(params.id))
+  VOC.log("startInteraction: initiator="..tostring(initiator)..", id="..tostring(params.id))
 
-  clearInteraction()
+  if VOC and VOC.clearInteraction then VOC.clearInteraction() end
   interaction.active = true
   interaction.id = params.id
   interaction.initiator = initiator
@@ -1769,9 +1891,9 @@ local function startInteraction(params)
     end
   end
   
-  setInteractionPanelVisibility()
-  updateInteractionStatusText()
-  updateInteractionTimerText()
+  if VOC and VOC.setInteractionPanelVisibility then VOC.setInteractionPanelVisibility() end
+  if VOC and VOC.updateInteractionStatusText then VOC.updateInteractionStatusText() end
+  if VOC and VOC.updateInteractionTimerText then VOC.updateInteractionTimerText() end
   UI.setAttribute("interactionOverlay", "active", "true")
 
   if Wait and Wait.time then
@@ -1832,7 +1954,7 @@ resolveInteractionEffects_impl = function()
     if self and self.call then
       pcall(function() self.call("RollDieAndResolveInteraction", { id = id, initiator = initiator }) end)
     else
-      warn("RollDieAndResolveInteraction: no self.call (chunking)")
+      VOC.warn("RollDieAndResolveInteraction: no self.call (chunking)")
     end
     return
   end
@@ -1849,8 +1971,8 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
     initiator = getActiveTurnColor() or initiator
   end
   if not initiator or not isPlayableColor(initiator) then
-    warn("ResolveInteractionEffectsWithDie: invalid initiator "..tostring(initiator))
-    clearInteraction()
+    VOC.warn("ResolveInteractionEffectsWithDie: invalid initiator "..tostring(initiator))
+    if VOC and VOC.clearInteraction then VOC.clearInteraction() end
     return
   end
 
@@ -1865,7 +1987,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
 
     if #participants == 0 then
       safeBroadcastAll("Practical workshop: no one joined → no effect.", {0.9,0.9,0.9})
-      clearInteraction()
+      if VOC and VOC.clearInteraction then VOC.clearInteraction() end
       return
     else
       -- Check if all other players joined (for bonus)
@@ -1909,8 +2031,8 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
   elseif id == "SW_L1_PRACTICAL_WORKSHOP_CHOICE" then
     local stage2Data = interaction.customData
     if not stage2Data then
-      warn("SW_L1_PRACTICAL_WORKSHOP_CHOICE: No customData found!")
-      clearInteraction()
+      VOC.warn("SW_L1_PRACTICAL_WORKSHOP_CHOICE: No customData found!")
+      if VOC and VOC.clearInteraction then VOC.clearInteraction() end
       return
     end
     
@@ -1948,7 +2070,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
     end
 
     safeBroadcastAll("Practical workshop complete!", {0.3,1,0.3})
-    clearInteraction()
+    if VOC and VOC.clearInteraction then VOC.clearInteraction() end
 
   -- Social Worker Level 2 – Community wellbeing session
   elseif id == "SW_L2_COMMUNITY_WELLBEING" then
@@ -2016,7 +2138,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
       -- Die roll for celebrity rewards only
       if not die or die < 1 or die > 6 then
         die = math.random(1, 6)
-        warn("Invalid die value, using fallback: "..tostring(die))
+        VOC.warn("Invalid die value, using fallback: "..tostring(die))
       end
       local celebSat = (die <= 3) and 2 or 4
 
@@ -2041,7 +2163,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
       -- Celebrity loses satisfaction
       if not die or die < 1 or die > 6 then
         die = math.random(1, 6)
-        warn("Invalid die value, using fallback: "..tostring(die))
+        VOC.warn("Invalid die value, using fallback: "..tostring(die))
       end
       local satLoss = (die <= 3) and -2 or -4
       satAdd(initiator, satLoss)
@@ -2056,7 +2178,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
       -- Celebrity gains satisfaction based on D6
       if not die or die < 1 or die > 6 then
         die = math.random(1, 6)
-        warn("Invalid die value, using fallback: "..tostring(die))
+        VOC.warn("Invalid die value, using fallback: "..tostring(die))
       end
       local celebSat = (die <= 3) and 3 or 5
       satAdd(initiator, celebSat)
@@ -2117,7 +2239,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
     end
     if not die or die < 1 or die > 6 then
       die = math.random(1, 6)
-      warn("Invalid die value, using fallback: "..tostring(die))
+      VOC.warn("Invalid die value, using fallback: "..tostring(die))
     end
     if die <= 2 then
       safeBroadcastAll("Income Tax Campaign: Some documents were missing → no taxes collected.", {0.9,0.9,0.9})
@@ -2153,7 +2275,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
   elseif id == "PS_L2_HITECH_TAX" then
     if not die or die < 1 or die > 6 then
       die = math.random(1, 6)
-      warn("Invalid die value, using fallback: "..tostring(die))
+      VOC.warn("Invalid die value, using fallback: "..tostring(die))
     end
     if die <= 2 then
       safeBroadcastAll("Hi-Tech Tax Campaign: Some documents were missing → no taxes collected.", {0.9,0.9,0.9})
@@ -2183,7 +2305,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
   elseif id == "PS_L3_PROPERTY_TAX" then
     if not die or die < 1 or die > 6 then
       die = math.random(1, 6)
-      warn("Invalid die value, using fallback: "..tostring(die))
+      VOC.warn("Invalid die value, using fallback: "..tostring(die))
     end
     if die <= 2 then
       safeBroadcastAll("Property Tax Campaign: Some documents were missing → no taxes collected.", {0.9,0.9,0.9})
@@ -2213,7 +2335,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
   elseif id == "NGO_L1_CHARITY" then
     if not die or die < 1 or die > 6 then
       die = math.random(1, 6)
-      warn("Invalid die value, using fallback: "..tostring(die))
+      VOC.warn("Invalid die value, using fallback: "..tostring(die))
     end
     if die <= 2 then
       safeBroadcastAll("Start Charity: Nothing happens.", {0.9,0.9,0.9})
@@ -2237,7 +2359,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
   elseif id == "NGO_L2_CROWDFUND" then
     if not die or die < 1 or die > 6 then
       die = math.random(1, 6)
-      warn("Invalid die value, using fallback: "..tostring(die))
+      VOC.warn("Invalid die value, using fallback: "..tostring(die))
     end
     if die <= 2 then
       safeBroadcastAll("Crowdfunding Campaign: Nothing happens.", {0.9,0.9,0.9})
@@ -2325,7 +2447,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
   elseif id == "NGO_SPECIAL_SCANDAL" then
     if not die or die < 1 or die > 6 then
       die = math.random(1, 6)
-      warn("Invalid die value, using fallback: "..tostring(die))
+      VOC.warn("Invalid die value, using fallback: "..tostring(die))
     end
     if die <= 2 then
       satAdd(initiator, -3)
@@ -2369,12 +2491,12 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
         -- Use the main die roll for first participant
         if not examDie or examDie < 1 or examDie > 6 then
           examDie = math.random(1, 6)
-          warn("Invalid die value for exam, using fallback: "..tostring(examDie))
+          VOC.warn("Invalid die value for exam, using fallback: "..tostring(examDie))
         end
       else
         -- For subsequent participants, roll again (would need async handling)
         examDie = math.random(1, 6)
-        warn("Multiple exam participants - using fallback die for participant "..i)
+        VOC.warn("Multiple exam participants - using fallback die for participant "..i)
       end
       if die == 1 then
         safeBroadcastToColor("Training Exam: Failed → no learning", c, {1,0.7,0.2})
@@ -2393,7 +2515,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
   elseif id == "ENT_SPECIAL_EXPANSION" then
     if not die or die < 1 or die > 6 then
       die = math.random(1, 6)
-      warn("Invalid die value, using fallback: "..tostring(die))
+      VOC.warn("Invalid die value, using fallback: "..tostring(die))
     end
   if die <= 2 then
     satAdd(initiator, -2)
@@ -2421,7 +2543,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
   -- Gangster Special – Robin Hood Job must NEVER be resolved here (no target). It is only run via VOC_StartGangsterRobinHood (event card / vocation action) which does: choose target → roll die → steal from target, donate to orphanage, +SAT to initiator.
   elseif id == "GANG_SPECIAL_ROBIN" then
     safeBroadcastAll("Robin Hood Job: Use the vocation event card and choose a target first. This path has no target – no effect applied.", {1,0.85,0.3})
-    clearInteraction()
+    if VOC and VOC.clearInteraction then VOC.clearInteraction() end
     return
 
   -- Gangster Special – Protection Racket
@@ -2464,7 +2586,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
     safeBroadcastAll("Protection Racket: "..initiator.." collected "..tostring(totalCollected).." VIN from "..#participants.." payer(s). Heat level +1.", {0.7,1,0.7})
   end
 
-  clearInteraction()
+  if VOC and VOC.clearInteraction then VOC.clearInteraction() end
 end
 
 -- Definition of handleInteractionResponse (forward-declared earlier)
@@ -2508,7 +2630,7 @@ handleInteractionResponse = function(color, choice, actorColor)
 
   interaction.responses[color] = choice
   disableInteractionButtonsForColor(color)
-  updateInteractionStatusText()
+  if VOC and VOC.updateInteractionStatusText then VOC.updateInteractionStatusText() end
 
   if allInteractionResponsesCollected() then
     if resolveInteractionEffects_impl then
@@ -2520,12 +2642,14 @@ end
 -- Callable entry point for Join/Ignore so UI callbacks (invoked via .call from Global) can reach handleInteractionResponse
 -- without chunking issues (handleInteractionResponse can be nil in the chunk where UI_Interaction_* live).
 function HandleInteractionResponse(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return end
   if not params or not params.buttonColor then return end
   local fn = handleInteractionResponse
   if type(fn) == "function" then
     fn(params.buttonColor, params.choice or "JOIN", params.actorColor)
   else
-    warn("HandleInteractionResponse: handleInteractionResponse not available (chunking)")
+    if VOC.warn then VOC.warn("HandleInteractionResponse: handleInteractionResponse not available (chunking)") end
   end
 end
 
@@ -2561,7 +2685,7 @@ local function loadState()
           state.levelUpRound[c] = 1
         end
       end
-      log("State loaded")
+      VOC.log("State loaded")
     end
   end
 end
@@ -2593,6 +2717,8 @@ end
 
 -- Callable so UI/callbacks in other chunks can persist state (saveState is local and may be nil there).
 function VOC_SaveState()
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return end
   saveState()
 end
 
@@ -2603,7 +2729,7 @@ local function findTileForVocationAndLevel(vocation, level)
   local vocationTag = "WLB_VOC_" .. vocation
   local levelTag = "WLB_VOC_LEVEL_" .. level
   
-  local allObjects = getAllObjects()
+  local allObjects = VOC.getAllObjectsSafe()
   for _, obj in ipairs(allObjects) do
     if obj and type(obj.hasTag) == "function" and
        obj.hasTag(TAG_VOCATION_TILE) and
@@ -2629,7 +2755,7 @@ local function findTileOnPlayerBoard(color)
   if not color then return nil end
   
   local ctag = colorTag(color)
-  local allObjects = getAllObjects()
+  local allObjects = VOC.getAllObjectsSafe()
   
   for _, obj in ipairs(allObjects) do
     if obj and type(obj.hasTag) == "function" and
@@ -2677,13 +2803,13 @@ local function placeTileOnBoard(tile, color)
   
   local board = findPlayerBoard(color)
   if not board then
-    log("Board not found for " .. color)
+    VOC.log("Board not found for " .. color)
     return false
   end
   
   local localPos = CHARACTER_SLOT_LOCAL[color]
   if not localPos then
-    log("Character slot position not set for " .. color)
+    VOC.log("Character slot position not set for " .. color)
     return false
   end
   
@@ -2694,7 +2820,7 @@ local function placeTileOnBoard(tile, color)
   addClickToShowExplanationButton(tile)
   pcall(function() if tile.setLock then tile.setLock(false) end end)
 
-  log("Placed tile on " .. color .. " board")
+  VOC.log("Placed tile on " .. color .. " board")
   return true
 end
 
@@ -2713,7 +2839,7 @@ local function removeTileFromBoard(color)
   local wp = getVocationStorageWorldPosForIndex(idx)
   pcall(function() if tile.setPositionSmooth then tile.setPositionSmooth(wp, false, true) end end)
   
-  log("Removed tile from " .. color .. " board")
+  VOC.log("Removed tile from " .. color .. " board")
   return tile
 end
 
@@ -2727,13 +2853,13 @@ local function swapTileOnPromotion(color, vocation, oldLevel, newLevel)
   -- Find and place new tile
   local newTile = findTileForVocationAndLevel(vocation, newLevel)
   if not newTile then
-    log("New tile not found: " .. vocation .. " Level " .. newLevel)
+    VOC.log("New tile not found: " .. vocation .. " Level " .. newLevel)
     return false
   end
   
   local success = placeTileOnBoard(newTile, color)
   if success then
-    log("Swapped tile: " .. color .. " " .. vocation .. " Level " .. oldLevel .. " → " .. newLevel)
+    VOC.log("Swapped tile: " .. color .. " " .. vocation .. " Level " .. oldLevel .. " → " .. newLevel)
   end
   
   return success
@@ -2743,6 +2869,8 @@ end
 -- DEBUG STATE FUNCTION
 -- =========================================================
 function VOC_DebugState()
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return {} end
   local s = {}
   s.self_guid = self.getGUID()
   s.self_name = self.getName()
@@ -2764,6 +2892,8 @@ end
 
 -- Call when starting a new game so vocations from the previous game are cleared
 function VOC_ResetForNewGame(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return end
   -- 1) Force-remove vocation tiles from ALL boards (even unused colors)
   -- This prevents situations like: in a 2-player game, a tile stays tagged on Red board
   -- and becomes "unavailable" for Yellow/Blue selection.
@@ -2801,7 +2931,7 @@ function VOC_ResetForNewGame(params)
   -- Then, do a full scan and reclaim any vocation tiles still tagged with a player color
   -- and place them neatly on top of THIS controller.
   local tiles = {}
-  for _, obj in ipairs(getAllObjects()) do
+  for _, obj in ipairs(VOC.getAllObjectsSafe()) do
     if looksLikeVocationTile(obj) then
       table.insert(tiles, obj)
     end
@@ -2865,27 +2995,30 @@ function VOC_ResetForNewGame(params)
   selectionState.shownVocation = nil
   selectionState.shownExplanationCard = nil
   saveState()
-  log("Vocation state reset for new game")
+  VOC.log("Vocation state reset for new game")
 end
 
 function VOC_GetVocation(params)
-  local color = normalizeColor(params.color)
+  if not params then return nil end
+  -- Use _G.VOC_normalizeColor directly (chunk-safe, no VOC_NS dependency)
+  local color = (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
   if not color then return nil end
-  
   return state.vocations[color]
 end
 
 function VOC_SetVocation(params)
-  local color = normalizeColor(params.color)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing") return false, "VOC missing" end
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params and params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params and params.color)) or nil
   local vocation = params.vocation
   
   if not color then
-    log("Invalid color")
+    if VOC.log then VOC.log("Invalid color") end
     return false, "Invalid color"
   end
   
   if not vocation then
-    log("Vocation not specified")
+    if VOC.log then VOC.log("Vocation not specified") end
     return false, "Vocation not specified"
   end
   
@@ -2899,20 +3032,20 @@ function VOC_SetVocation(params)
   end
   
   if not valid then
-    log("Invalid vocation: " .. tostring(vocation))
+    if VOC.log then VOC.log("Invalid vocation: " .. tostring(vocation)) end
     return false, "Invalid vocation"
   end
   
   -- One player, one vocation: cannot change during the game
   if state.vocations[color] and state.vocations[color] ~= vocation then
-    log("Player " .. color .. " already has vocation " .. tostring(state.vocations[color]) .. "; cannot change to " .. tostring(vocation))
+    if VOC.log then VOC.log("Player " .. color .. " already has vocation " .. tostring(state.vocations[color]) .. "; cannot change to " .. tostring(vocation)) end
     return false, "Already has a different vocation"
   end
   
   -- Check exclusivity (can't choose if already taken)
   for _, c in ipairs(COLORS) do
     if c ~= color and state.vocations[c] == vocation then
-      log("Vocation " .. vocation .. " already taken by " .. c)
+      if VOC.log then VOC.log("Vocation " .. vocation .. " already taken by " .. c) end
       return false, "Vocation already taken"
     end
   end
@@ -2931,26 +3064,29 @@ function VOC_SetVocation(params)
   if tile then
     placeTileOnBoard(tile, color)
   else
-    log("Warning: Level 1 tile not found for " .. vocation)
+    if VOC.log then VOC.log("Warning: Level 1 tile not found for " .. vocation) end
   end
   
-  log("Vocation set: " .. color .. " → " .. vocation)
+  if VOC.log then VOC.log("Vocation set: " .. color .. " → " .. vocation) end
   broadcastToAll(color .. " chose " .. VOCATION_DATA[vocation].name, {0.3, 1, 0.3})
   
   return true
 end
 
 function VOC_GetLevel(params)
-  local color = normalizeColor(params.color)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return nil end
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params and params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params and params.color)) or nil
   if not color then return nil end
-  
   return state.levels[color] or 1
 end
 
 -- Public Servant: Mastery of Administrative Law – one tax waiver per vocation level.
 -- Returns true if this player is Public Servant and has not used their waiver for the current level.
 function API_CanPublicServantWaiveTax(params)
-  local color = normalizeColor(params and params.color)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params and params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params and params.color)) or nil
   if not color then return false end
   if state.vocations[color] ~= VOC_PUBLIC_SERVANT then return false end
   local level = state.levels[color] or 1
@@ -2960,7 +3096,9 @@ end
 
 -- Mark that the Public Servant used their tax waiver for the current level (once per level).
 function API_UsePublicServantTaxWaiver(params)
-  local color = normalizeColor(params and params.color)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params and params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params and params.color)) or nil
   if not color then return false end
   if state.vocations[color] ~= VOC_PUBLIC_SERVANT then return false end
   local level = state.levels[color] or 1
@@ -2970,7 +3108,9 @@ end
 
 -- Returns "Tax can be waived" or "Tax obligation" for the summary UI (Public Servant only). Others return "".
 function API_GetPublicServantTaxWaiverStatus(params)
-  local color = normalizeColor(params and params.color)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return "" end
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params and params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params and params.color)) or nil
   if not color then return "" end
   if state.vocations[color] ~= VOC_PUBLIC_SERVANT then return "" end
   local level = state.levels[color] or 1
@@ -3000,8 +3140,10 @@ end
 -- workAPThisTurn: 0-2 → 0 sat loss, 3-4 → 1, 5-6 → 2, 7-8 → 3, 9+ → 4.
 -- Returns the number of satisfaction points to deduct (0 if NGO Worker or no loss).
 function API_GetOverworkSatLoss(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return 0 end
   params = params or {}
-  local color = normalizeColor(params.color)
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
   if not color then return 0 end
   if state.vocations[color] == VOC_NGO_WORKER then return 0 end
   local work = math.max(0, math.floor(tonumber(params.workAPThisTurn) or 0))
@@ -3014,14 +3156,18 @@ end
 
 -- Returns current experience token count for a player (for UI and promotion). Used by standard vocations (not Celebrity).
 function API_GetExperienceTokenCount(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return 0 end
   params = params or {}
-  local color = normalizeColor(params.color or params.player_color)
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color or params.player_color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color or params.player_color)) or nil
   if not color then return 0 end
   return getExperienceTokenCount(color)
 end
 
 function VOC_GetSalary(params)
-  local color = normalizeColor(params.color)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing") return 0 end
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params and params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params and params.color))
   if not color then return 0 end
   
   local vocation = state.vocations[color]
@@ -3037,33 +3183,33 @@ function VOC_GetSalary(params)
 end
 
 function VOC_AddWorkAP(params)
-  local color = normalizeColor(params.color)
-  local amount = tonumber(params.amount) or 0
-  
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params and params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params and params.color)) or nil
+  local amount = tonumber(params and params.amount) or 0
   if not color then return false end
-  
   state.workAP[color] = (state.workAP[color] or 0) + amount
   state.workAPThisLevel[color] = (state.workAPThisLevel[color] or 0) + amount
   state.workAPThisRound[color] = (state.workAPThisRound[color] or 0) + amount
-  
   saveState()
-  
-  log("Work AP added: " .. color .. " +" .. amount .. " (total: " .. state.workAP[color] .. ", this level: " .. state.workAPThisLevel[color] .. ", this round: " .. (state.workAPThisRound[color] or 0) .. ")")
+  if VOC.log then VOC.log("Work AP added: " .. color .. " +" .. amount .. " (total: " .. state.workAP[color] .. ", this level: " .. state.workAPThisLevel[color] .. ", this round: " .. (state.workAPThisRound[color] or 0) .. ")") end
   
   return true
 end
 
 function VOC_GetTotalWorkAP(params)
-  local color = normalizeColor(params.color)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return 0 end
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params and params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params and params.color)) or nil
   if not color then return 0 end
-  
   return state.workAP[color] or 0
 end
 
 function VOC_GetWorkAPThisLevel(params)
-  local color = normalizeColor(params.color)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return 0 end
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params and params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params and params.color)) or nil
   if not color then return 0 end
-  
   return state.workAPThisLevel[color] or 0
 end
 
@@ -3085,7 +3231,10 @@ end
 
 -- Callable: add award token (avoids "attempt to call nil" when resolveInteractionEffects runs in a different chunk)
 function API_AddAwardToken(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   local color = params and (params.color or params.actorColor)
+  color = (color and ((VOC.normalizeColor and VOC.normalizeColor(color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(color)))) or nil
   if not color or color == "White" then return false end
   return addAwardToken(color)
 end
@@ -3103,19 +3252,14 @@ local function getAwardTokenCount(color)
 end
 
 function VOC_GetVocationData(params)
-  local vocation = params.vocation
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return nil end
+  local vocation = params and params.vocation
   if not vocation then return nil end
-  
   return VOCATION_DATA[vocation]
 end
 
--- Find Token Engine (for giving experience tokens)
-local function findTokenEngine()
-  for _, o in ipairs(getAllObjects()) do
-    if o and o.hasTag and o.hasTag(TAG_TOKEN_ENGINE) and o.call then return o end
-  end
-  return nil
-end
+-- Find Token Engine (for giving experience tokens) - use VOC.findTokenEngine (chunk-safe)
 
 -- Get current experience token count for a player (for promotion and display). Returns 0 if TokenEngine missing.
 local function getExperienceTokenCount(color)
@@ -3131,6 +3275,8 @@ end
 
 -- Called by TurnController at end of each round (when turn wraps to next round). Work obligation + experience tokens.
 function VOC_OnRoundEnd(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return end
   params = params or {}
   local roundJustFinished = tonumber(params.round) or getCurrentRound()
   local tokenEngine = findTokenEngine()
@@ -3214,8 +3360,10 @@ end
 -- Called by TurnController at end of each player's turn. Adds experience tokens and checks for promotion.
 -- Most vocations get 1 token per turn (if they have the vocation). Public Servant gets tokens at round end based on work obligation.
 function VOC_OnTurnEnd(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing") return false end
   params = params or {}
-  local color = normalizeColor(params.color)
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color))
   if not color or color == "White" then return false end
   
   local vocation = state.vocations[color]
@@ -3246,7 +3394,7 @@ function VOC_OnTurnEnd(params)
     end)
     if addOk then
       local newCount = getExperienceTokenCount(color)
-      log("VOC_OnTurnEnd: Added experience token to " .. color .. " (new count: " .. tostring(newCount) .. ")")
+      VOC.log("VOC_OnTurnEnd: Added experience token to " .. color .. " (new count: " .. tostring(newCount) .. ")")
       safeBroadcastToColor("📋 Experience token received (1 per turn).", color, {0.5, 1, 0.6})
       
       -- Check promotion eligibility AFTER turn ends with a delay
@@ -3254,12 +3402,12 @@ function VOC_OnTurnEnd(params)
       Wait.time(function()
         local canPromote, reason = VOC_CanPromote({color=color})
         if canPromote then
-          log("VOC_OnTurnEnd: " .. color .. " meets promotion requirements after turn ended, promoting now")
+          VOC.log("VOC_OnTurnEnd: " .. color .. " meets promotion requirements after turn ended, promoting now")
           local promoteOk, promoteErr = VOC_Promote({color=color})
           if promoteOk then
-            log("VOC_OnTurnEnd: Successfully promoted " .. color)
+            VOC.log("VOC_OnTurnEnd: Successfully promoted " .. color)
           else
-            log("VOC_OnTurnEnd: Failed to promote " .. color .. " - " .. tostring(promoteErr))
+            VOC.log("VOC_OnTurnEnd: Failed to promote " .. color .. " - " .. tostring(promoteErr))
           end
         end
       end, 5.0)  -- Wait 5 seconds after turn ends before checking for promotion
@@ -3267,7 +3415,7 @@ function VOC_OnTurnEnd(params)
       saveState()
       return true
     else
-      log("VOC_OnTurnEnd: Failed to add experience token to " .. color .. " - " .. tostring(addErr))
+      VOC.log("VOC_OnTurnEnd: Failed to add experience token to " .. color .. " - " .. tostring(addErr))
     end
   end
   
@@ -3278,7 +3426,7 @@ end
 -- DIE ROLLING
 -- =========================================================
 local function getDie()
-  return getObjectFromGUID(DIE_GUID)
+  return VOC.getObjectFromGUID(DIE_GUID)
 end
 
 local function tryReadDieValue(die)
@@ -3369,15 +3517,18 @@ end
 -- Callable: roll die then resolve interaction (avoids calling rollPhysicalDieAndRead from resolveInteractionEffects_impl chunk)
 -- For Entrepreneur only: after roll we halt and show Reroll / Go on buttons instead of resolving immediately.
 function RollDieAndResolveInteraction(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing") return end
   if not params or not params.id then return end
   local id, initiator = params.id, params.initiator
   if type(rollPhysicalDieAndRead) ~= "function" then
-    warn("RollDieAndResolveInteraction: rollPhysicalDieAndRead not available")
+    if VOC.warn then VOC.warn("RollDieAndResolveInteraction: rollPhysicalDieAndRead not available") end
     return
   end
   rollPhysicalDieAndRead(function(die, err)
+    local VOC2 = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
     if err then
-      warn("Die roll failed: "..tostring(err).." - using fallback")
+      if VOC2 and VOC2.warn then VOC2.warn("Die roll failed: "..tostring(err).." - using fallback") end
       die = math.random(1, 6)
       safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
     else
@@ -3405,13 +3556,15 @@ function RollDieAndResolveInteraction(params)
     elseif type(resolveInteractionEffectsWithDie) == "function" then
       resolveInteractionEffectsWithDie(id, initiator, die)
     else
-      warn("RollDieAndResolveInteraction: ResolveInteractionEffectsWithDie not available (chunking)")
+      if VOC2 and VOC2.warn then VOC2.warn("RollDieAndResolveInteraction: ResolveInteractionEffectsWithDie not available (chunking)") end
     end
   end)
 end
 
 -- Called when player clicks "Go on" on Entrepreneur die halt. Resolve with current die and clear halt.
 function OnEntrepreneurDieGoOn(obj, color, alt_click)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing") return end
   local h = _G.VOC_entrepreneurDieHalt
   if not h then return end
   if color ~= h.initiator and color ~= "White" then
@@ -3425,6 +3578,8 @@ end
 
 -- Called when player clicks "Reroll" on Entrepreneur die halt. Spend 1 AP, reroll once, then show only Go on.
 function OnEntrepreneurDieReroll(obj, color, alt_click)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing") return end
   local h = _G.VOC_entrepreneurDieHalt
   if not h then return end
   if color ~= h.initiator and color ~= "White" then
@@ -3438,6 +3593,8 @@ end
 
 -- Callable: resolve current Entrepreneur die halt with stored die value and clear buttons.
 function VOC_ResolveEntrepreneurDieGoOn(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing in this chunk") return end
   local h = _G.VOC_entrepreneurDieHalt
   if not h then return end
   local id, initiator, dieValue = h.id, h.initiator, h.dieValue
@@ -3459,6 +3616,8 @@ end
 
 -- Callable: spend 1 AP, reroll once, then re-show halt UI (only "Go on" after reroll).
 function VOC_ResolveEntrepreneurDieReroll(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing in this chunk") return end
   local h = _G.VOC_entrepreneurDieHalt
   if not h then return end
   if h.hasRerolled then
@@ -3506,18 +3665,17 @@ end
 -- Callable: returns true ONLY if this player is Entrepreneur L2 and it's their turn (so we need Reroll/Go on UI).
 -- Callers use this to decide: direct roll (most cases) vs VOC_RollDieForPlayer (Entrepreneur L2 only).
 function VOC_CanUseEntrepreneurReroll(params)
-  log("[CRIME_DIAG] VOC_CanUseEntrepreneurReroll ENTER color="..tostring(params and params.color))
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing in this chunk") return false end
   if not params or not params.color then return false end
-  local color = normalizeColor(params.color)
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color))
   if not color then return false end
   local vocation = (state and state.vocations) and state.vocations[color] or nil
   local entLevel = (state and state.levels and state.levels[color]) or 1
   -- Chunk-safe: use ONLY _G.VOC_CTRL.getActiveTurnColor (never local lookup)
   local gac = (type(_G.VOC_CTRL) == "table" and type(_G.VOC_CTRL.getActiveTurnColor) == "function") and _G.VOC_CTRL.getActiveTurnColor or nil
   local activeTurn = (type(gac) == "function" and gac()) or nil
-  local result = (vocation == VOC_ENTREPRENEUR and entLevel == 2 and activeTurn == color)
-  log("[CRIME_DIAG] VOC_CanUseEntrepreneurReroll EXIT result="..tostring(result))
-  return result
+  return (vocation == VOC_ENTREPRENEUR and entLevel == 2 and activeTurn == color)
 end
 
 -- Callable: central die roll with Entrepreneur L2 "Use your network" support.
@@ -3525,8 +3683,11 @@ end
 -- When done, sets _G.VOC_DieRollResults[requestId] = die (caller must Wait.condition for it).
 -- IMPORTANT: Only use this when VOC_CanUseEntrepreneurReroll(color)==true; otherwise use direct physical roll.
 function VOC_RollDieForPlayer(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing in this chunk") return end
   if not params or not params.requestId or not params.color then return end
-  local requestId, color = params.requestId, normalizeColor(params.color)
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color))
+  local requestId = params.requestId
   if not color then return end
   if not _G.VOC_DieRollResults then _G.VOC_DieRollResults = {} end
   if type(rollPhysicalDieAndRead) ~= "function" then
@@ -3570,20 +3731,15 @@ end
 --  - Each participant gains +2 SAT
 --  - Initiator gains +1 SAT per participant, plus +2 SAT if anyone joined
 function VOC_StartSocialWorkerCommunitySession(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false, "VOC missing" end
   params = params or {}
-  local color = normalizeColor(params.color)
-  if not color then
-    color = getActorColor()
-  end
-  if not color then
-    return false, "Invalid color"
-  end
-  
-  -- If White is testing, use effectsTarget for initiator and effects
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
+  if not color then return false, "Invalid color" end
   local effectsTarget = params.effectsTarget
   local initiatorColor = effectsTarget or color
-  
-  log("VOC_StartSocialWorkerCommunitySession: color="..tostring(color)..", effectsTarget="..tostring(effectsTarget)..", initiatorColor="..tostring(initiatorColor))
+  if VOC.log then VOC.log("VOC_StartSocialWorkerCommunitySession: color="..tostring(color)..", effectsTarget="..tostring(effectsTarget)..", initiatorColor="..tostring(initiatorColor)) end
 
   local vocation = state.vocations[initiatorColor]
   
@@ -3610,8 +3766,7 @@ function VOC_StartSocialWorkerCommunitySession(params)
     return false, "AP deduction failed"
   end
   VOC_AddWorkAP({ color = initiatorColor, amount = 2 })
-
-  log("VOC_StartSocialWorkerCommunitySession: Starting interaction with initiator="..tostring(initiatorColor))
+  if VOC.log then VOC.log("VOC_StartSocialWorkerCommunitySession: Starting interaction with initiator="..tostring(initiatorColor)) end
   
   startInteraction({
     id = "SW_L2_COMMUNITY_WELLBEING",
@@ -3632,23 +3787,21 @@ end
 
 -- Social Worker Level 1: Practical workshop
 function VOC_StartSocialWorkerPracticalWorkshop(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  log("VOC_StartSocialWorkerPracticalWorkshop: Called with params="..tostring(params and "table" or "nil"))
-  
-  local color = normalizeColor(params.color) or getActorColor()
+  if VOC.log then VOC.log("VOC_StartSocialWorkerPracticalWorkshop: Called with params="..tostring(params and "table" or "nil")) end
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then 
-    log("VOC_StartSocialWorkerPracticalWorkshop: ERROR - No valid color")
+    if VOC.log then VOC.log("VOC_StartSocialWorkerPracticalWorkshop: ERROR - No valid color") end
     return false, "Invalid color" 
   end
-  
-  -- If White is testing, use effectsTarget for initiator and effects
   local effectsTarget = params.effectsTarget
   local initiatorColor = effectsTarget or color
-  
-  log("VOC_StartSocialWorkerPracticalWorkshop: color="..tostring(color)..", effectsTarget="..tostring(effectsTarget)..", initiatorColor="..tostring(initiatorColor))
-
+  if VOC.log then VOC.log("VOC_StartSocialWorkerPracticalWorkshop: color="..tostring(color)..", effectsTarget="..tostring(effectsTarget)..", initiatorColor="..tostring(initiatorColor)) end
   if not state or not state.vocations then
-    log("VOC_StartSocialWorkerPracticalWorkshop: ERROR - state or state.vocations is nil")
+    if VOC.log then VOC.log("VOC_StartSocialWorkerPracticalWorkshop: ERROR - state or state.vocations is nil") end
     safeBroadcastToColor("Game state error. Please restart the game.", color, {1,0.6,0.2})
     return false, "State error"
   end
@@ -3690,15 +3843,15 @@ end
 
 -- Social Worker Level 3: Expose a disturbing social case
 function VOC_StartSocialWorkerExposeCase(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
-  
-  -- If White is testing, use effectsTarget for initiator and effects
   local effectsTarget = params.effectsTarget
   local initiatorColor = effectsTarget or color
-  
-  log("VOC_StartSocialWorkerExposeCase: color="..tostring(color)..", effectsTarget="..tostring(effectsTarget)..", initiatorColor="..tostring(initiatorColor))
+  if VOC.log then VOC.log("VOC_StartSocialWorkerExposeCase: color="..tostring(color)..", effectsTarget="..tostring(effectsTarget)..", initiatorColor="..tostring(initiatorColor)) end
 
   local vocation = state.vocations[initiatorColor]
   -- White bypasses vocation checks for testing
@@ -3737,8 +3890,11 @@ end
 
 -- Social Worker Special: Homeless Shelter Breakthrough
 function VOC_StartSocialWorkerHomelessShelter(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
 
   local vocation = state.vocations[color]
@@ -3767,8 +3923,9 @@ function VOC_StartSocialWorkerHomelessShelter(params)
   -- Roll D6 for outcome
   safeBroadcastAll("🎲 Rolling die for Homeless Shelter...", {1,1,0.6})
   rollPhysicalDieAndRead(function(die, err)
+    local VOC2 = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
     if err then
-      warn("Die roll failed: "..tostring(err).." - using fallback")
+      if VOC2 and VOC2.warn then VOC2.warn("Die roll failed: "..tostring(err).." - using fallback") end
       die = math.random(1, 6)
       safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
     else
@@ -3801,15 +3958,18 @@ end
 
 -- Social Worker Special: Forced Protective Removal
 function VOC_StartSocialWorkerRemoval(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   
   -- If White is testing, use effectsTarget for initiator and effects
   local effectsTarget = params.effectsTarget
   local initiatorColor = effectsTarget or color
   
-  log("VOC_StartSocialWorkerRemoval: color="..tostring(color)..", effectsTarget="..tostring(effectsTarget)..", initiatorColor="..tostring(initiatorColor))
+  if VOC.log then VOC.log("VOC_StartSocialWorkerRemoval: color="..tostring(color)..", effectsTarget="..tostring(effectsTarget)..", initiatorColor="..tostring(initiatorColor)) end
 
   local vocation = state.vocations[initiatorColor]
   -- White bypasses vocation checks for testing
@@ -3831,7 +3991,8 @@ function VOC_StartSocialWorkerRemoval(params)
     subtitle = "Choose a player who has at least one child:",
     requireChildren = true,
     callback = function(targetColor)
-      log("Protective Removal: "..initiatorColor.." selected target: "..targetColor)
+      local V = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+      if V and V.log then V.log("Protective Removal: "..initiatorColor.." selected target: "..targetColor) end
       
       -- Verify target has children
       if not hasChildren(targetColor) then
@@ -3849,8 +4010,9 @@ function VOC_StartSocialWorkerRemoval(params)
       -- Roll D6 for outcome
       safeBroadcastAll("🎲 Rolling die for Protective Removal ("..initiatorColor.." → "..targetColor..")...", {1,1,0.6})
       rollPhysicalDieAndRead(function(die, err)
+        local VOC2 = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
         if err then
-          warn("Die roll failed: "..tostring(err).." - using fallback")
+          if VOC2 and VOC2.warn then VOC2.warn("Die roll failed: "..tostring(err).." - using fallback") end
           die = math.random(1, 6)
           safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
         else
@@ -3885,8 +4047,11 @@ end
 -- =========================================================
 
 function VOC_StartCelebrityStreetPerformance(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   -- When Spectator (White) starts, use current turn player for AP/costs and as initiator
   if color == "White" then color = getActiveTurnColor() or color end
@@ -3926,8 +4091,11 @@ function VOC_StartCelebrityStreetPerformance(params)
 end
 
 function VOC_StartCelebrityMeetGreet(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   if color == "White" then color = getActiveTurnColor() or color end
 
@@ -3973,8 +4141,11 @@ function VOC_StartCelebrityMeetGreet(params)
 end
 
 function VOC_StartCelebrityCharityStream(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   if color == "White" then color = getActiveTurnColor() or color end
 
@@ -4014,8 +4185,11 @@ function VOC_StartCelebrityCharityStream(params)
 end
 
 function VOC_CelebrityGetAward(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   if color == "White" then color = getActiveTurnColor() or color end
 
@@ -4053,8 +4227,11 @@ function VOC_CelebrityGetAward(params)
 end
 
 function VOC_StartCelebrityCollaboration(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   if color == "White" then color = getActiveTurnColor() or color end
 
@@ -4096,8 +4273,11 @@ function VOC_StartCelebrityCollaboration(params)
 end
 
 function VOC_StartCelebrityMeetup(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   if color == "White" then color = getActiveTurnColor() or color end
 
@@ -4125,8 +4305,9 @@ function VOC_StartCelebrityMeetup(params)
 
   safeBroadcastAll("🎲 Rolling die for Fan Meetup...", {1,1,0.6})
   rollPhysicalDieAndRead(function(die, err)
+    local VOC2 = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
     if err then
-      warn("Die roll failed: "..tostring(err).." - using fallback")
+      if VOC2 and VOC2.warn then VOC2.warn("Die roll failed: "..tostring(err).." - using fallback") end
       die = math.random(1, 6)
       safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
     else
@@ -4155,8 +4336,11 @@ end
 -- =========================================================
 
 function VOC_StartPublicServantIncomeTax(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
 
   -- When Spectator (White) clicks, only the current turn player can run this; give satisfaction to current turn.
@@ -4192,8 +4376,9 @@ function VOC_StartPublicServantIncomeTax(params)
   -- Roll D6 immediately (no interaction needed). Use current turn for beneficiary (already in color).
   safeBroadcastAll("🎲 Rolling die for Income Tax Campaign...", {1,1,0.6})
   rollPhysicalDieAndRead(function(die, err)
+    local VOC2 = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
     if err then
-      warn("Die roll failed: "..tostring(err).." - using fallback")
+      if VOC2 and VOC2.warn then VOC2.warn("Die roll failed: "..tostring(err).." - using fallback") end
       die = math.random(1, 6)
       safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
     else
@@ -4240,8 +4425,11 @@ end
 
 -- Public Servant perk: place Health Monitor Access (tile 657dd1) on player board; same use as shop Health Monitor
 function VOC_PlacePublicServantHealthMonitorAccess(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   if color == "White" then
     safeBroadcastToColor("Choose a player color (e.g. from a board) to place Health Monitor Access.", color, {1, 0.8, 0.3})
@@ -4252,7 +4440,7 @@ function VOC_PlacePublicServantHealthMonitorAccess(params)
     return false
   end
   local shopEngine = nil
-  for _, o in ipairs(getAllObjects()) do
+  for _, o in ipairs(VOC.getAllObjectsSafe()) do
     if o and o.hasTag and o.hasTag("WLB_SHOP_ENGINE") and o.call then
       shopEngine = o
       break
@@ -4273,8 +4461,11 @@ end
 
 -- Public Servant Level 2 perk: place Anti-burglary Alarm (tile f9d04d) on player board; same effect as shop ALARM
 function VOC_PlacePublicServantAlarmAccess(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   if color == "White" then
     safeBroadcastToColor("Choose a player color (e.g. from a board) to place Anti-burglary Alarm.", color, {1, 0.8, 0.3})
@@ -4285,7 +4476,7 @@ function VOC_PlacePublicServantAlarmAccess(params)
     return false
   end
   local shopEngine = nil
-  for _, o in ipairs(getAllObjects()) do
+  for _, o in ipairs(VOC.getAllObjectsSafe()) do
     if o and o.hasTag and o.hasTag("WLB_SHOP_ENGINE") and o.call then
       shopEngine = o
       break
@@ -4303,8 +4494,11 @@ end
 
 -- Public Servant Level 3 perk: place New Car (tile 1f3658) on player board; same effect as shop CAR
 function VOC_PlacePublicServantCarAccess(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   if color == "White" then
     safeBroadcastToColor("Choose a player color (e.g. from a board) to place New Car.", color, {1, 0.8, 0.3})
@@ -4315,7 +4509,7 @@ function VOC_PlacePublicServantCarAccess(params)
     return false
   end
   local shopEngine = nil
-  for _, o in ipairs(getAllObjects()) do
+  for _, o in ipairs(VOC.getAllObjectsSafe()) do
     if o and o.hasTag and o.hasTag("WLB_SHOP_ENGINE") and o.call then
       shopEngine = o
       break
@@ -4332,8 +4526,11 @@ function VOC_PlacePublicServantCarAccess(params)
 end
 
 function VOC_StartPublicServantHiTechTax(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
 
   -- White bypasses vocation checks for testing
@@ -4361,8 +4558,9 @@ function VOC_StartPublicServantHiTechTax(params)
   -- Roll D6 immediately
   safeBroadcastAll("🎲 Rolling die for Hi-Tech Tax Campaign...", {1,1,0.6})
   rollPhysicalDieAndRead(function(die, err)
+    local VOC2 = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
     if err then
-      warn("Die roll failed: "..tostring(err).." - using fallback")
+      if VOC2 and VOC2.warn then VOC2.warn("Die roll failed: "..tostring(err).." - using fallback") end
       die = math.random(1, 6)
       safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
     else
@@ -4400,8 +4598,11 @@ function VOC_StartPublicServantHiTechTax(params)
 end
 
 function VOC_StartPublicServantPropertyTax(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
 
   -- White bypasses vocation checks for testing
@@ -4429,8 +4630,9 @@ function VOC_StartPublicServantPropertyTax(params)
   -- Roll D6 immediately
   safeBroadcastAll("🎲 Rolling die for Property Tax Campaign...", {1,1,0.6})
   rollPhysicalDieAndRead(function(die, err)
+    local VOC2 = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
     if err then
-      warn("Die roll failed: "..tostring(err).." - using fallback")
+      if VOC2 and VOC2.warn then VOC2.warn("Die roll failed: "..tostring(err).." - using fallback") end
       die = math.random(1, 6)
       safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
     else
@@ -4468,8 +4670,11 @@ function VOC_StartPublicServantPropertyTax(params)
 end
 
 function VOC_StartPublicServantPolicy(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
 
   -- White bypasses vocation checks for testing
@@ -4502,8 +4707,11 @@ function VOC_StartPublicServantPolicy(params)
 end
 
 function VOC_StartPublicServantBottleneck(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
 
   -- White bypasses vocation checks for testing
@@ -4524,8 +4732,9 @@ function VOC_StartPublicServantBottleneck(params)
 
   safeBroadcastAll("🎲 Rolling die for Bureaucratic Bottleneck...", {1,1,0.6})
   rollPhysicalDieAndRead(function(die, err)
+    local VOC2 = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
     if err then
-      warn("Die roll failed: "..tostring(err).." - using fallback")
+      if VOC2 and VOC2.warn then VOC2.warn("Die roll failed: "..tostring(err).." - using fallback") end
       die = math.random(1, 6)
       safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
     else
@@ -4559,20 +4768,19 @@ end
 -- =========================================================
 
 function VOC_StartNGOCharity(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  log("VOC_StartNGOCharity: Called with params="..tostring(params and "table" or "nil"))
-  
-  local color = normalizeColor(params.color) or getActorColor()
+  if VOC.log then VOC.log("VOC_StartNGOCharity: Called with params="..tostring(params and "table" or "nil")) end
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then 
-    log("VOC_StartNGOCharity: ERROR - No valid color")
+    if VOC.log then VOC.log("VOC_StartNGOCharity: ERROR - No valid color") end
     return false, "Invalid color" 
   end
-  
-  -- If White is testing, use effectsTarget for initiator and effects
   local effectsTarget = params.effectsTarget
   local initiatorColor = effectsTarget or color
-  
-  log("VOC_StartNGOCharity: color="..tostring(color)..", effectsTarget="..tostring(effectsTarget)..", initiatorColor="..tostring(initiatorColor))
+  if VOC.log then VOC.log("VOC_StartNGOCharity: color="..tostring(color)..", effectsTarget="..tostring(effectsTarget)..", initiatorColor="..tostring(initiatorColor)) end
 
   -- White bypasses vocation checks for testing
   if color ~= "White" and state.vocations[initiatorColor] ~= VOC_NGO_WORKER then
@@ -4598,8 +4806,9 @@ function VOC_StartNGOCharity(params)
 
   safeBroadcastAll("🎲 Rolling die for Start Charity ("..initiatorColor..")...", {1,1,0.6})
   rollPhysicalDieAndRead(function(die, err)
+    local VOC2 = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
     if err then
-      warn("Die roll failed: "..tostring(err).." - using fallback")
+      if VOC2 and VOC2.warn then VOC2.warn("Die roll failed: "..tostring(err).." - using fallback") end
       die = math.random(1, 6)
       safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
     else
@@ -4635,8 +4844,11 @@ end
 
 -- NGO Worker L1: Take Good Karma (free) — find an open Good Karma card in shop (3 consumables) or event lane (7 cards); take it (no cost/AP), get token. Once per level. If no such card on table, action is not used and player is informed.
 function VOC_StartNGOTakeGoodKarma(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   local actorColor = params.effectsTarget or color
   if actorColor == "White" then
@@ -4660,7 +4872,7 @@ function VOC_StartNGOTakeGoodKarma(params)
   end
 
   -- 1) Search shop consumables (3 open cards) for a Good Karma card
-  local shopList = getObjectsWithTag("WLB_SHOP_ENGINE") or {}
+  local shopList = VOC.getObjectsWithTagSafe("WLB_SHOP_ENGINE") or {}
   local shop = shopList[1]
   if shop and shop.call then
     local okShop, hasShop = pcall(function() return shop.call("API_hasVisibleGoodKarmaCard", {}) end)
@@ -4675,7 +4887,7 @@ function VOC_StartNGOTakeGoodKarma(params)
   end
 
   -- 2) Search event lane (7 open cards) for a Good Karma card
-  local evtCtrl = getObjectFromGUID("1339d3")
+  local evtCtrl = VOC.getObjectFromGUID("1339d3")
   if evtCtrl and evtCtrl.call then
     local okEvt, hasEvt = pcall(function() return evtCtrl.call("API_hasVisibleGoodKarmaCard", {}) end)
     if okEvt and hasEvt then
@@ -4695,8 +4907,11 @@ end
 
 -- NGO Worker L2: Take Trip (free) — take one visible Trip card from the shop, no cost/AP, full benefits (rest + die for SAT). Once per level.
 function VOC_StartNGOTakeTrip(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   local actorColor = params.effectsTarget or color
   if actorColor == "White" then
@@ -4718,7 +4933,7 @@ function VOC_StartNGOTakeTrip(params)
     safeBroadcastToColor("Take Trip (free) can only be used once per level. Already used this level.", actorColor, {1,0.6,0.2})
     return false
   end
-  local shopList = getObjectsWithTag("WLB_SHOP_ENGINE") or {}
+  local shopList = VOC.getObjectsWithTagSafe("WLB_SHOP_ENGINE") or {}
   local shop = shopList[1]
   if not shop or not shop.call then
     safeBroadcastToColor("Shop Engine not found. Cannot take Trip.", actorColor, {1,0.6,0.2})
@@ -4736,7 +4951,9 @@ end
 
 -- Called by ShopEngine when player picks a Trip card for NGO Take Trip (free); marks perk as used for current level.
 function VOC_MarkNGOTakeTripUsed(params)
-  local color = normalizeColor(params and params.color)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing") return end
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params and params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params and params.color))
   if not color then return end
   local level = state.levels[color] or 1
   state.ngoTakeTripUsedPerLevel = state.ngoTakeTripUsedPerLevel or {}
@@ -4746,8 +4963,11 @@ end
 
 -- NGO Worker L3: Use Investment (free, up to 1000 VIN) — activate perk; then when player clicks an Investment in the shop, first 1000 VIN is free. Once per level.
 function VOC_StartNGOUseInvestment(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   local actorColor = params.effectsTarget or color
   if actorColor == "White" then
@@ -4777,7 +4997,9 @@ end
 
 -- Called by ShopEngine when processing an Investment purchase: return subsidy amount (1000) if NGO perk is active for this color.
 function VOC_GetNGOInvestmentSubsidy(params)
-  local color = normalizeColor(params and params.color)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing") return 0 end
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params and params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params and params.color))
   if not color then return 0 end
   state.ngoInvestmentSubsidyActive = state.ngoInvestmentSubsidyActive or {}
   local amount = state.ngoInvestmentSubsidyActive[color]
@@ -4788,7 +5010,9 @@ end
 
 -- Called by ShopEngine after applying NGO investment subsidy for this color; marks perk as used for current level.
 function VOC_ConsumeNGOInvestmentPerk(params)
-  local color = normalizeColor(params and params.color)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing") return end
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params and params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params and params.color))
   if not color then return end
   local level = state.levels[color] or 1
   state.ngoInvestmentSubsidyActive = state.ngoInvestmentSubsidyActive or {}
@@ -4799,8 +5023,11 @@ function VOC_ConsumeNGOInvestmentPerk(params)
 end
 
 function VOC_StartNGOCrowdfunding(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   -- When White triggers (testing), use effectsTarget as the actual actor for AP and messages
   local actorColor = params.effectsTarget or color
@@ -4830,8 +5057,9 @@ function VOC_StartNGOCrowdfunding(params)
 
   safeBroadcastAll("🎲 Rolling die for Crowdfunding Campaign...", {1,1,0.6})
   rollPhysicalDieAndRead(function(die, err)
+    local VOC2 = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
     if err then
-      warn("Die roll failed: "..tostring(err).." - using fallback")
+      if VOC2 and VOC2.warn then VOC2.warn("Die roll failed: "..tostring(err).." - using fallback") end
       die = math.random(1, 6)
       safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
     else
@@ -4878,8 +5106,10 @@ end
 
 -- Called by ShopEngine when a player buys a High-Tech item. If this player has an active crowdfund pool (same turn), apply it: pool covers up to cost; excess lost; if cost > pool, return amount player must pay. Only valid the turn after using Crowdfunding.
 function VOC_ApplyCrowdfundPoolForPurchase(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing") return { amountFromPool = 0, playerPays = 0 } end
   params = params or {}
-  local color = normalizeColor(params.color)
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color))
   local cost = tonumber(params.cost) or 0
   if not color or cost < 0 then
     return { amountFromPool = 0, playerPays = cost }
@@ -4911,8 +5141,11 @@ function VOC_ApplyCrowdfundPoolForPurchase(params)
 end
 
 function VOC_StartNGOVoluntaryWork(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   local actorColor = params.effectsTarget or color
 
@@ -4948,8 +5181,11 @@ function VOC_StartNGOVoluntaryWork(params)
 end
 
 function VOC_StartNGOAdvocacy(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   -- When White triggers (testing), use effectsTarget as the actual actor for AP and initiator (so initiator does not appear in join UI)
   local actorColor = params.effectsTarget or color
@@ -4991,8 +5227,11 @@ function VOC_StartNGOAdvocacy(params)
 end
 
 function VOC_StartNGOCrisis(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
 
   -- White bypasses vocation checks for testing
@@ -5030,8 +5269,11 @@ function VOC_StartNGOCrisis(params)
 end
 
 function VOC_StartNGOScandal(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
 
   -- White bypasses vocation checks for testing
@@ -5058,8 +5300,9 @@ function VOC_StartNGOScandal(params)
 
   safeBroadcastAll("🎲 Rolling die for Donation Scandal...", {1,1,0.6})
   rollPhysicalDieAndRead(function(die, err)
+    local VOC2 = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
     if err then
-      warn("Die roll failed: "..tostring(err).." - using fallback")
+      if VOC2 and VOC2.warn then VOC2.warn("Die roll failed: "..tostring(err).." - using fallback") end
       die = math.random(1, 6)
       safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
     else
@@ -5087,8 +5330,11 @@ end
 -- =========================================================
 
 function VOC_StartEntrepreneurFlashSale(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   -- When White (spectator) triggers the action, use active turn player as the Entrepreneur/initiator
   if color == "White" then color = getActiveTurnColor() or color end
@@ -5127,7 +5373,7 @@ function VOC_StartEntrepreneurFlashSale(params)
     return true  -- AP already spent
   end
 
-  local shopList = getObjectsWithTag("WLB_SHOP_ENGINE") or {}
+  local shopList = VOC.getObjectsWithTagSafe("WLB_SHOP_ENGINE") or {}
   local shop = shopList[1]
   if not shop or not shop.call then
     safeBroadcastAll("⚠️ Shop Engine not found. Flash Sale not started.", {1,0.6,0.2})
@@ -5142,8 +5388,11 @@ end
 
 -- Entrepreneur L1: Spend 1 AP to "talk to shop owner" – other players pay double for consumables & hi-tech until this player's next turn
 function VOC_StartEntrepreneurTalkToShopOwner(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   if color == "White" then color = getActiveTurnColor() or color end
 
@@ -5168,7 +5417,7 @@ function VOC_StartEntrepreneurTalkToShopOwner(params)
   end
   VOC_AddWorkAP({ color = color, amount = 1 })
 
-  local shopList = getObjectsWithTag("WLB_SHOP_ENGINE") or {}
+  local shopList = VOC.getObjectsWithTagSafe("WLB_SHOP_ENGINE") or {}
   local shop = shopList[1]
   if not shop or not shop.call then
     safeBroadcastToColor("Shop Engine not found. Double prices not applied.", color, {1,0.6,0.2})
@@ -5182,8 +5431,11 @@ function VOC_StartEntrepreneurTalkToShopOwner(params)
 end
 
 function VOC_StartEntrepreneurTraining(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
 
   -- White bypasses vocation checks for testing
@@ -5222,8 +5474,11 @@ function VOC_StartEntrepreneurTraining(params)
 end
 
 function VOC_StartEntrepreneurExpansion(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
 
   -- White bypasses vocation checks for testing
@@ -5250,8 +5505,9 @@ function VOC_StartEntrepreneurExpansion(params)
 
   safeBroadcastAll("🎲 Rolling die for Aggressive Expansion...", {1,1,0.6})
   rollPhysicalDieAndRead(function(die, err)
+    local VOC2 = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
     if err then
-      warn("Die roll failed: "..tostring(err).." - using fallback")
+      if VOC2 and VOC2.warn then VOC2.warn("Die roll failed: "..tostring(err).." - using fallback") end
       die = math.random(1, 6)
       safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
     else
@@ -5276,8 +5532,11 @@ function VOC_StartEntrepreneurExpansion(params)
 end
 
 function VOC_StartEntrepreneurEmployeeTraining(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
 
   -- White bypasses vocation checks for testing
@@ -5315,8 +5574,11 @@ end
 
 -- Entrepreneur L3: Reposition event cards. Spend 2 AP; EventsController shows MOVE on slots 1-7, player picks 3 then assigns to slots.
 function VOC_StartEntrepreneurReposition(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
 
   if color ~= "White" and state.vocations[color] ~= VOC_ENTREPRENEUR then
@@ -5340,7 +5602,7 @@ function VOC_StartEntrepreneurReposition(params)
   end
   VOC_AddWorkAP({ color = color, amount = 2 })
 
-  local evtCtrl = getObjectFromGUID("1339d3")
+  local evtCtrl = VOC.getObjectFromGUID("1339d3")
   if not evtCtrl or not evtCtrl.call then
     safeBroadcastAll("Events Controller not found. Reposition not started.", {1,0.6,0.2})
     return true
@@ -5378,8 +5640,11 @@ end
 
 -- Gangster L1: Steal hi-tech from shop. Cost 3 AP; choose one open H card (STEAL button); roll die: 1-2 fail, 3-4 success + investigation, 5-6 success + heat only.
 function VOC_StartGangsterStealHitech(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   -- When White (host/spectator) triggers, use effectsTarget or active turn as the actual gangster
   if color == "White" then
     color = normalizeColor(params.effectsTarget) or getActiveTurnColor()
@@ -5405,7 +5670,7 @@ function VOC_StartGangsterStealHitech(params)
   VOC_AddWorkAP({ color = color, amount = 3 })
 
   local shop = nil
-  for _, o in ipairs(getAllObjects()) do
+  for _, o in ipairs(VOC.getAllObjectsSafe()) do
     if o and o.hasTag and o.hasTag("WLB_SHOP_ENGINE") and o.call then shop = o break end
   end
   if not shop or not shop.call then
@@ -5421,8 +5686,11 @@ end
 
 -- Gangster L2: False money production. Cost 3 AP; roll die: 1-2 fail, 3-4 success +1000 VIN, 5-6 great success +2000 VIN. Success (3-6) = crime → investigation + heat.
 function VOC_StartGangsterFalseMoney(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   -- When White (host/spectator) triggers, use effectsTarget or active turn as the actual gangster
   if color == "White" then
     color = normalizeColor(params.effectsTarget) or getActiveTurnColor()
@@ -5475,8 +5743,11 @@ end
 
 -- Gangster L3: Enforce citywide lockdown. Cost 2 AP. All opponents start their next turn with 1 AP less (moved to inactive). Gangster rolls die: 1-2 +200 VIN, 3-4 +500 VIN, 5-6 +1000 VIN and +2 SAT. Crime → investigation + heat.
 function VOC_StartGangsterLockdown(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   -- When White (host/spectator) triggers, use effectsTarget or active turn as the actual gangster
   if color == "White" then
     color = normalizeColor(params.effectsTarget) or getActiveTurnColor()
@@ -5542,8 +5813,10 @@ end
 
 -- Callable from TurnController when a player's turn starts. Applies Gangster lockdown: if this color has pending lockdown, move 1 AP to inactive.
 function VOC_OnTurnStarted(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return end
   if not params or not params.color then return end
-  local c = normalizeColor(params.color)
+  local c = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
   if not c or c == "White" then return end
   state.lockdownPending = state.lockdownPending or {}
   if not state.lockdownPending[c] then return end
@@ -5558,9 +5831,11 @@ end
 
 -- Callable from ShopEngine when gangster clicked STEAL on a hi-tech card. Roll die; 1-2 fail, 3-4 success + investigation, 5-6 success + heat only.
 function VOC_GangsterStealHitechCardChosen(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing") return end
   if not params or not params.cardGuid or not params.color then return end
   local cardGuid = params.cardGuid
-  local color = normalizeColor(params.color)
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color))
   if not color or color == "White" then return end
   safeBroadcastAll("🎲 Rolling die for Steal hi-tech ("..tostring(color)..")...", {1,1,0.6})
   rollPhysicalDieAndRead(function(die, err)
@@ -5576,7 +5851,7 @@ function VOC_GangsterStealHitechCardChosen(params)
     end
     -- Success: give card to gangster (ShopEngine), then SAT die, then heat and optionally investigation
     local shop = nil
-    for _, o in ipairs(getAllObjects()) do
+    for _, o in ipairs(VOC.getAllObjectsSafe()) do
       if o and o.hasTag and o.hasTag("WLB_SHOP_ENGINE") and o.call then shop = o break end
     end
     if shop and shop.call then
@@ -5602,15 +5877,18 @@ function VOC_GangsterStealHitechCardChosen(params)
 end
 
 function VOC_StartGangsterCrime(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   if not color then return false, "Invalid color" end
   
   -- If White is testing, use effectsTarget for initiator and effects
   local effectsTarget = params.effectsTarget
   local initiatorColor = effectsTarget or color
   
-  log("VOC_StartGangsterCrime: color="..tostring(color)..", effectsTarget="..tostring(effectsTarget)..", initiatorColor="..tostring(initiatorColor))
+  VOC.log("VOC_StartGangsterCrime: color="..tostring(color)..", effectsTarget="..tostring(effectsTarget)..", initiatorColor="..tostring(initiatorColor))
 
   -- White bypasses vocation checks for testing
   if color ~= "White" and state.vocations[initiatorColor] ~= VOC_GANGSTER then
@@ -5644,7 +5922,7 @@ function VOC_StartGangsterCrime(params)
     subtitle = "Choose a player to commit crime against:",
     requireChildren = false,
     callback = function(targetColor)
-      log("Crime: "..initiatorColor.." selected target: "..targetColor)
+      VOC.log("Crime: "..initiatorColor.." selected target: "..targetColor)
       
       -- Now spend AP and execute action
       if not spendAP(initiatorColor, 2, "GANG_L"..level.."_CRIME") then
@@ -5656,8 +5934,9 @@ function VOC_StartGangsterCrime(params)
       -- Roll D6 for crime outcome
       safeBroadcastAll("🎲 Rolling die for Crime ("..initiatorColor.." → "..targetColor..")...", {1,1,0.6})
       rollPhysicalDieAndRead(function(die, err)
+        local VOC2 = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
         if err then
-          warn("Die roll failed: "..tostring(err).." - using fallback")
+          if VOC2 and VOC2.warn then VOC2.warn("Die roll failed: "..tostring(err).." - using fallback") end
           die = math.random(1, 6)
           safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
         else
@@ -5666,7 +5945,7 @@ function VOC_StartGangsterCrime(params)
 
         local function targetHasAlarm(c)
           local shop = nil
-          for _, o in ipairs(getAllObjects()) do
+          for _, o in ipairs(VOC.getAllObjectsSafe()) do
             if o and o.hasTag and o.hasTag("WLB_SHOP_ENGINE") and o.call then shop = o break end
           end
           if not shop then return false end
@@ -5799,8 +6078,10 @@ end
 -- params: initiatorColor, vocationLevel (optional), crimeGainsVIN (optional), targetColor (optional)
 --         Do NOT pass the crime roll – it is ignored; we roll again for investigation.
 function RunCrimeInvestigation(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return end
   params = params or {}
-  local initiatorColor = normalizeColor(params.initiatorColor or params.color)
+  local initiatorColor = (VOC.normalizeColor and VOC.normalizeColor(params.initiatorColor or params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.initiatorColor or params.color)) or nil
   if not initiatorColor or initiatorColor == "White" then return end
   local vocationLevel = tonumber(params.vocationLevel) or (state.levels and state.levels[initiatorColor]) or 1
   local crimeGainsVIN = math.max(0, tonumber(params.crimeGainsVIN) or 0)
@@ -5808,7 +6089,7 @@ function RunCrimeInvestigation(params)
 
   local pawn = findHeatPawn()
   if not pawn or not pawn.call then
-    log("RunCrimeInvestigation: Heat pawn (WLB_POLICE) not found – skipping heat/investigation")
+    VOC.log("RunCrimeInvestigation: Heat pawn (WLB_POLICE) not found – skipping heat/investigation")
     return
   end
   -- Modifier from current heat (before increasing – heat goes up after investigation)
@@ -5877,8 +6158,11 @@ function RunCrimeInvestigation(params)
 end
 
 function VOC_StartGangsterRobinHood(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   -- When White triggers, use effectsTarget or active turn as the actual gangster
   if color == "White" then
     color = normalizeColor(params.effectsTarget) or getActiveTurnColor()
@@ -5910,8 +6194,9 @@ function VOC_StartGangsterRobinHood(params)
     callback = function(targetColor)
       safeBroadcastAll("🎲 Rolling die for Robin Hood Job vs "..targetColor.."...", {1,1,0.6})
       rollPhysicalDieAndRead(function(die, err)
+        local VOC2 = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
         if err then
-          warn("Die roll failed: "..tostring(err).." - using fallback")
+          if VOC2 and VOC2.warn then VOC2.warn("Die roll failed: "..tostring(err).." - using fallback") end
           die = math.random(1, 6)
           safeBroadcastAll("⚠️ Die roll failed, using fallback: "..die, {1,0.7,0.3})
         else
@@ -5974,8 +6259,11 @@ function VOC_StartGangsterRobinHood(params)
 end
 
 function VOC_StartGangsterProtection(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   params = params or {}
-  local color = normalizeColor(params.color) or getActorColor()
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color)) or nil
+  if not color then color = getActorColor() end
   -- When White triggers, use effectsTarget or active turn as the actual gangster
   if color == "White" then
     color = normalizeColor(params.effectsTarget) or getActiveTurnColor()
@@ -6010,7 +6298,9 @@ function VOC_StartGangsterProtection(params)
 end
 
 function VOC_CanPromote(params)
-  local color = normalizeColor(params.color)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params and params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params and params.color)) or nil
   if not color then return false, "Invalid color" end
   
   local vocation = state.vocations[color]
@@ -6139,7 +6429,7 @@ function VOC_CanPromote(params)
       if housingLevel ~= "L3" and housingLevel ~= "L4" then
         return false, "Need Level 3 or 4 house (have " .. housingLevel .. ")"
       end
-      local shopList = getObjectsWithTag and getObjectsWithTag("WLB_SHOP_ENGINE") or {}
+      local shopList = VOC.getObjectsWithTagSafe("WLB_SHOP_ENGINE") or {}
       local hiTechCount = 0
       for _, shop in ipairs(shopList) do
         if shop and shop.call then
@@ -6165,13 +6455,15 @@ function VOC_CanPromote(params)
 end
 
 function VOC_Promote(params)
-  local color = normalizeColor(params.color)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params and params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params and params.color)) or nil
   if not color then return false, "Invalid color" end
   
   -- Only the owner of the vocation card can level it up
   local tileGuid = params.tileGuid
   if tileGuid and tileGuid ~= "" then
-    local tile = getObjectFromGUID(tileGuid)
+    local tile = VOC.getObjectFromGUID(tileGuid)
     if tile and tile.hasTag then
       local ownerColor = nil
       for _, c in ipairs(COLORS) do
@@ -6185,7 +6477,7 @@ function VOC_Promote(params)
   
   local canPromote, reason = VOC_CanPromote({color=color})
   if not canPromote then
-    log("Cannot promote " .. color .. ": " .. tostring(reason))
+    VOC.log("Cannot promote " .. color .. ": " .. tostring(reason))
     return false, reason
   end
   
@@ -6201,7 +6493,7 @@ function VOC_Promote(params)
   -- Replace vocation card with higher-level card first; only then update state
   local swapOk = swapTileOnPromotion(color, vocation, oldLevel, newLevel)
   if not swapOk then
-    log("Promotion aborted: could not replace vocation card for " .. color .. " (Level " .. newLevel .. " tile not found or place failed)")
+    VOC.log("Promotion aborted: could not replace vocation card for " .. color .. " (Level " .. newLevel .. " tile not found or place failed)")
     return false, "Could not replace vocation card – ensure Level " .. newLevel .. " vocation tiles exist with correct tags"
   end
   
@@ -6214,7 +6506,7 @@ function VOC_Promote(params)
       local tokenEngine = findTokenEngine()
       if tokenEngine and tokenEngine.call then
         local beforeCount = getExperienceTokenCount(color)
-        log("Promotion: Removing " .. tostring(needTokens) .. " experience tokens from " .. color .. " (current count: " .. tostring(beforeCount) .. ")")
+        VOC.log("Promotion: Removing " .. tostring(needTokens) .. " experience tokens from " .. color .. " (current count: " .. tostring(beforeCount) .. ")")
         
         -- Remove tokens one at a time using sequential Wait.time callbacks (same pattern as AP refunds in EventEngine)
         -- This ensures each removal completes before the next one starts, preventing race conditions
@@ -6228,7 +6520,7 @@ function VOC_Promote(params)
             end)
             if removeOk then
               removedCount = removedCount + 1
-              log("Promotion: Removed token " .. i .. " of " .. needTokens .. " from " .. color)
+              VOC.log("Promotion: Removed token " .. i .. " of " .. needTokens .. " from " .. color)
               
               -- After each removal, wait and verify the token count before proceeding to next removal
               -- This ensures the refresh from this removal completes before starting the next
@@ -6236,19 +6528,19 @@ function VOC_Promote(params)
                 Wait.time(function()
                   local currentCount = getExperienceTokenCount(color)
                   local expectedCount = beforeCount - removedCount
-                  log("Promotion: After removing token " .. i .. ", count is " .. tostring(currentCount) .. " (expected: " .. tostring(expectedCount) .. ")")
+                  VOC.log("Promotion: After removing token " .. i .. ", count is " .. tostring(currentCount) .. " (expected: " .. tostring(expectedCount) .. ")")
                   if currentCount ~= expectedCount then
-                    warn("Promotion: Token count mismatch after removing token " .. i .. " - refresh may not have completed")
+                    VOC.warn("Promotion: Token count mismatch after removing token " .. i .. " - refresh may not have completed")
                   end
                 end, 2.0)  -- Wait 2 seconds after each removal to verify refresh completed
               end
             else
-              log("ERROR: Failed to remove experience token " .. i .. " for " .. color .. " promotion: " .. tostring(removeErr))
+              VOC.log("ERROR: Failed to remove experience token " .. i .. " for " .. color .. " promotion: " .. tostring(removeErr))
             end
             
             -- After last removal, wait for tokens to settle and then verify
             if i == needTokens then
-              log("Promotion: All " .. tostring(needTokens) .. " tokens removed, waiting for refreshes to complete")
+              VOC.log("Promotion: All " .. tostring(needTokens) .. " tokens removed, waiting for refreshes to complete")
               -- Add longer delay to let tokens settle and ensure all async operations complete
               -- This prevents round-end refreshes from restoring tokens
               Wait.time(function()
@@ -6268,15 +6560,15 @@ function VOC_Promote(params)
                     saveState()  -- Save state after refresh to ensure consistency
                     
                     local afterCount = getExperienceTokenCount(color)
-                    log("Promotion: Token removal complete for " .. color .. " (removed: " .. tostring(removedCount) .. ", before: " .. tostring(beforeCount) .. ", after: " .. tostring(afterCount) .. ", expected: " .. tostring(beforeCount - needTokens) .. ")")
+                    VOC.log("Promotion: Token removal complete for " .. color .. " (removed: " .. tostring(removedCount) .. ", before: " .. tostring(beforeCount) .. ", after: " .. tostring(afterCount) .. ", expected: " .. tostring(beforeCount - needTokens) .. ")")
                     
                     -- If tokens are still there after forced refresh, they may have been restored by round-end processing
                     -- Remove them again using the same sequential pattern
                     if afterCount ~= (beforeCount - needTokens) then
-                      warn("Promotion: Token count incorrect for " .. color .. " after refresh - tokens may have been restored, removing again")
+                      VOC.warn("Promotion: Token count incorrect for " .. color .. " after refresh - tokens may have been restored, removing again")
                       local remaining = afterCount - (beforeCount - needTokens)
                       if remaining > 0 then
-                        log("Promotion: Removing " .. tostring(remaining) .. " restored tokens using sequential pattern")
+                        VOC.log("Promotion: Removing " .. tostring(remaining) .. " restored tokens using sequential pattern")
                         for j = 1, remaining do
                           Wait.time(function()
                             pcall(function()
@@ -6293,9 +6585,9 @@ function VOC_Promote(params)
                                   Wait.time(function()
                                     saveState()
                                     local finalCount = getExperienceTokenCount(color)
-                                    log("Promotion: Final token count after additional removal: " .. tostring(finalCount) .. " (expected: " .. tostring(beforeCount - needTokens) .. ")")
+                                    VOC.log("Promotion: Final token count after additional removal: " .. tostring(finalCount) .. " (expected: " .. tostring(beforeCount - needTokens) .. ")")
                                     if finalCount ~= (beforeCount - needTokens) then
-                                      warn("CRITICAL: Tokens still not removed correctly for " .. color .. " after all attempts")
+                                      VOC.warn("CRITICAL: Tokens still not removed correctly for " .. color .. " after all attempts")
                                     end
                                   end, 3.0)  -- Increased delay for final verification
                                 end, 1.0)  -- Additional delay before final refresh
@@ -6312,8 +6604,8 @@ function VOC_Promote(params)
           end, 3.0 * i)  -- Increased sequential delay: 3.0s per token to ensure each refresh completes
         end
       else
-        log("ERROR: TokenEngine not found when trying to consume experience tokens for " .. color .. " promotion")
-        warn("TokenEngine missing - experience tokens not consumed on promotion")
+        VOC.log("ERROR: TokenEngine not found when trying to consume experience tokens for " .. color .. " promotion")
+        VOC.warn("TokenEngine missing - experience tokens not consumed on promotion")
       end
     end
   end
@@ -6327,7 +6619,7 @@ function VOC_Promote(params)
   
   local newLevelData = vocationData.levels[newLevel]
   
-  log("Promoted: " .. color .. " " .. vocation .. " Level " .. oldLevel .. " → " .. newLevel)
+  VOC.log("Promoted: " .. color .. " " .. vocation .. " Level " .. oldLevel .. " → " .. newLevel)
   broadcastToAll(color .. " promoted to " .. vocationData.name .. " - " .. newLevelData.jobTitle, {0.3, 1, 0.3})
   
   return true
@@ -6336,7 +6628,9 @@ end
 -- Called before a player's turn (by TurnController at turn start): if they meet promotion requirements, promote automatically
 -- and swap the next-level vocation tile (Level 2 or Level 3) with their current tile (no tile context menu needed).
 function VOC_CheckAndAutoPromote(params)
-  local color = normalizeColor(params and params.color)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params and params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params and params.color)) or nil
   if not color then return false end
   local canPromote = VOC_CanPromote({ color = color })
   if not canPromote then return false end
@@ -6372,7 +6666,7 @@ local uiState = {
 -- Returns array of {buttonIndex, label, actionId} where buttonIndex is 1-5 (or 1..N when TESTING_UNLOCK_ALL_LEVELS).
 local function getVocationActionsForLevel(vocation, level, ownerColor)
   local actions = {}
-  log("getVocationActionsForLevel: vocation="..tostring(vocation)..", level="..tostring(level)..", ownerColor="..tostring(ownerColor))
+  VOC.log("getVocationActionsForLevel: vocation="..tostring(vocation)..", level="..tostring(level)..", ownerColor="..tostring(ownerColor))
   
   if vocation == VOC_SOCIAL_WORKER then
     -- Level 1: two buttons (community event + Use Good Karma, once per game)
@@ -6496,7 +6790,7 @@ local function getVocationActions(vocation, level, ownerColor)
       })
     end
   end
-  log("getVocationActions: TESTING_UNLOCK_ALL_LEVELS merged "..#merged.." actions for "..tostring(vocation))
+  VOC.log("getVocationActions: TESTING_UNLOCK_ALL_LEVELS merged "..#merged.." actions for "..tostring(vocation))
   return merged
 end
 
@@ -6520,7 +6814,7 @@ local function updateActionButtons(actions)
   for _, action in ipairs(actions) do
     local idx = action.buttonIndex
     if idx >= 1 and idx <= numButtons then
-      log("updateActionButtons: Setting button "..idx.." - label="..tostring(action.label)..", actionId="..tostring(action.actionId))
+      VOC.log("updateActionButtons: Setting button "..idx.." - label="..tostring(action.label)..", actionId="..tostring(action.actionId))
       pcall(function()
         UI.setAttribute("btnAction"..idx, "text", action.label)
         UI.setAttribute("btnAction"..idx, "active", "true")
@@ -6528,7 +6822,7 @@ local function updateActionButtons(actions)
       uiState.currentActionMap[idx] = action.actionId
     end
   end
-  log("updateActionButtons: Complete. currentActionMap="..tostring(JSON.encode(uiState.currentActionMap)))
+  VOC.log("updateActionButtons: Complete. currentActionMap="..tostring(JSON.encode(uiState.currentActionMap)))
 end
 
 -- Forward declarations for UI functions
@@ -6638,18 +6932,20 @@ end
 
 -- Handle action button click
 function UI_VocationAction(params)
-  log("=== UI_VocationAction START ===")
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
+  if VOC.log then VOC.log("=== UI_VocationAction START ===") end
   
   -- Defensive check: ensure params exists
   if not params then
-    log("UI_VocationAction: ERROR - params is nil!")
+    VOC.log("UI_VocationAction: ERROR - params is nil!")
     safeBroadcastToColor("Error: Action parameters missing.", "White", {1,0.6,0.2})
     return false, "Params is nil"
   end
   
   -- Defensive check: ensure uiState exists
   if not uiState then
-    log("UI_VocationAction: ERROR - uiState is nil!")
+    VOC.log("UI_VocationAction: ERROR - uiState is nil!")
     safeBroadcastToColor("Error: UI state not initialized.", "White", {1,0.6,0.2})
     return false, "uiState is nil"
   end
@@ -6657,27 +6953,27 @@ function UI_VocationAction(params)
   params = params or {}
   local originalColor = params.playerColor
   local color = normalizeColor(params.playerColor)
-  log("UI_VocationAction: playerColor="..tostring(originalColor)..", normalized="..tostring(color))
-  log("UI_VocationAction: previewedVocation="..tostring(uiState.previewedVocation)..", previewedVocationOwner="..tostring(uiState.previewedVocationOwner))
+  VOC.log("UI_VocationAction: playerColor="..tostring(originalColor)..", normalized="..tostring(color))
+  VOC.log("UI_VocationAction: previewedVocation="..tostring(uiState.previewedVocation)..", previewedVocationOwner="..tostring(uiState.previewedVocationOwner))
   
   -- For White (spectator/host): find which vocation is being viewed
   -- White stays as White for bypass checks, but we track the actual player for effects
   local effectsTarget = nil  -- The actual player who receives effects
   
   if color == "White" then
-    log("UI_VocationAction: White player detected - finding vocation owner")
+    VOC.log("UI_VocationAction: White player detected - finding vocation owner")
     
     -- FIRST PRIORITY: Use the tracked owner from uiState (set when showSummaryUI was called)
     if uiState.previewedVocationOwner then
       effectsTarget = uiState.previewedVocationOwner
-      log("UI_VocationAction: Using tracked vocation owner: "..tostring(effectsTarget))
+      VOC.log("UI_VocationAction: Using tracked vocation owner: "..tostring(effectsTarget))
     -- Second check: if viewing a specific player's vocation, find who owns it
     elseif uiState.previewedVocation then
       -- Find who owns this vocation (only one player can own each vocation)
       for _, c in ipairs(COLORS) do
         if state.vocations[c] == uiState.previewedVocation then
           effectsTarget = c
-          log("UI_VocationAction: Found vocation owner via search: "..tostring(c))
+          VOC.log("UI_VocationAction: Found vocation owner via search: "..tostring(c))
           break
         end
       end
@@ -6686,7 +6982,7 @@ function UI_VocationAction(params)
     -- Fallback: use active turn color
     if not effectsTarget then
       effectsTarget = getActiveTurnColor()
-      log("UI_VocationAction: Using active turn color as fallback: "..tostring(effectsTarget))
+      VOC.log("UI_VocationAction: Using active turn color as fallback: "..tostring(effectsTarget))
     end
     
     -- Fallback: use first player with a vocation
@@ -6694,20 +6990,20 @@ function UI_VocationAction(params)
       for _, c in ipairs(COLORS) do
         if state.vocations[c] then
           effectsTarget = c
-          log("UI_VocationAction: Using first vocation owner as fallback: "..tostring(c))
+          VOC.log("UI_VocationAction: Using first vocation owner as fallback: "..tostring(c))
           break
         end
       end
     end
     
     if not effectsTarget then
-      log("UI_VocationAction: White player, no vocation owner found")
+      VOC.log("UI_VocationAction: White player, no vocation owner found")
       safeBroadcastToColor("No vocation owner found. Assign a vocation to a player first.", "White", {1,0.6,0.2})
       return false, "No vocation owner"
     end
     
     -- White stays White for bypass, effects go to the actual player
-    log("UI_VocationAction: ✓ White testing mode: color=White (bypass), effectsTarget="..tostring(effectsTarget))
+    VOC.log("UI_VocationAction: ✓ White testing mode: color=White (bypass), effectsTarget="..tostring(effectsTarget))
     params.effectsTarget = effectsTarget
     
     -- Set bypass flag (check uiState exists first)
@@ -6719,57 +7015,57 @@ function UI_VocationAction(params)
         -- Defensive: check uiState still exists in callback
         if uiState then
           uiState.testingBypassActive = false
-          log("UI_VocationAction: Cleared testing bypass flag after action")
+          VOC.log("UI_VocationAction: Cleared testing bypass flag after action")
         else
-          log("UI_VocationAction: WARNING - uiState is nil in Wait.time callback")
+          VOC.log("UI_VocationAction: WARNING - uiState is nil in Wait.time callback")
         end
       end, 5)  -- Increased delay to allow interaction to complete
     else
-      log("UI_VocationAction: WARNING - uiState is nil, cannot set testing bypass flag")
+      VOC.log("UI_VocationAction: WARNING - uiState is nil, cannot set testing bypass flag")
     end
   elseif not color then
     color = getActorColor()
-    log("UI_VocationAction: Fallback to getActorColor: "..tostring(color))
+    VOC.log("UI_VocationAction: Fallback to getActorColor: "..tostring(color))
   end
   
   -- Pass color to action functions
-  log("UI_VocationAction: params.color="..tostring(color)..", effectsTarget="..tostring(params.effectsTarget or "none"))
+  VOC.log("UI_VocationAction: params.color="..tostring(color)..", effectsTarget="..tostring(params.effectsTarget or "none"))
   params.color = color
   
   if not color then
-    log("UI_VocationAction: Invalid color after all checks")
+    VOC.log("UI_VocationAction: Invalid color after all checks")
     safeBroadcastToColor("Invalid player color. Cannot execute action.", params.playerColor or "White", {1,0.6,0.2})
     return false, "Invalid color"
   end
   
-  log("UI_VocationAction: Final color="..tostring(color))
+  VOC.log("UI_VocationAction: Final color="..tostring(color))
   
   local buttonIndex = tonumber(params.buttonIndex)
   if not buttonIndex or buttonIndex < 1 or buttonIndex > 5 then
-    log("UI_VocationAction: Invalid buttonIndex="..tostring(params.buttonIndex))
+    VOC.log("UI_VocationAction: Invalid buttonIndex="..tostring(params.buttonIndex))
     safeBroadcastToColor("Invalid action button.", color, {1,0.6,0.2})
     return false, "Invalid button index"
   end
   
-  log("UI_VocationAction: buttonIndex="..tostring(buttonIndex))
-  log("UI_VocationAction: currentActionMap="..tostring(JSON and JSON.encode(uiState.currentActionMap) or "JSON not available"))
+  VOC.log("UI_VocationAction: buttonIndex="..tostring(buttonIndex))
+  VOC.log("UI_VocationAction: currentActionMap="..tostring(JSON and JSON.encode(uiState.currentActionMap) or "JSON not available"))
   
   if not uiState.currentActionMap then
-    log("UI_VocationAction: ERROR - currentActionMap is nil!")
+    VOC.log("UI_VocationAction: ERROR - currentActionMap is nil!")
     safeBroadcastToColor("Action map not initialized. Please try reopening the vocation UI.", color, {1,0.6,0.2})
     return false, "Action map is nil"
   end
   
   local actionId = uiState.currentActionMap[buttonIndex]
-  log("UI_VocationAction: actionId="..tostring(actionId))
+  VOC.log("UI_VocationAction: actionId="..tostring(actionId))
   
   if not actionId then
-    log("UI_VocationAction: No actionId found for button "..tostring(buttonIndex))
+    VOC.log("UI_VocationAction: No actionId found for button "..tostring(buttonIndex))
     safeBroadcastToColor("This action is not available. Button "..tostring(buttonIndex).." has no action mapped.", color, {1,0.6,0.2})
     return false, "No action for button "..buttonIndex
   end
   
-  log("UI_VocationAction: Executing action "..tostring(actionId).." for "..tostring(color))
+  VOC.log("UI_VocationAction: Executing action "..tostring(actionId).." for "..tostring(color))
   
   -- Close the vocation explanation UI so player can see the die roll
   -- Use pcall to safely call hideSummaryUI in case of scoping issues
@@ -6801,11 +7097,13 @@ end
 -- Called by Event Engine when a player chooses a vocation side on a Vocation Event card.
 -- params: { playerColor, actionId }
 function RunVocationEventCardAction(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then print("[VOC_CTRL][FATAL] VOC namespace missing in this chunk") return false, "VOC nil" end
   if not params or not params.playerColor or not params.actionId then
     pcall(function() broadcastToAll("Vocation Event: missing playerColor or actionId.", {1,0.6,0.2}) end)
     return false, "Missing params"
   end
-  local color = normalizeColor(params.playerColor)
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.playerColor)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.playerColor))
   if not color then
     pcall(function() broadcastToAll("Vocation Event: invalid player color.", {1,0.6,0.2}) end)
     return false, "Invalid color"
@@ -6843,11 +7141,11 @@ end
 -- Define hideSummaryUI (forward-declared earlier)
 hideSummaryUI = function()
   if not UI then 
-    log("hideSummaryUI: UI is nil")
+    VOC.log("hideSummaryUI: UI is nil")
     return 
   end
   pcall(function()
-    log("hideSummaryUI: Setting vocationSummaryPanel active=false")
+    VOC.log("hideSummaryUI: Setting vocationSummaryPanel active=false")
     UI.setAttribute("vocationSummaryPanel", "active", "false")
     UI.setAttribute("selectionCardPanel", "active", "false")
   end)
@@ -6858,23 +7156,23 @@ hideSummaryUI = function()
     uiState.previewedVocation = nil
     uiState.previewedVocationOwner = nil
   else
-    log("hideSummaryUI: WARNING - uiState is nil, cannot clear state")
+    VOC.log("hideSummaryUI: WARNING - uiState is nil, cannot clear state")
   end
 end
 
 -- Hide the Vocation Selection UI panel
 local function hideSelectionUI()
   if not UI then 
-    log("hideSelectionUI: UI is nil")
+    VOC.log("hideSelectionUI: UI is nil")
     return 
   end
   pcall(function()
-    log("hideSelectionUI: Setting vocationSelectionPanel active=false")
+    VOC.log("hideSelectionUI: Setting vocationSelectionPanel active=false")
     UI.setAttribute("vocationSelectionPanel", "active", "false")
     -- Also hide overlay to completely close UI
     UI.setAttribute("vocationOverlay", "active", "false")
     local verify = UI.getAttribute("vocationSelectionPanel", "active")
-    log("hideSelectionUI: Verified active=" .. tostring(verify))
+    VOC.log("hideSelectionUI: Verified active=" .. tostring(verify))
   end)
   uiState.currentScreen = nil
 end
@@ -6899,7 +7197,7 @@ end
 -- Show the Vocation Selection UI panel
 local function showSelectionUI(color, points, showSciencePointsLabelParam)
   if not UI then
-    log("ERROR: UI system not available - UI is nil. Check that VocationsUI_Global.xml is in Global → UI tab.")
+    VOC.log("ERROR: UI system not available - UI is nil. Check that VocationsUI_Global.xml is in Global → UI tab.")
     broadcastToAll("⚠️ UI system not available. Check that VocationsUI_Global.xml is in Global → UI tab.", {1, 0.5, 0.2})
     return false
   end
@@ -6922,12 +7220,12 @@ local function showSelectionUI(color, points, showSciencePointsLabelParam)
     
     if not testOk or testAttr == nil then
       -- Panel doesn't exist - UI XML not loaded!
-      log("ERROR: Panel 'vocationSelectionPanel' not found! UI XML may not be loaded in Global → UI tab.")
-      log("ERROR: testOk=" .. tostring(testOk) .. ", testAttr=" .. tostring(testAttr) .. ", testErr=" .. tostring(testErr))
+      VOC.log("ERROR: Panel 'vocationSelectionPanel' not found! UI XML may not be loaded in Global → UI tab.")
+      VOC.log("ERROR: testOk=" .. tostring(testOk) .. ", testAttr=" .. tostring(testAttr) .. ", testErr=" .. tostring(testErr))
       error("UI panel 'vocationSelectionPanel' not found. Please check that VocationsUI_Global.xml is pasted into Global → UI tab.")
     end
     
-    log("DEBUG: Panel exists! Current active state: " .. tostring(testAttr))
+    VOC.log("DEBUG: Panel exists! Current active state: " .. tostring(testAttr))
     
     -- CRITICAL: Verify overlay exists before activating
     local overlayTest = nil
@@ -6936,19 +7234,19 @@ local function showSelectionUI(color, points, showSciencePointsLabelParam)
     end)
     
     if not overlayTestOk or overlayTest == nil then
-      log("ERROR: Overlay 'vocationOverlay' not found! UI XML structure may be incorrect.")
+      VOC.log("ERROR: Overlay 'vocationOverlay' not found! UI XML structure may be incorrect.")
       error("Overlay 'vocationOverlay' not found. Please check VocationsUI_Global.xml structure.")
     end
     
-    log("DEBUG: Overlay found! Current active state: " .. tostring(overlayTest))
+    VOC.log("DEBUG: Overlay found! Current active state: " .. tostring(overlayTest))
     
     -- Show overlay first (contains Cancel button and all panels)
     UI.setAttribute("vocationOverlay", "active", "true")
-    log("DEBUG: Overlay activated")
+    VOC.log("DEBUG: Overlay activated")
     
     -- Set panel to active
     UI.setAttribute("vocationSelectionPanel", "active", "true")
-    log("DEBUG: Selection panel activated")
+    VOC.log("DEBUG: Selection panel activated")
     
     -- Hide other panels
     UI.setAttribute("vocationSummaryPanel", "active", "false")
@@ -6957,7 +7255,7 @@ local function showSelectionUI(color, points, showSciencePointsLabelParam)
     -- Verify it was set
     local verifyOverlay = UI.getAttribute("vocationOverlay", "active")
     local verifyAttr = UI.getAttribute("vocationSelectionPanel", "active")
-    log("DEBUG: Overlay active=" .. tostring(verifyOverlay) .. ", Panel active=" .. tostring(verifyAttr))
+    VOC.log("DEBUG: Overlay active=" .. tostring(verifyOverlay) .. ", Panel active=" .. tostring(verifyAttr))
     
     -- Update subtitle: Adult start = "Science Points: x"; Youth (round 1 or round 6) = Knowledge and Skill
     -- Use param from TurnController when starting selection (reliable); fallback to API if not provided
@@ -6981,7 +7279,7 @@ local function showSelectionUI(color, points, showSciencePointsLabelParam)
       UI.setAttribute("selectionSciencePoints", "text", "Science Points: " .. tostring(sciencePoints))
       UI.setAttribute("selectionSciencePoints", "active", "true")
       UI.setAttribute("selectionKnowledgeSkillLine", "active", "false")
-      log("DEBUG: Set subtitle to: Player: " .. color .. " | Science Points=" .. tostring(sciencePoints))
+      VOC.log("DEBUG: Set subtitle to: Player: " .. color .. " | Science Points=" .. tostring(sciencePoints))
     else
       -- Youth (round 1 or round 6): show Knowledge • Skills on one line
       UI.setAttribute("selectionSciencePoints", "active", "false")
@@ -6996,7 +7294,7 @@ local function showSelectionUI(color, points, showSciencePointsLabelParam)
       end
       UI.setAttribute("selectionKnowledgeSkillLine", "text", "Knowledge: " .. tostring(k) .. "  •  Skills: " .. tostring(s))
       UI.setAttribute("selectionKnowledgeSkillLine", "active", "true")
-      log("DEBUG: Set subtitle to: Player: " .. color .. " | Knowledge=" .. tostring(k) .. " Skills=" .. tostring(s))
+      VOC.log("DEBUG: Set subtitle to: Player: " .. color .. " | Knowledge=" .. tostring(k) .. " Skills=" .. tostring(s))
     end
 
     -- Update button states (disable taken vocations)
@@ -7016,19 +7314,19 @@ local function showSelectionUI(color, points, showSciencePointsLabelParam)
         uiSet(btnId, "interactable", "false")
         -- Set a semi-transparent overlay effect instead of color
         UI.setAttribute(btnId, "opacity", "0.5")
-        log("DEBUG: Disabled button: " .. btnId)
+        VOC.log("DEBUG: Disabled button: " .. btnId)
       else
         -- For buttons with images, don't set color (it tints the image)
         -- Keep images natural by not setting color attribute
         uiSet(btnId, "interactable", "true")
         UI.setAttribute(btnId, "opacity", "1.0")
-        log("DEBUG: Enabled button: " .. btnId)
+        VOC.log("DEBUG: Enabled button: " .. btnId)
       end
     end
   end)
   
   if not ok then
-    log("ERROR: Failed to show selection UI: " .. tostring(err))
+    VOC.log("ERROR: Failed to show selection UI: " .. tostring(err))
     
     -- Check if error is about missing panel
     if tostring(err):find("not found") or tostring(err):find("nil") then
@@ -7048,9 +7346,9 @@ local function showSelectionUI(color, points, showSciencePointsLabelParam)
   Wait.time(function()
     if UI then
       local finalCheck = UI.getAttribute("vocationSelectionPanel", "active")
-      log("DEBUG: Final panel active check (after 0.1s): " .. tostring(finalCheck))
+      VOC.log("DEBUG: Final panel active check (after 0.1s): " .. tostring(finalCheck))
       if finalCheck ~= "true" then
-        log("WARNING: Panel active state is not 'true'! It is: " .. tostring(finalCheck))
+        VOC.log("WARNING: Panel active state is not 'true'! It is: " .. tostring(finalCheck))
         broadcastToAll("⚠️ UI panel may not be visible. Check UI XML is loaded in Global → UI tab.", {1, 0.5, 0.2})
       end
     end
@@ -7059,31 +7357,31 @@ local function showSelectionUI(color, points, showSciencePointsLabelParam)
   uiState.activeColor = color
   selectionState.activeColor = color  -- Also set selectionState for consistency
   uiState.currentScreen = "selection"
-  log("Selection UI shown for " .. color .. " (both uiState and selectionState set)")
+  VOC.log("Selection UI shown for " .. color .. " (both uiState and selectionState set)")
   return true
 end
 
 -- Show the Vocation Summary UI panel
 -- forColor: when viewer is White, use this color's level for action buttons (e.g. from clicked tile's board)
 local function showSummaryUI(color, vocation, previewOnly, forColor)
-  log("=== showSummaryUI CALLED ===")
-  log("color: " .. tostring(color) .. ", vocation: " .. tostring(vocation) .. ", previewOnly: " .. tostring(previewOnly) .. ", forColor: " .. tostring(forColor))
+  VOC.log("=== showSummaryUI CALLED ===")
+  VOC.log("color: " .. tostring(color) .. ", vocation: " .. tostring(vocation) .. ", previewOnly: " .. tostring(previewOnly) .. ", forColor: " .. tostring(forColor))
   
   if not UI then
-    log("ERROR: UI system not available - UI is nil")
+    VOC.log("ERROR: UI system not available - UI is nil")
     broadcastToAll("⚠️ UI system not available. Check Global UI XML.", {1, 0.3, 0.3})
     return false
   end
   
   color = normalizeColor(color)
   if not color or not vocation then 
-    log("ERROR: Invalid color or vocation. color=" .. tostring(color) .. ", vocation=" .. tostring(vocation))
+    VOC.log("ERROR: Invalid color or vocation. color=" .. tostring(color) .. ", vocation=" .. tostring(vocation))
     return false 
   end
   
   local vocData = VOCATION_DATA[vocation]
   if not vocData then
-    log("ERROR: No data for vocation: " .. tostring(vocation))
+    VOC.log("ERROR: No data for vocation: " .. tostring(vocation))
     return false
   end
   
@@ -7091,7 +7389,7 @@ local function showSummaryUI(color, vocation, previewOnly, forColor)
   local level2 = vocData.levels[2]
   
   if not level1 then
-    log("ERROR: No Level 1 data for vocation: " .. tostring(vocation))
+    VOC.log("ERROR: No Level 1 data for vocation: " .. tostring(vocation))
     return false
   end
   
@@ -7119,34 +7417,34 @@ local function showSummaryUI(color, vocation, previewOnly, forColor)
   -- Also check if the viewer's vocation matches (in case they're viewing their own)
   if not ownerColor and state.vocations[viewerColor] == vocation then
     ownerColor = viewerColor
-    log("showSummaryUI: Viewer owns this vocation: "..tostring(viewerColor))
+    VOC.log("showSummaryUI: Viewer owns this vocation: "..tostring(viewerColor))
   end
   
   local ok, err = pcall(function()
-    log("showSummaryUI: Setting UI attributes...")
+    VOC.log("showSummaryUI: Setting UI attributes...")
     
     -- First, verify panels exist
     local testOk, testAttr = pcall(function()
       return UI.getAttribute("vocationSummaryPanel", "active")
     end)
     if not testOk or testAttr == nil then
-      log("ERROR: Panel 'vocationSummaryPanel' not found! Check UI XML.")
+      VOC.log("ERROR: Panel 'vocationSummaryPanel' not found! Check UI XML.")
       broadcastToAll("⚠️ UI panel not found. Check Global → UI tab.", {1, 0.3, 0.3})
       error("Panel 'vocationSummaryPanel' not found")
     end
-    log("showSummaryUI: Panel exists, current active state: " .. tostring(testAttr))
+    VOC.log("showSummaryUI: Panel exists, current active state: " .. tostring(testAttr))
     
     -- Show overlay if not already shown
     UI.setAttribute("vocationOverlay", "active", "true")
-    log("showSummaryUI: Overlay set to active")
+    VOC.log("showSummaryUI: Overlay set to active")
     
     -- Hide selection panel
     UI.setAttribute("vocationSelectionPanel", "active", "false")
-    log("showSummaryUI: Selection panel set to inactive")
+    VOC.log("showSummaryUI: Selection panel set to inactive")
     
     -- Show summary panel
     UI.setAttribute("vocationSummaryPanel", "active", "true")
-    log("showSummaryUI: Summary panel set to active")
+    VOC.log("showSummaryUI: Summary panel set to active")
     
     -- Hide vocation title text so only the explanation image and buttons show (no "Public Servant" below)
     UI.setAttribute("summaryTitle", "text", vocData.name)
@@ -7159,9 +7457,9 @@ local function showSummaryUI(color, vocation, previewOnly, forColor)
     if imageUrl and imageUrl ~= "" then
       UI.setAttribute("summaryVocationImage", "image", imageUrl)
       UI.setAttribute("summaryVocationImage", "active", "true")
-      log("showSummaryUI: Set explanation image for " .. vocation)
+      VOC.log("showSummaryUI: Set explanation image for " .. vocation)
     else
-      log("WARNING: No image URL for vocation: " .. tostring(vocation))
+      VOC.log("WARNING: No image URL for vocation: " .. tostring(vocation))
       UI.setAttribute("summaryVocationImage", "active", "false")
     end
 
@@ -7192,23 +7490,23 @@ local function showSummaryUI(color, vocation, previewOnly, forColor)
       UI.setAttribute("btnConfirm", "color", "#4a90e2")
     end
     
-    log("showSummaryUI: ownerColor="..tostring(ownerColor)..", viewerColor="..tostring(viewerColor)..", previewOnly="..tostring(previewOnly)..", vocation="..tostring(vocation))
+    VOC.log("showSummaryUI: ownerColor="..tostring(ownerColor)..", viewerColor="..tostring(viewerColor)..", previewOnly="..tostring(previewOnly)..", vocation="..tostring(vocation))
     if viewerColor then
-      log("showSummaryUI: state.vocations["..tostring(viewerColor).."]="..tostring(state.vocations[viewerColor]))
-      log("showSummaryUI: state.levels["..tostring(viewerColor).."]="..tostring(state.levels[viewerColor] or "nil"))
+      VOC.log("showSummaryUI: state.vocations["..tostring(viewerColor).."]="..tostring(state.vocations[viewerColor]))
+      VOC.log("showSummaryUI: state.levels["..tostring(viewerColor).."]="..tostring(state.levels[viewerColor] or "nil"))
     end
     
     -- "Show explanation" (read-only): hide Back/Confirm, show Exit.
     -- Selection / other flows: show Back/Confirm, hide Exit.
-    log("showSummaryUI: previewOnly="..tostring(previewOnly))
+    VOC.log("showSummaryUI: previewOnly="..tostring(previewOnly))
     if previewOnly then
       UI.setAttribute("actionButtons", "active", "false")
       UI.setAttribute("btnExit", "active", "true")
-      log("showSummaryUI: Preview mode - hiding actionButtons (Back/Confirm), showing Exit")
+      VOC.log("showSummaryUI: Preview mode - hiding actionButtons (Back/Confirm), showing Exit")
     else
       UI.setAttribute("actionButtons", "active", "true")
       UI.setAttribute("btnExit", "active", "false")
-      log("showSummaryUI: Selection mode - showing actionButtons (Back/Confirm), hiding Exit")
+      VOC.log("showSummaryUI: Selection mode - showing actionButtons (Back/Confirm), hiding Exit")
     end
 
     -- Configure vocation action buttons:
@@ -7225,15 +7523,15 @@ local function showSummaryUI(color, vocation, previewOnly, forColor)
       if forColor and state.levels and state.levels[forColor] then
         levelToUse = state.levels[forColor] or 1
         shouldShowActions = true
-        log("showSummaryUI: White viewer - using forColor "..tostring(forColor).." level="..tostring(levelToUse))
+        VOC.log("showSummaryUI: White viewer - using forColor "..tostring(forColor).." level="..tostring(levelToUse))
       elseif ownerColor then
         levelToUse = state.levels[ownerColor] or 1
         shouldShowActions = true
-        log("showSummaryUI: White viewer - using owner "..tostring(ownerColor).." level="..tostring(levelToUse))
+        VOC.log("showSummaryUI: White viewer - using owner "..tostring(ownerColor).." level="..tostring(levelToUse))
       else
         levelToUse = 3
         shouldShowActions = true
-        log("showSummaryUI: White viewer - no forColor/owner, showing level 3 for testing")
+        VOC.log("showSummaryUI: White viewer - no forColor/owner, showing level 3 for testing")
       end
     elseif ownerColor then
       -- Check if viewer is the owner OR if no owner color was found but viewer has this vocation
@@ -7242,12 +7540,12 @@ local function showSummaryUI(color, vocation, previewOnly, forColor)
         -- Owner viewing their own vocation - use VIEWER's level (the person at the screen)
         levelToUse = state.levels[viewerColor] or 1
         shouldShowActions = true
-        log("showSummaryUI: Owner viewing own vocation - level="..tostring(levelToUse).." (viewer="..tostring(viewerColor)..")")
+        VOC.log("showSummaryUI: Owner viewing own vocation - level="..tostring(levelToUse).." (viewer="..tostring(viewerColor)..")")
       else
-        log("showSummaryUI: Viewer is not owner - hiding buttons (owner="..tostring(ownerColor)..", viewer="..tostring(viewerColor)..")")
+        VOC.log("showSummaryUI: Viewer is not owner - hiding buttons (owner="..tostring(ownerColor)..", viewer="..tostring(viewerColor)..")")
       end
     else
-      log("showSummaryUI: No owner found - hiding buttons (viewer="..viewerColor..")")
+      VOC.log("showSummaryUI: No owner found - hiding buttons (viewer="..viewerColor..")")
     end
     
     if shouldShowActions then
@@ -7255,7 +7553,7 @@ local function showSummaryUI(color, vocation, previewOnly, forColor)
       -- Public Servant: hide perk buttons once they already have that card on their board
       if vocation == VOC_PUBLIC_SERVANT and ownerColor then
         local shopEngine = nil
-        for _, o in ipairs(getAllObjects()) do
+        for _, o in ipairs(VOC.getAllObjectsSafe()) do
           if o and o.hasTag and o.hasTag("WLB_SHOP_ENGINE") and o.call then shopEngine = o break end
         end
         if shopEngine then
@@ -7279,13 +7577,13 @@ local function showSummaryUI(color, vocation, previewOnly, forColor)
           end
         end
       end
-      log("showSummaryUI: getVocationActions returned "..#actions.." actions for vocation="..tostring(vocation)..", level="..levelToUse)
+      VOC.log("showSummaryUI: getVocationActions returned "..#actions.." actions for vocation="..tostring(vocation)..", level="..levelToUse)
       updateActionButtons(actions)
       UI.setAttribute("vocationActionButtons", "active", "true")
-      log("showSummaryUI: Showing action buttons for "..viewerColor.." (vocation="..tostring(vocation)..", level="..levelToUse..", actions="..#actions..")")
+      VOC.log("showSummaryUI: Showing action buttons for "..viewerColor.." (vocation="..tostring(vocation)..", level="..levelToUse..", actions="..#actions..")")
     else
       UI.setAttribute("vocationActionButtons", "active", "false")
-      log("showSummaryUI: Hiding action buttons (viewer="..viewerColor..", owner="..tostring(ownerColor)..")")
+      VOC.log("showSummaryUI: Hiding action buttons (viewer="..viewerColor..", owner="..tostring(ownerColor)..")")
     end
 
     -- Public Servant: show tax waiver status (non-clickable text). Add a Text element in Global UI with id "summaryTaxWaiverStatus".
@@ -7328,18 +7626,18 @@ local function showSummaryUI(color, vocation, previewOnly, forColor)
     -- Verify the panel is actually active (with delay to allow UI to update)
     Wait.time(function()
       local verify = UI.getAttribute("vocationSummaryPanel", "active")
-      log("showSummaryUI: Verified summary panel active=" .. tostring(verify) .. " (after 0.1s)")
+      VOC.log("showSummaryUI: Verified summary panel active=" .. tostring(verify) .. " (after 0.1s)")
       if verify ~= "true" then
-        log("WARNING: Summary panel active state is not 'true'! It is: " .. tostring(verify))
+        VOC.log("WARNING: Summary panel active state is not 'true'! It is: " .. tostring(verify))
         broadcastToAll("⚠️ Summary panel may not be visible. Check UI XML.", {1, 0.7, 0.2})
       else
-        log("✅ Summary panel is ACTIVE - should be visible now!")
+        VOC.log("✅ Summary panel is ACTIVE - should be visible now!")
       end
     end, 0.1)
   end)
   
   if not ok then
-    log("ERROR: showSummaryUI pcall failed: " .. tostring(err))
+    VOC.log("ERROR: showSummaryUI pcall failed: " .. tostring(err))
     broadcastToAll("❌ showSummaryUI error: " .. tostring(err), {1, 0.3, 0.3})
     return false
   end
@@ -7348,7 +7646,7 @@ local function showSummaryUI(color, vocation, previewOnly, forColor)
   uiState.previewedVocation = vocation
   -- Store the OWNER's color (who actually owns this vocation), not the viewer
   uiState.previewedVocationOwner = ownerColor  -- ownerColor was determined earlier
-  log("Summary UI shown for viewer=" .. color .. ", owner=" .. tostring(ownerColor) .. ", vocation=" .. vocation)
+  VOC.log("Summary UI shown for viewer=" .. color .. ", owner=" .. tostring(ownerColor) .. ", vocation=" .. vocation)
   return true
 end
 
@@ -7359,8 +7657,10 @@ end
 -- =========================================================
 
 function findSummaryTileForVocation(vocation)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return nil end
   local summaryTag = "WLB_VOC_SUMMARY_" .. vocation
-  local allObjects = getAllObjects()
+  local allObjects = VOC.getAllObjectsSafe and VOC.getAllObjectsSafe() or {}
   
   for _, obj in ipairs(allObjects) do
     if obj and obj.hasTag and
@@ -7374,13 +7674,13 @@ end
 
 local function findAllLevel1Tiles()
   local tiles = {}
-  local allObjects = getAllObjects()
+  local allObjects = VOC.getAllObjectsSafe()
   local totalChecked = 0
   local foundWithBaseTag = 0
   local foundWithLevelTag = 0
   local excludedWithColorTag = 0
   
-  log("Searching for Level 1 vocation tiles...")
+  VOC.log("Searching for Level 1 vocation tiles...")
   
   for _, obj in ipairs(allObjects) do
     if obj and obj.hasTag then
@@ -7405,19 +7705,19 @@ local function findAllLevel1Tiles()
           if not hasColorTag then
             table.insert(tiles, obj)
             local name = obj.getName and obj.getName() or "Unknown"
-            log("Found available Level 1 tile: " .. name)
+            VOC.log("Found available Level 1 tile: " .. name)
           end
         end
       end
     end
   end
   
-  log("Tile search results:")
-  log("  Total objects checked: " .. totalChecked)
-  log("  Objects with WLB_VOCATION_TILE tag: " .. foundWithBaseTag)
-  log("  Objects with WLB_VOC_LEVEL_1 tag: " .. foundWithLevelTag)
-  log("  Excluded (have color tag): " .. excludedWithColorTag)
-  log("  Available tiles found: " .. #tiles)
+  VOC.log("Tile search results:")
+  VOC.log("  Total objects checked: " .. totalChecked)
+  VOC.log("  Objects with WLB_VOCATION_TILE tag: " .. foundWithBaseTag)
+  VOC.log("  Objects with WLB_VOC_LEVEL_1 tag: " .. foundWithLevelTag)
+  VOC.log("  Excluded (have color tag): " .. excludedWithColorTag)
+  VOC.log("  Available tiles found: " .. #tiles)
   
   return tiles
 end
@@ -7429,11 +7729,11 @@ end
 
 local function positionSelectionTiles(tiles)
   if #tiles == 0 then 
-    log("No tiles to position")
+    VOC.log("No tiles to position")
     return 
   end
   
-  log("Positioning " .. #tiles .. " selection tiles in center")
+  VOC.log("Positioning " .. #tiles .. " selection tiles in center")
   
   -- Calculate starting X position to center the tiles
   local totalWidth = SELECTION_TILE_SPACING * (#tiles - 1)
@@ -7449,7 +7749,7 @@ local function positionSelectionTiles(tiles)
         z = SELECTION_AREA_CENTER.z
       }
       
-      log("Positioning tile " .. i .. " at " .. pos.x .. ", " .. pos.y .. ", " .. pos.z)
+      VOC.log("Positioning tile " .. i .. " at " .. pos.x .. ", " .. pos.y .. ", " .. pos.z)
       
       -- Use setPositionSmooth for animated movement
       tile.setPositionSmooth(pos, false, true)
@@ -7463,7 +7763,7 @@ local function positionSelectionTiles(tiles)
         pcall(function()
           if tile.is_face_down then 
             tile.flip() 
-            log("Flipped tile " .. i .. " face up")
+            VOC.log("Flipped tile " .. i .. " face up")
           end
         end)
       end
@@ -7471,31 +7771,33 @@ local function positionSelectionTiles(tiles)
       -- Small delay between positioning for smoother animation
       Wait.time(function() end, i * 0.1)
     else
-      log("Warning: Tile " .. i .. " is invalid or missing setPositionSmooth")
+      VOC.log("Warning: Tile " .. i .. " is invalid or missing setPositionSmooth")
     end
   end
   
-  log("Finished positioning " .. #tiles .. " tiles")
+  VOC.log("Finished positioning " .. #tiles .. " tiles")
 end
 
 -- =========================================================
 -- LEVEL 1 CARDS: place next to controller, return on cleanup
 -- =========================================================
 function VOC_ReturnLevel1Cards()
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return end
   for _, card in ipairs(selectionState.level1Cards or {}) do
     if card and not card.isDestroyed and card.clearContextMenu then
       pcall(function() card.clearContextMenu() end)
     end
   end
   for guid, pos in pairs(selectionState.level1OriginalPositions or {}) do
-    local card = getObjectFromGUID(guid)
+    local card = (VOC.getObjectFromGUID and VOC.getObjectFromGUID(guid)) or (getObjectFromGUID and getObjectFromGUID(guid))
     if card and card.setPositionSmooth and pos then
       pcall(function() card.setPositionSmooth(pos, false, true) end)
     end
   end
   selectionState.level1Cards = {}
   selectionState.level1OriginalPositions = {}
-  log("Level 1 cards returned")
+  if VOC.log then VOC.log("Level 1 cards returned") end
 end
 
 -- =========================================================
@@ -7513,11 +7815,12 @@ local VOC_SELECTION_BUTTONS = {
 }
 
 function VOC_ShowSelectionUI(color)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
   if not self then return false end
-
-  color = normalizeColor(color)
+  color = (VOC.normalizeColor and VOC.normalizeColor(color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(color)) or nil
   if not color then
-    log("Invalid color")
+    if VOC.log then VOC.log("Invalid color") end
     return false
   end
 
@@ -7529,7 +7832,7 @@ function VOC_ShowSelectionUI(color)
   selectionState.shownSummary = nil
   selectionState.shownExplanationCard = nil
 
-  log("Showing vocation selection menu (VOCATION_IMAGES + buttons) for " .. color)
+  if VOC.log then VOC.log("Showing vocation selection menu (VOCATION_IMAGES + buttons) for " .. color) end
 
   -- Title: who is choosing (high contrast, above vocation buttons)
   self.createButton({
@@ -7575,14 +7878,16 @@ function VOC_ShowSelectionUI(color)
     end
   end
 
-  log("Vocation selection menu: " .. buttonCount .. " vocation buttons")
+  if VOC.log then VOC.log("Vocation selection menu: " .. buttonCount .. " vocation buttons") end
   return true
 end
 
 -- Called when player picks a vocation from a Level 1 card (context menu)
 function VOC_ChoseFromCard(params)
-  local vocation = params.vocation
-  local color = normalizeColor(params.color)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return end
+  local vocation = params and params.vocation
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params and params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params and params.color)) or nil
   local activeColor = selectionState.activeColor
 
   if not activeColor or color ~= activeColor then
@@ -7591,7 +7896,7 @@ function VOC_ChoseFromCard(params)
   end
   if not vocation then return end
 
-  log("VOC_ChoseFromCard: " .. tostring(color) .. " chose " .. tostring(vocation))
+  if VOC.log then VOC.log("VOC_ChoseFromCard: " .. tostring(color) .. " chose " .. tostring(vocation)) end
 
   -- Show explanation card next to controller (no description text)
   if VOC_EXPLANATION_CARD_GUID[vocation] and VOC_EXPLANATION_CARD_GUID[vocation] ~= "" then
@@ -7629,9 +7934,9 @@ function VOC_ShowExplanationCard(vocation)
   local guid = VOC_EXPLANATION_CARD_GUID[vocation]
   if not guid or guid == "" then return false end
 
-  local card = getObjectFromGUID(guid)
+  local card = VOC.getObjectFromGUID(guid)
   if not card or not card.setPositionSmooth then
-    log("Explanation card not found for " .. vocation .. " (GUID: " .. tostring(guid) .. ")")
+    VOC.log("Explanation card not found for " .. vocation .. " (GUID: " .. tostring(guid) .. ")")
     return false
   end
 
@@ -7686,7 +7991,7 @@ function VOC_ShowExplanationCard(vocation)
     tooltip = "Return to vocation list"
   })
 
-  log("Showing explanation card for " .. vocation .. " (GUID: " .. guid .. ")")
+  VOC.log("Showing explanation card for " .. vocation .. " (GUID: " .. guid .. ")")
   return true
 end
 
@@ -7696,7 +8001,7 @@ function VOC_HideExplanationCard()
   card.setPositionSmooth(STORAGE_EXPLANATION, false, true)
   selectionState.shownExplanationCard = nil
   selectionState.shownVocation = nil
-  log("Explanation card returned to storage")
+  VOC.log("Explanation card returned to storage")
 end
 
 -- Show vocation explanation in a different way than summoning the physical card:
@@ -7705,11 +8010,11 @@ function VOC_ShowExplanationForPlayer(params)
   local vocation = params and params.vocation
   local color = normalizeColor(params and params.color)
   if not vocation or not color then
-    log("VOC_ShowExplanationForPlayer: missing vocation or color")
+    VOC.log("VOC_ShowExplanationForPlayer: missing vocation or color")
     return false
   end
   if not VOCATION_DATA[vocation] then
-    log("VOC_ShowExplanationForPlayer: unknown vocation " .. tostring(vocation))
+    VOC.log("VOC_ShowExplanationForPlayer: unknown vocation " .. tostring(vocation))
     return false
   end
   -- Prefer Global UI summary panel (on-screen, no physical card). When from "Show explanation" use previewOnly so only Exit is shown.
@@ -7718,7 +8023,7 @@ function VOC_ShowExplanationForPlayer(params)
     local forColor = params and params.forColor and normalizeColor(params.forColor)
     local ok = showSummaryUI(color, vocation, previewOnly, forColor)
     if ok then
-      log("VOC_ShowExplanationForPlayer: showed summary UI for " .. vocation .. " to " .. color)
+      VOC.log("VOC_ShowExplanationForPlayer: showed summary UI for " .. vocation .. " to " .. color)
       return true
     end
   end
@@ -7727,7 +8032,7 @@ function VOC_ShowExplanationForPlayer(params)
   local perksText = getPerksText(vocation)
   safeBroadcastToColor(vocationName, color, {0.4, 0.6, 1})
   safeBroadcastToColor(perksText or "No data", color, {0.9, 0.9, 0.95})
-  log("VOC_ShowExplanationForPlayer: broadcast perks text to " .. color)
+  VOC.log("VOC_ShowExplanationForPlayer: broadcast perks text to " .. color)
   return true
 end
 
@@ -7743,7 +8048,7 @@ function VOC_CardButtonShowExplanation(obj, color, alt_click)
   color = normalizeColor(color)
   if not color then return end
   local ctrl = nil
-  local list = getAllObjects()
+  local list = VOC.getAllObjectsSafe()
   for _, o in ipairs(list) do
     if o and o.hasTag and o.hasTag("WLB_VOCATIONS_CTRL") then ctrl = o; break end
   end
@@ -7867,12 +8172,14 @@ function VOC_ShowPerksOnController(vocation)
     tooltip = "Return to vocation list"
   })
 
-  log("Showing perks for " .. vocation)
+  VOC.log("Showing perks for " .. vocation)
   return true
 end
 
 -- Called from "Go Back" button: return to vocation grid
 function VOC_BackToSelection(obj, color, alt_click)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return end
   if selectionState.shownExplanationCard then
     VOC_HideExplanationCard()
   end
@@ -7881,7 +8188,7 @@ function VOC_BackToSelection(obj, color, alt_click)
   local activeColor = selectionState.activeColor
   if not activeColor then return end
   VOC_ShowSelectionUI(activeColor)
-  log("Back to selection grid for " .. activeColor)
+  if VOC.log then VOC.log("Back to selection grid for " .. activeColor) end
 end
 
 -- =========================================================
@@ -7889,7 +8196,7 @@ end
 -- =========================================================
 local function showSelectionButtons(color)
   if not self or not self.clearButtons then
-    log("Error: Cannot show buttons - self is invalid")
+    VOC.log("Error: Cannot show buttons - self is invalid")
     return
   end
   
@@ -7898,7 +8205,7 @@ local function showSelectionButtons(color)
   -- For UI mode, we don't need to clear controller buttons
   -- self.clearButtons()  -- DISABLED: This was removing debug buttons
   
-  log("Showing selection buttons for " .. color)
+  VOC.log("Showing selection buttons for " .. color)
   
   -- Title button
   self.createButton({
@@ -7954,14 +8261,14 @@ local function showSelectionButtons(color)
         tooltip = "Click to view " .. vocBtn.name .. " details and choose"
       })
       
-      log("Created button for: " .. vocBtn.name .. " (" .. vocBtn.id .. ")")
+      VOC.log("Created button for: " .. vocBtn.name .. " (" .. vocBtn.id .. ")")
       buttonCount = buttonCount + 1
     else
-      log("Skipping " .. vocBtn.name .. " - already taken")
+      VOC.log("Skipping " .. vocBtn.name .. " - already taken")
     end
   end
   
-  log("Finished creating " .. buttonCount .. " vocation buttons")
+  VOC.log("Finished creating " .. buttonCount .. " vocation buttons")
 end
 
 function VOC_StartSelection(params)
@@ -7974,7 +8281,7 @@ function VOC_StartSelection(params)
   
   -- Check if already has vocation
   if state.vocations[color] then
-    log("Player " .. color .. " already has a vocation")
+    VOC.log("Player " .. color .. " already has a vocation")
     return false, "Already has vocation"
   end
   
@@ -8002,7 +8309,7 @@ function VOC_StartSelection(params)
           safeBroadcastToColor("Choose your vocation from the on-screen menu!", broadcastColor, {0.3, 1, 0.3})
         end)
       end
-      log("Global UI selection started for " .. color)
+      VOC.log("Global UI selection started for " .. color)
       return true
     end
   end
@@ -8019,7 +8326,7 @@ function VOC_StartSelection(params)
   else
     broadcastToAll(color .. ": Choose your vocation! Click a button on the Vocations Controller.", {0.3, 1, 0.3})
   end
-  log("Button Selection started for " .. color)
+  VOC.log("Button Selection started for " .. color)
   return true
 end
 
@@ -8051,21 +8358,22 @@ function VOC_SelectNGOWorker(obj, color, alt_click)
 end
 
 function handleVocationButtonClick(vocation, clickerColor)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return end
   local selectingColor = selectionState.activeColor
   if not selectingColor then
-    log("No active selection - button clicked out of turn")
+    if VOC.log then VOC.log("No active selection - button clicked out of turn") end
     return
   end
   
-  -- Verify it's the correct player clicking
-  clickerColor = normalizeColor(clickerColor)
+  clickerColor = (VOC.normalizeColor and VOC.normalizeColor(clickerColor)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(clickerColor)) or nil
   if clickerColor ~= selectingColor then
-    log("Wrong player clicked. Active: " .. tostring(selectingColor) .. ", Clicked: " .. tostring(clickerColor))
+    if VOC.log then VOC.log("Wrong player clicked. Active: " .. tostring(selectingColor) .. ", Clicked: " .. tostring(clickerColor)) end
     broadcastToAll("Only " .. selectingColor .. " can choose a vocation right now.", {1, 0.5, 0.2})
     return
   end
   
-  log("Vocation button clicked: " .. vocation .. " by " .. tostring(clickerColor))
+  if VOC.log then VOC.log("Vocation button clicked: " .. vocation .. " by " .. tostring(clickerColor)) end
   
   -- 1) Prefer full explanation card by GUID (e.g. de1ca1 for Gangster)
   if VOC_EXPLANATION_CARD_GUID[vocation] and VOC_EXPLANATION_CARD_GUID[vocation] ~= "" then
@@ -8098,7 +8406,7 @@ function VOC_SelectionTileClicked(obj, color, alt_click)
   end
   
   if not vocation then
-    log("Could not determine vocation from tile")
+    VOC.log("Could not determine vocation from tile")
     return
   end
   
@@ -8111,7 +8419,7 @@ function VOC_ShowSummary(params)
   local color = normalizeColor(params.color)
   
   if not vocation or not color then
-    log("Invalid parameters for ShowSummary")
+    VOC.log("Invalid parameters for ShowSummary")
     return false
   end
   
@@ -8123,7 +8431,7 @@ function VOC_ShowSummary(params)
   -- Find summary tile
   local summaryTile = findSummaryTileForVocation(vocation)
   if not summaryTile then
-    log("Summary tile not found for " .. vocation)
+    VOC.log("Summary tile not found for " .. vocation)
     local broadcastColor = normalizeColor(color)
     if broadcastColor then
       pcall(function()
@@ -8185,7 +8493,7 @@ function VOC_ShowSummary(params)
   selectionState.shownSummary = summaryTile
   selectionState.shownVocation = vocation
   
-  log("Summary shown for " .. vocation .. " to " .. color)
+  VOC.log("Summary shown for " .. vocation .. " to " .. color)
   
   return true
 end
@@ -8196,7 +8504,7 @@ function VOC_ConfirmSelection(obj, color, alt_click)
   local selectingColor = selectionState.activeColor
   
   if not vocation or not selectingColor then
-    log("Warning: Could not get vocation from selection state")
+    VOC.log("Warning: Could not get vocation from selection state")
     broadcastToAll("Error: Could not confirm selection. Please try again.", {1, 0.2, 0.2})
     return
   end
@@ -8230,16 +8538,10 @@ function VOC_ConfirmSelection(obj, color, alt_click)
   end
 end
 
+-- CHUNK-SAFE: delegate to VOC.findTurnCtrl (getAllObjects may be nil in some TTS chunks)
 function findTurnController()
-  local allObjects = getAllObjects()
-  for _, obj in ipairs(allObjects) do
-    if obj and obj.hasTag and (obj.hasTag("WLB_TURN_CTRL") or obj.hasTag("WLB_TURN_CONTROLLER")) then
-      return obj
-    end
-  end
-  return nil
+  return VOC.findTurnCtrl()
 end
--- Chunk-safe: expose so getSciencePointsForColor etc. can reach it from any chunk
 if not _G.VOC_CTRL then _G.VOC_CTRL = {} end
 _G.VOC_CTRL.findTurnController = findTurnController
 
@@ -8269,7 +8571,7 @@ function VOC_HideSummary(obj, color, alt_click)
   selectionState.shownSummary = nil
   selectionState.shownVocation = nil
   
-  log("Summary hidden for " .. actualColor)
+  VOC.log("Summary hidden for " .. actualColor)
   
   return true
 end
@@ -8309,13 +8611,13 @@ function VOC_CleanupSelection(params)
   selectionState.selectionTiles = {}
   selectionState.shownVocation = nil
   
-  log("Selection cleaned up for " .. color)
+  VOC.log("Selection cleaned up for " .. color)
 
   -- Restore debug buttons so players can test again after selection or restart
   pcall(function()
     if createDebugButtons then
       createDebugButtons()
-      log("Debug buttons restored after cleanup")
+      VOC.log("Debug buttons restored after cleanup")
     end
   end)
   
@@ -8337,10 +8639,10 @@ end
 -- RECOVERY FUNCTION (For lost tiles)
 -- =========================================================
 function VOC_RecoverTiles()
-  log("Recovering vocation tiles...")
+  VOC.log("Recovering vocation tiles...")
   
   -- Find all Level 1 tiles (including those with color tags)
-  local allObjects = getAllObjects()
+  local allObjects = VOC.getAllObjectsSafe()
   local tiles = {}
   
   for _, obj in ipairs(allObjects) do
@@ -8349,7 +8651,7 @@ function VOC_RecoverTiles()
        obj.hasTag("WLB_VOC_LEVEL_1") then
       table.insert(tiles, obj)
       local name = obj.getName and obj.getName() or "Unknown"
-      log("Found tile: " .. name)
+      VOC.log("Found tile: " .. name)
     end
   end
   
@@ -8382,7 +8684,7 @@ function VOC_RecoverTiles()
       end
       
       local name = tile.getName and tile.getName() or "Tile " .. i
-      log("Recovered: " .. name .. " to " .. pos.x .. ", " .. pos.y .. ", " .. pos.z)
+      VOC.log("Recovered: " .. name .. " to " .. pos.x .. ", " .. pos.y .. ", " .. pos.z)
     end
   end
   
@@ -8437,13 +8739,13 @@ function UI_SelectVocation(player, value, id)
   -- NOTE: player may be a color string (new) or Player object (old/direct)
   player, value, id = unpackUIArgs(player, value, id)
   
-  log("=== UI_SelectVocation CALLED IN VOCATIONSCONTROLLER ===")
-  log("player/color: " .. tostring(player))
-  log("player type: " .. type(player))
-  log("value: " .. tostring(value))
-  log("id: " .. tostring(id))
-  log("uiState.activeColor: " .. tostring(uiState.activeColor))
-  log("selectionState.activeColor: " .. tostring(selectionState.activeColor))
+  VOC.log("=== UI_SelectVocation CALLED IN VOCATIONSCONTROLLER ===")
+  VOC.log("player/color: " .. tostring(player))
+  VOC.log("player type: " .. type(player))
+  VOC.log("value: " .. tostring(value))
+  VOC.log("id: " .. tostring(id))
+  VOC.log("uiState.activeColor: " .. tostring(uiState.activeColor))
+  VOC.log("selectionState.activeColor: " .. tostring(selectionState.activeColor))
   
   -- Extract color - handle both string (new) and Player object (old/direct)
   local color = nil
@@ -8456,22 +8758,22 @@ function UI_SelectVocation(player, value, id)
   end
   
   if not color or not id then
-    log("ERROR: Missing color or id. color=" .. tostring(color) .. ", id=" .. tostring(id))
+    VOC.log("ERROR: Missing color or id. color=" .. tostring(color) .. ", id=" .. tostring(id))
     return
   end
   
-  log("Normalized color: " .. color)
+  VOC.log("Normalized color: " .. color)
   
   -- Special handling for "White" (spectator) - try to use active color instead
   if color == "White" then
-    log("WARNING: Click detected from White (spectator). Attempting to use active color instead.")
+    VOC.log("WARNING: Click detected from White (spectator). Attempting to use active color instead.")
     color = selectionState.activeColor or uiState.activeColor
     if not color then
-      log("ERROR: No active selection and clicked as White spectator!")
+      VOC.log("ERROR: No active selection and clicked as White spectator!")
       broadcastToAll("⚠ Please sit at a player color seat to select a vocation.", {1, 0.5, 0.2})
       return
     end
-    log("Using active color instead: " .. color)
+    VOC.log("Using active color instead: " .. color)
   end
   
   -- Check if selection is active
@@ -8481,14 +8783,14 @@ function UI_SelectVocation(player, value, id)
     uiState = uiState or {}
     uiState.lastRejectReason = reason
     print("[VOC][REJECT] "..reason)
-    log("ERROR: No active selection! selectionState.activeColor=" .. tostring(selectionState.activeColor) .. ", uiState.activeColor=" .. tostring(uiState.activeColor))
+    VOC.log("ERROR: No active selection! selectionState.activeColor=" .. tostring(selectionState.activeColor) .. ", uiState.activeColor=" .. tostring(uiState.activeColor))
     broadcastToAll("⚠ Vocation selection is not active. Please start selection first.", {1, 0.5, 0.2})
     return false, reason
   end
   
   -- Verify it's the active player
   if color ~= activeColor then
-    log("UI_SelectVocation: Wrong player clicked. Active: " .. tostring(activeColor) .. ", Clicked: " .. color)
+    VOC.log("UI_SelectVocation: Wrong player clicked. Active: " .. tostring(activeColor) .. ", Clicked: " .. color)
     safeBroadcastToColor("⚠ It's not your turn to select a vocation! Active player: " .. tostring(activeColor), color, {1, 0.5, 0.2})
     return
   end
@@ -8497,7 +8799,7 @@ function UI_SelectVocation(player, value, id)
   -- Note: Button IDs in XML are like "btnPublicServant", "btnCelebrity", etc.
   local vocation = nil
   local idLower = string.lower(id or "")
-  log("Button ID (lowercase): " .. idLower)
+  VOC.log("Button ID (lowercase): " .. idLower)
   
   if idLower == "btnpublicservant" then 
     vocation = VOC_PUBLIC_SERVANT
@@ -8513,30 +8815,30 @@ function UI_SelectVocation(player, value, id)
     vocation = VOC_NGO_WORKER
   end
   if not vocation then
-    log("ERROR: Unknown button ID: " .. tostring(id) .. " (lowercase: " .. idLower .. ")")
+    VOC.log("ERROR: Unknown button ID: " .. tostring(id) .. " (lowercase: " .. idLower .. ")")
     safeBroadcastToColor("⚠ Unknown vocation button clicked. ID: " .. tostring(id), color, {1, 0.3, 0.3})
     return
   end
   
-  log("Mapped to vocation: " .. tostring(vocation))
+  VOC.log("Mapped to vocation: " .. tostring(vocation))
   
   -- Check if already taken
   for _, c in ipairs(COLORS) do
     if state.vocations[c] == vocation and c ~= color then
-      log("Vocation already taken by: " .. c)
+      VOC.log("Vocation already taken by: " .. c)
       safeBroadcastToColor("⚠ This vocation is already taken by " .. c .. "!", color, {1, 0.5, 0.2})
       return
     end
   end
   
   -- Show summary
-  log("Calling showSummaryUI for " .. color .. " -> " .. vocation)
+  VOC.log("Calling showSummaryUI for " .. color .. " -> " .. vocation)
   local ok = showSummaryUI(color, vocation)
   if ok then
-    log("showSummaryUI returned true - summary should be visible")
+    VOC.log("showSummaryUI returned true - summary should be visible")
     safeBroadcastToColor("✅ Showing vocation summary...", color, {0.3, 1, 0.3})
   else
-    log("ERROR: showSummaryUI returned false")
+    VOC.log("ERROR: showSummaryUI returned false")
     safeBroadcastToColor("❌ Failed to show vocation summary. Check logs.", color, {1, 0.3, 0.3})
   end
 end
@@ -8572,32 +8874,32 @@ function UI_ConfirmVocation(player, value, id)
   -- Special handling for "White" (spectator/host clicks via Global UI):
   -- treat it as the active selecting player so Confirm works in solo testing / hotseat.
   if color == "White" then
-    log("WARNING: Confirm click detected from White (spectator). Attempting to use active color instead.")
+    VOC.log("WARNING: Confirm click detected from White (spectator). Attempting to use active color instead.")
     color = activeColor
     if not color then
-      log("ERROR: Confirm clicked as White but no active color is set")
+      VOC.log("ERROR: Confirm clicked as White but no active color is set")
       broadcastToAll("⚠ Please sit at a player color seat (Yellow/Blue/Red/Green) to confirm.", {1, 0.5, 0.2})
       return
     end
-    log("Using active color instead for confirm: " .. tostring(color))
+    VOC.log("Using active color instead for confirm: " .. tostring(color))
   end
   
   if not color then return end
   
   -- Verify it's the active player (use combined active so 2nd player works when uiState was cleared on another object)
   if not activeColor then
-    log("UI_ConfirmVocation: No active selection (activeColor=nil). selectionState.activeColor=" .. tostring(selectionState.activeColor) .. " uiState.activeColor=" .. tostring(uiState.activeColor) .. " currentPickerColor=" .. tostring(state.currentPickerColor))
+    VOC.log("UI_ConfirmVocation: No active selection (activeColor=nil). selectionState.activeColor=" .. tostring(selectionState.activeColor) .. " uiState.activeColor=" .. tostring(uiState.activeColor) .. " currentPickerColor=" .. tostring(state.currentPickerColor))
     broadcastToAll("⚠ Vocation selection is not active. Please start selection first.", {1, 0.5, 0.2})
     return
   end
   if color ~= activeColor then
-    log("UI_ConfirmVocation: Wrong player. Active: " .. tostring(activeColor) .. ", Clicked: " .. tostring(color))
+    VOC.log("UI_ConfirmVocation: Wrong player. Active: " .. tostring(activeColor) .. ", Clicked: " .. tostring(color))
     return
   end
   
   local vocation = uiState.previewedVocation
   if not vocation then
-    log("ERROR: No vocation previewed for confirmation")
+    VOC.log("ERROR: No vocation previewed for confirmation")
     return
   end
   
@@ -8673,7 +8975,7 @@ function UI_ConfirmVocation(player, value, id)
       UI.setAttribute("selectionCardApply", "color", "#00000000")
       UI.setAttribute("selectionCardApply", "fontColor", "#00000000")
     end
-    log("UI_ConfirmVocation: Showing selection card for " .. vocation .. ", pool=" .. tostring(pool) .. " K=" .. k .. " S=" .. s)
+    VOC.log("UI_ConfirmVocation: Showing selection card for " .. vocation .. ", pool=" .. tostring(pool) .. " K=" .. k .. " S=" .. s)
   end
   
   -- Set the vocation
@@ -8698,7 +9000,7 @@ function UI_ConfirmVocation(player, value, id)
   end
   
   safeBroadcastToColor("✅ You chose: " .. (VOCATION_DATA[vocation] and VOCATION_DATA[vocation].name or vocation), color, {0.3, 1, 0.3})
-  log("Vocation confirmed: " .. color .. " -> " .. vocation)
+  VOC.log("Vocation confirmed: " .. color .. " -> " .. vocation)
   
   -- Keep selection UI visible (selection card stays on screen); do not hide overlay/panels
   uiState.activeColor = nil
@@ -8734,7 +9036,7 @@ function UI_AllocScience(payload)
 
   local turnCtrl = findTurnController()
   if not turnCtrl or not turnCtrl.call then
-    log("UI_AllocScience: TurnController not found")
+    VOC.log("UI_AllocScience: TurnController not found")
     return
   end
 
@@ -8742,7 +9044,7 @@ function UI_AllocScience(payload)
     return turnCtrl.call("API_AllocScience", { color = color, which = which, delta = delta })
   end)
   if not ok then
-    log("UI_AllocScience: API_AllocScience failed for " .. color .. " " .. which .. " " .. tostring(delta))
+    VOC.log("UI_AllocScience: API_AllocScience failed for " .. color .. " " .. which .. " " .. tostring(delta))
     return
   end
 
@@ -8767,7 +9069,7 @@ function UI_ApplyAllocScience(payload)
 
   local turnCtrl = findTurnController()
   if not turnCtrl or not turnCtrl.call then
-    log("UI_ApplyAllocScience: TurnController not found")
+    VOC.log("UI_ApplyAllocScience: TurnController not found")
     return
   end
 
@@ -8821,28 +9123,28 @@ function UI_BackToSelection(player, value, id)
   
   -- Special handling for "White" (spectator/host clicks via Global UI): use active color.
   if color == "White" then
-    log("WARNING: Back click detected from White (spectator). Attempting to use active color instead.")
+    VOC.log("WARNING: Back click detected from White (spectator). Attempting to use active color instead.")
     color = uiState.activeColor or selectionState.activeColor or state.currentPickerColor
     if not color then
-      log("UI_BackToSelection: No active color available (clicked as White)")
+      VOC.log("UI_BackToSelection: No active color available (clicked as White)")
       broadcastToAll("⚠ Please sit at a player color seat (Yellow/Blue/Red/Green) to go back.", {1, 0.5, 0.2})
       return
     end
-    log("Using active color instead for back: " .. tostring(color))
+    VOC.log("Using active color instead for back: " .. tostring(color))
   end
   
   if not color then 
     -- Try to get active color from state
     color = selectionState.activeColor or uiState.activeColor or state.currentPickerColor
     if not color then
-      log("UI_BackToSelection: No color available")
+      VOC.log("UI_BackToSelection: No color available")
       return
     end
   end
   
   -- Verify it's the active player (or allow if no active player set)
   if uiState.activeColor and color ~= uiState.activeColor then
-    log("UI_BackToSelection: Wrong player. Active: " .. tostring(uiState.activeColor) .. ", Clicked: " .. tostring(color))
+    VOC.log("UI_BackToSelection: Wrong player. Active: " .. tostring(uiState.activeColor) .. ", Clicked: " .. tostring(color))
     return
   end
   
@@ -8868,7 +9170,7 @@ function VOC_UI_CloseVocationExplanation(payload)
   uiState.currentScreen = nil
   uiState.previewedVocation = nil
   uiState.previewedVocationOwner = nil
-  log("Vocation explanation closed – UI hidden, back to playing")
+  VOC.log("Vocation explanation closed – UI hidden, back to playing")
 end
 
 -- UI Callback wrapper: Cancel selection (from Global router)
@@ -8888,10 +9190,10 @@ function UI_CancelSelection(player, value, id)
   -- Unpack arguments (handles both direct call and object.call() from Global)
   player, value, id = unpackUIArgs(player, value, id)
   
-  log("=== UI_CancelSelection CALLED ===")
-  log("player/color: " .. tostring(player))
-  log("value: " .. tostring(value))
-  log("id: " .. tostring(id))
+  VOC.log("=== UI_CancelSelection CALLED ===")
+  VOC.log("player/color: " .. tostring(player))
+  VOC.log("value: " .. tostring(value))
+  VOC.log("id: " .. tostring(id))
   
   -- Extract color - handle both string (new) and Player object (old/direct)
   local color = nil
@@ -8902,33 +9204,33 @@ function UI_CancelSelection(player, value, id)
   end
   
   if not color then 
-    log("WARNING: No color parameter, but continuing with cancel anyway")
+    VOC.log("WARNING: No color parameter, but continuing with cancel anyway")
   end
-  log("Normalized color: " .. tostring(color))
-  log("Current activeColor: " .. tostring(uiState.activeColor))
+  VOC.log("Normalized color: " .. tostring(color))
+  VOC.log("Current activeColor: " .. tostring(uiState.activeColor))
   
   -- Allow any player to cancel (remove restriction for now)
   -- if color ~= uiState.activeColor and uiState.activeColor ~= nil then
-  --   log("UI_CancelSelection: Wrong player. Active: " .. tostring(uiState.activeColor) .. ", Clicked: " .. color)
+  --   VOC.log("UI_CancelSelection: Wrong player. Active: " .. tostring(uiState.activeColor) .. ", Clicked: " .. color)
   --   return
   -- end
   
-  log("Hiding UI panels...")
+  VOC.log("Hiding UI panels...")
   
   -- Hide all UI - direct kill switch approach
   if UI then
     pcall(function()
-      log("Setting vocationSelectionPanel active=false")
+      VOC.log("Setting vocationSelectionPanel active=false")
       UI.setAttribute("vocationSelectionPanel", "active", "false")
-      log("Setting vocationSummaryPanel active=false")
+      VOC.log("Setting vocationSummaryPanel active=false")
       UI.setAttribute("vocationSummaryPanel", "active", "false")
-      log("Setting sciencePointsPanel active=false")
+      VOC.log("Setting sciencePointsPanel active=false")
       UI.setAttribute("sciencePointsPanel", "active", "false")
-      log("Setting vocationOverlay active=false")
+      VOC.log("Setting vocationOverlay active=false")
       UI.setAttribute("vocationOverlay", "active", "false")
     end)
   else
-    log("ERROR: UI is nil!")
+    VOC.log("ERROR: UI is nil!")
   end
   
   hideSummaryUI()
@@ -8940,10 +9242,10 @@ function UI_CancelSelection(player, value, id)
   uiState.previewedVocation = nil
   uiState.previewedVocationOwner = nil
   
-  log("Vocation selection cancelled by " .. tostring(color))
+  VOC.log("Vocation selection cancelled by " .. tostring(color))
   broadcastToAll("Vocation selection cancelled", {0.7, 0.7, 0.7})
   
-  log("=== UI_CancelSelection COMPLETE ===")
+  VOC.log("=== UI_CancelSelection COMPLETE ===")
 end
 
 -- Updated VOC_StartSelection to use UI instead of buttons
@@ -8953,7 +9255,7 @@ function VOC_StartSelection_UI(params)
   
   -- Check if already has vocation
   if state.vocations[color] then
-    log("Player " .. color .. " already has a vocation")
+    VOC.log("Player " .. color .. " already has a vocation")
     return false, "Already has vocation"
   end
   
@@ -8973,7 +9275,7 @@ function VOC_StartSelection_UI(params)
     end)
   end
   
-  log("UI Selection started for " .. color)
+  VOC.log("UI Selection started for " .. color)
   return true
 end
 
@@ -8986,7 +9288,7 @@ function ResolveInteractionEffectsWithDie(params)
   if type(resolveInteractionEffectsWithDie) == "function" then
     resolveInteractionEffectsWithDie(id, initiator, die)
   else
-    warn("ResolveInteractionEffectsWithDie: resolver not available")
+    VOC.warn("ResolveInteractionEffectsWithDie: resolver not available")
   end
 end
 
@@ -9001,7 +9303,7 @@ function UI_Interaction_YellowJoin(params)
   elseif type(handleInteractionResponse) == "function" then
     handleInteractionResponse("Yellow", "JOIN", actor)
   else
-    warn("UI_Interaction_YellowJoin: HandleInteractionResponse not available")
+    VOC.warn("UI_Interaction_YellowJoin: HandleInteractionResponse not available")
   end
 end
 
@@ -9073,7 +9375,7 @@ end
 -- =========================================================
 local function createTestButton()
   if not self or not self.createButton then
-    log("WARNING: Cannot create test button - self.createButton not available")
+    VOC.log("WARNING: Cannot create test button - self.createButton not available")
     return
   end
   
@@ -9092,22 +9394,22 @@ local function createTestButton()
       font_color = {1, 1, 1},
       tooltip = "Click to test if UI XML is loaded correctly"
     })
-    log("✅ Test button created on VocationsController")
+    VOC.log("✅ Test button created on VocationsController")
   end)
 end
 
 -- Button click handler for UI test (must be global function)
 function btnTestUI(obj, player)
-  log("=== UI TEST BUTTON CLICKED ===")
+  VOC.log("=== UI TEST BUTTON CLICKED ===")
   
   if not UI then
     broadcastToAll("❌ UI system not available (Global UI is nil)", {1, 0.3, 0.3})
-    log("ERROR: UI is nil - UI XML must be in Global → UI tab")
+    VOC.log("ERROR: UI is nil - UI XML must be in Global → UI tab")
     return
   end
   
   broadcastToAll("🔍 Testing UI system (Global UI)...", {0.5, 0.5, 1})
-  log("UI system is available (Global UI), testing panels...")
+  VOC.log("UI system is available (Global UI), testing panels...")
   
   -- Test Panel 1: vocationSelectionPanel
   local panel1Ok = false
@@ -9155,24 +9457,24 @@ function btnTestUI(obj, player)
   end
   
   -- Report results
-  log("=== TEST RESULTS ===")
-  log("Overlay (vocationOverlay):")
-  log("  - testOverlayOk: " .. tostring(testOverlayOk))
-  log("  - overlayAttr: " .. tostring(overlayAttr))
-  log("  - overlayOk: " .. tostring(overlayOk))
-  if overlayErr then log("  - ERROR: " .. overlayErr) end
+  VOC.log("=== TEST RESULTS ===")
+  VOC.log("Overlay (vocationOverlay):")
+  VOC.log("  - testOverlayOk: " .. tostring(testOverlayOk))
+  VOC.log("  - overlayAttr: " .. tostring(overlayAttr))
+  VOC.log("  - overlayOk: " .. tostring(overlayOk))
+  if overlayErr then VOC.log("  - ERROR: " .. overlayErr) end
   
-  log("Panel 1 (vocationSelectionPanel):")
-  log("  - test1Ok: " .. tostring(test1Ok))
-  log("  - panel1Attr: " .. tostring(panel1Attr))
-  log("  - panel1Ok: " .. tostring(panel1Ok))
-  if panel1Err then log("  - ERROR: " .. panel1Err) end
+  VOC.log("Panel 1 (vocationSelectionPanel):")
+  VOC.log("  - test1Ok: " .. tostring(test1Ok))
+  VOC.log("  - panel1Attr: " .. tostring(panel1Attr))
+  VOC.log("  - panel1Ok: " .. tostring(panel1Ok))
+  if panel1Err then VOC.log("  - ERROR: " .. panel1Err) end
   
-  log("Panel 2 (vocationSummaryPanel):")
-  log("  - test2Ok: " .. tostring(test2Ok))
-  log("  - panel2Attr: " .. tostring(panel2Attr))
-  log("  - panel2Ok: " .. tostring(panel2Ok))
-  if panel2Err then log("  - ERROR: " .. panel2Err) end
+  VOC.log("Panel 2 (vocationSummaryPanel):")
+  VOC.log("  - test2Ok: " .. tostring(test2Ok))
+  VOC.log("  - panel2Attr: " .. tostring(panel2Attr))
+  VOC.log("  - panel2Ok: " .. tostring(panel2Ok))
+  if panel2Err then VOC.log("  - ERROR: " .. panel2Err) end
   
   -- Broadcast results
   if overlayOk and panel1Ok and panel2Ok then
@@ -9189,7 +9491,7 @@ function btnTestUI(obj, player)
         UI.setAttribute("sciencePointsPanel", "active", "false")
         UI.setAttribute("selectionSubtitle", "text", "TEST MODE - UI Working!")
         broadcastToAll("✅ UI Panel should be visible now! (Overlay + Selection Panel activated)", {0.3, 1, 0.3})
-        log("TEST: Overlay and Selection Panel activated")
+        VOC.log("TEST: Overlay and Selection Panel activated")
       end)
     end, 0.2)
   else
@@ -9218,7 +9520,7 @@ end
 -- Create debug buttons on the VocationsController object
 local function createDebugButtons()
   if not self or not self.createButton then
-    log("WARNING: Cannot create debug buttons - self.createButton not available")
+    VOC.log("WARNING: Cannot create debug buttons - self.createButton not available")
     return
   end
   
@@ -9260,14 +9562,14 @@ local function createDebugButtons()
     end)
   end
   
-  log("✅ Debug buttons created on VocationsController")
+  VOC.log("✅ Debug buttons created on VocationsController")
 end
 
 function onLoad()
-  print("[VOC_CTRL] PATCH LOADED A-2026-02-16")
+  print("[VOC_CTRL] REFACTORED LOADED v1.0.0 " .. os.date("%H:%M:%S"))
   ensureSelfTag()
   loadState()
-  log("VocationsController v" .. VERSION .. " loaded")
+  VOC.log("VocationsController v" .. VERSION .. " loaded")
 
   -- Create debug buttons immediately and again after a short delay so they appear after restart.
   -- (TTS may not have the object fully ready on first frame; delayed creation ensures visibility.)
@@ -9276,11 +9578,11 @@ function onLoad()
     Wait.time(function()
       if self and self.createButton and createDebugButtons then
         createDebugButtons()
-        log("VocationsController: debug buttons created (delayed)")
+        VOC.log("VocationsController: debug buttons created (delayed)")
       end
       -- Ensure vocation tiles on player boards have LMB button and lock (e.g. from saved game)
       if self and self.getGUID then
-        local list = getAllObjects()
+        local list = VOC.getAllObjectsSafe()
         for _, obj in ipairs(list) do
           if obj and type(obj.hasTag) == "function" and obj.hasTag(TAG_VOCATION_TILE) then
             local hasColor = false
@@ -9300,14 +9602,14 @@ function onLoad()
 
   -- Verify critical functions exist
   if not VOC_StartSelection then
-    log("ERROR: VOC_StartSelection function not defined!")
+    VOC.log("ERROR: VOC_StartSelection function not defined!")
   else
-    log("VOC_StartSelection function verified")
+    VOC.log("VOC_StartSelection function verified")
   end
   
   -- Verify UI XML is loaded (using Global UI)
   if UI then
-    log("UI system is available (Global UI)")
+    VOC.log("UI system is available (Global UI)")
     
     -- Test if panels exist
     local panel1Ok, panel1Attr = pcall(function()
@@ -9319,30 +9621,30 @@ function onLoad()
     end)
     
     if panel1Ok and panel1Attr ~= nil then
-      log("✅ UI Panel 'vocationSelectionPanel' found and accessible (active=" .. tostring(panel1Attr) .. ")")
+      VOC.log("✅ UI Panel 'vocationSelectionPanel' found and accessible (active=" .. tostring(panel1Attr) .. ")")
       pcall(function()
         UI.setAttribute("vocationSelectionPanel", "active", "false")
       end)
     else
-      log("❌ ERROR: UI Panel 'vocationSelectionPanel' NOT FOUND!")
-      log("❌ This means VocationsUI_Global.xml is NOT loaded in Global → UI tab!")
-      log("❌ OR the XML has parsing errors (check for typos, wrong tags, etc.)")
-      log("❌ Please: 1) Go to Global → UI tab")
-      log("❌ 2) Clear all (CTRL+A, Delete), 3) Paste FULL VocationsUI_Global.xml content")
-      log("❌ 4) Click 'Save & Apply'")
+      VOC.log("❌ ERROR: UI Panel 'vocationSelectionPanel' NOT FOUND!")
+      VOC.log("❌ This means VocationsUI_Global.xml is NOT loaded in Global → UI tab!")
+      VOC.log("❌ OR the XML has parsing errors (check for typos, wrong tags, etc.)")
+      VOC.log("❌ Please: 1) Go to Global → UI tab")
+      VOC.log("❌ 2) Clear all (CTRL+A, Delete), 3) Paste FULL VocationsUI_Global.xml content")
+      VOC.log("❌ 4) Click 'Save & Apply'")
       broadcastToAll("⚠️ VocationsController: UI XML not loaded! Check Global → UI tab.", {1, 0.5, 0.2})
     end
     
     if panel2Ok and panel2Attr ~= nil then
-      log("✅ UI Panel 'vocationSummaryPanel' found and accessible (active=" .. tostring(panel2Attr) .. ")")
+      VOC.log("✅ UI Panel 'vocationSummaryPanel' found and accessible (active=" .. tostring(panel2Attr) .. ")")
       pcall(function()
         UI.setAttribute("vocationSummaryPanel", "active", "false")
       end)
     else
-      log("❌ ERROR: UI Panel 'vocationSummaryPanel' NOT FOUND!")
+      VOC.log("❌ ERROR: UI Panel 'vocationSummaryPanel' NOT FOUND!")
     end
   else
-    log("⚠️ WARNING: UI system not available (Global UI is nil)")
+    VOC.log("⚠️ WARNING: UI system not available (Global UI is nil)")
     broadcastToAll("⚠️ VocationsController: UI system not available (Global UI is nil)", {1, 0.5, 0.2})
   end
   
@@ -9373,7 +9675,7 @@ function VOC_TestUI()
     return "❌ Panel not found: " .. tostring(attr1)
   end
   
-  log("DEBUG TEST: Panel exists, current active: " .. tostring(attr1))
+  VOC.log("DEBUG TEST: Panel exists, current active: " .. tostring(attr1))
   
   -- Test 2: Try to show the panel
   local ok2, err2 = pcall(function()
@@ -9391,7 +9693,7 @@ function VOC_TestUI()
   Wait.time(function()
     if UI then
       local verify = UI.getAttribute("vocationSelectionPanel", "active")
-      log("DEBUG TEST: Panel active after set: " .. tostring(verify))
+      VOC.log("DEBUG TEST: Panel active after set: " .. tostring(verify))
       if verify == "true" then
         broadcastToAll("✅ UI Test: Panel is ACTIVE. You should see the selection UI now!", {0.3, 1, 0.3})
       else
@@ -9420,26 +9722,26 @@ end
 
 -- Debug button: Test starting selection
 function btnDebugStartSelection(obj, player)
-  log("=== DEBUG: Testing VOC_StartSelection ===")
+  VOC.log("=== DEBUG: Testing VOC_StartSelection ===")
   local color = "Green"  -- Default test color
   if player and player.color then
     color = normalizeColor(player.color) or "Green"
   end
   
-  log("Starting selection for: " .. color)
+  VOC.log("Starting selection for: " .. color)
   local ok, err = VOC_StartSelection({color = color})
   if ok then
     broadcastToAll("✅ Selection started for " .. color, {0.3, 1, 0.3})
-    log("✅ Selection started successfully")
+    VOC.log("✅ Selection started successfully")
   else
     broadcastToAll("❌ Failed to start selection: " .. tostring(err), {1, 0.3, 0.3})
-    log("❌ Failed: " .. tostring(err))
+    VOC.log("❌ Failed: " .. tostring(err))
   end
 end
 
 -- Debug button: Test showing summary panel directly
 function btnDebugShowSummary(obj, player)
-  log("=== DEBUG: Testing showSummaryUI directly ===")
+  VOC.log("=== DEBUG: Testing showSummaryUI directly ===")
   
   if not UI then
     broadcastToAll("❌ UI not available", {1, 0.3, 0.3})
@@ -9455,16 +9757,16 @@ function btnDebugShowSummary(obj, player)
   local ok = showSummaryUI(color, VOC_GANGSTER)
   if ok then
     broadcastToAll("✅ Summary panel shown for " .. color .. " -> GANGSTER", {0.3, 1, 0.3})
-    log("✅ Summary panel shown successfully")
+    VOC.log("✅ Summary panel shown successfully")
   else
     broadcastToAll("❌ Failed to show summary panel", {1, 0.3, 0.3})
-    log("❌ Failed to show summary panel")
+    VOC.log("❌ Failed to show summary panel")
   end
 end
 
 -- Debug button: Test callback routing
 function btnDebugTestCallback(obj, player)
-  log("=== DEBUG: Testing callback routing ===")
+  VOC.log("=== DEBUG: Testing callback routing ===")
   
   local color = "Green"
   if player and player.color then
@@ -9472,7 +9774,7 @@ function btnDebugTestCallback(obj, player)
   end
   
   -- Simulate what Global does
-  log("Simulating Global callback with color: " .. color .. ", id: btnGangster")
+  VOC.log("Simulating Global callback with color: " .. color .. ", id: btnGangster")
   
   -- Set active color first
   selectionState.activeColor = color
@@ -9486,14 +9788,14 @@ end
 
 -- Function to restore debug buttons if they disappear
 function VOC_RestoreDebugButtons()
-  log("Restoring debug buttons...")
+  VOC.log("Restoring debug buttons...")
   createDebugButtons()
   broadcastToAll("✅ Debug buttons restored", {0.3, 1, 0.3})
 end
 
 -- Debug button: Full test flow
 function btnDebugFullTest(obj, player)
-  log("=== DEBUG: Full test flow ===")
+  VOC.log("=== DEBUG: Full test flow ===")
   
   local color = "Green"
   if player and player.color then
@@ -9503,7 +9805,7 @@ function btnDebugFullTest(obj, player)
   broadcastToAll("🔍 Starting full test flow for " .. color, {0.5, 0.5, 1})
   
   -- Step 1: Start selection
-  log("Step 1: Starting selection...")
+  VOC.log("Step 1: Starting selection...")
   local ok1, err1 = VOC_StartSelection({color = color})
   if not ok1 then
     broadcastToAll("❌ Step 1 failed: " .. tostring(err1), {1, 0.3, 0.3})
@@ -9512,24 +9814,24 @@ function btnDebugFullTest(obj, player)
   
   Wait.time(function()
     -- Step 2: Simulate clicking a vocation
-    log("Step 2: Simulating vocation click...")
+    VOC.log("Step 2: Simulating vocation click...")
     selectionState.activeColor = color
     uiState.activeColor = color
     UI_SelectVocation(color, -1, "btnGangster")
     
     Wait.time(function()
       -- Step 3: Verify summary panel is active
-      log("Step 3: Verifying summary panel...")
+      VOC.log("Step 3: Verifying summary panel...")
       if UI then
         local ok, active = pcall(function()
           return UI.getAttribute("vocationSummaryPanel", "active")
         end)
         if ok and active == "true" then
           broadcastToAll("✅ Full test PASSED! Summary panel is active.", {0.3, 1, 0.3})
-          log("✅ Full test PASSED")
+          VOC.log("✅ Full test PASSED")
         else
           broadcastToAll("❌ Full test FAILED: Summary panel not active (active=" .. tostring(active) .. ")", {1, 0.3, 0.3})
-          log("❌ Full test FAILED: active=" .. tostring(active))
+          VOC.log("❌ Full test FAILED: active=" .. tostring(active))
         end
       end
     end, 0.5)
@@ -9539,20 +9841,20 @@ end
 -- Debug button: Test Social Worker L2 community wellbeing session interaction
 -- Debug: Show current levels for all players
 function btnDebug_ShowLevels(obj, player)
-  log("=== DEBUG: Showing current player levels ===")
+  VOC.log("=== DEBUG: Showing current player levels ===")
   broadcastToAll("📊 Current Player Levels:", {1, 1, 0.6})
   
   for _, c in ipairs(COLORS) do
     local vocation = state.vocations[c] or "None"
     local level = state.levels[c] or 0
     broadcastToAll("  " .. c .. ": " .. vocation .. " (Level " .. level .. ")", {0.8, 0.8, 1})
-    log("  " .. c .. ": vocation=" .. tostring(vocation) .. ", level=" .. tostring(level))
+    VOC.log("  " .. c .. ": vocation=" .. tostring(vocation) .. ", level=" .. tostring(level))
   end
 end
 
 -- Debug: Set player level to 1 (for testing)
 function btnDebug_SetLevel1(obj, player)
-  log("=== DEBUG: Setting player level to 1 ===")
+  VOC.log("=== DEBUG: Setting player level to 1 ===")
   
   local color = nil
   if player and player.color and player.color ~= "" and player.color ~= "White" then
@@ -9573,14 +9875,14 @@ function btnDebug_SetLevel1(obj, player)
     local oldLevel = state.levels[color] or 0
     state.levels[color] = 1
     broadcastToAll("✅ " .. color .. " level changed: " .. oldLevel .. " → 1", {0.3, 1, 0.3})
-    log("Set " .. color .. " to level 1 (was " .. oldLevel .. ")")
+    VOC.log("Set " .. color .. " to level 1 (was " .. oldLevel .. ")")
   else
     broadcastToAll("❌ No player color found or no vocation assigned", {1, 0.6, 0.2})
   end
 end
 
 function btnDebug_TestSWEvent(obj, player)
-  log("=== DEBUG: Testing Social Worker L2 community wellbeing session ===")
+  VOC.log("=== DEBUG: Testing Social Worker L2 community wellbeing session ===")
   
   -- Prefer the clicking player's color if seated; otherwise pick the first seated color as initiator.
   local color = nil

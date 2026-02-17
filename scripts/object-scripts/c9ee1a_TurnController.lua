@@ -505,11 +505,11 @@ local function onTurnStart_AddRentalCosts(color)
   local TAG_COSTS_CALC = "WLB_COSTS_CALC"
   local TAG_ESTATE_OWNED = "WLB_ESTATE_OWNED"
   local TAG_ESTATE_MODE_RENT = "WLB_ESTATE_MODE_RENT"
+  local TAG_ESTATE_MODE_BUY  = "WLB_ESTATE_MODE_BUY"
   local COLOR_TAG_PREFIX = "WLB_COLOR_"
   local colorTagStr = COLOR_TAG_PREFIX .. tostring(color)
   
   -- Rental costs per apartment level (from EstateEngine)
-  -- NOTE: This should ideally come from EstateEngine API to avoid duplication
   local ESTATE_RENTAL_COST = {
     L0 = 50,   -- Default (grandma's house)
     L1 = 200,  -- Studio apartment
@@ -518,35 +518,54 @@ local function onTurnStart_AddRentalCosts(color)
     L4 = 1000  -- Mansion
   }
   
-  -- Find owned estate card for this player (should only have one)
-  -- Rental costs apply to all owned apartments (rented or bought)
-  -- Use same method as EstateEngine to ensure consistency
-  local totalRentalCost = ESTATE_RENTAL_COST.L0  -- Default: 50 WIN (grandma's house)
-  local rentLevel = "L0"  -- For cost calculator tooltip
-  local isRentedApartment = false  -- True if L1–L4 and card has ESTATE_MODE_RENT (Social Worker pays 50%)
+  local totalRentalCost = ESTATE_RENTAL_COST.L0
+  local rentLevel = "L0"
   
-  -- Search for estate cards with player's color tag AND ESTATE_OWNED tag
-  -- Must also have ESTATE_CARD tag to ensure it's an actual estate card
-  local TAG_ESTATE_CARD = "WLB_ESTATE_CARD"
-  for _, o in ipairs(getAllObjects()) do
-    if o and o.tag == "Card" and o.hasTag and 
-       o.hasTag(TAG_ESTATE_CARD) and  -- Must be an estate card
-       o.hasTag(TAG_ESTATE_OWNED) and  -- Must be owned
-       o.hasTag(colorTagStr) then  -- Must belong to this player
-      -- This is an owned apartment (rented or bought)
-      -- Extract level from card name (ESTATE_L1, ESTATE_L2, etc.)
-      local cardName = getNameSafe(o)
-      if cardName then
-        local levelMatch = cardName:match("ESTATE_L([1-4])")
-        if levelMatch then
-          local level = "L" .. levelMatch
-          local cost = ESTATE_RENTAL_COST[level]
-          if cost then
-            totalRentalCost = cost  -- Use apartment's rental cost
-            rentLevel = level
-            isRentedApartment = (o.hasTag(TAG_ESTATE_MODE_RENT) == true)
-            log("Rental cost: Found "..level.." apartment for "..color..", cost="..tostring(cost)..", rented="..tostring(isRentedApartment))
-            break  -- Player should only have one apartment
+  -- Prefer EstateEngine ME_GetEstateLevel (single source of truth) to avoid cross-player mix-ups
+  local estateInfo = nil
+  local okMarket, info = marketCall("ME_GetEstateLevel", { color = color })
+  if okMarket and type(info) == "table" and info.level then
+    estateInfo = info
+  end
+  
+  if estateInfo then
+    local level = (estateInfo.level == "L1" or estateInfo.level == "L2" or estateInfo.level == "L3" or estateInfo.level == "L4") and estateInfo.level or "L0"
+    rentLevel = level
+    if level == "L0" then
+      totalRentalCost = ESTATE_RENTAL_COST.L0
+      log("Rental cost: "..color.." L0 (grandma's house), cost="..tostring(totalRentalCost))
+    elseif estateInfo.isRented == true then
+      totalRentalCost = ESTATE_RENTAL_COST[level] or 0
+      log("Rental cost: "..color.." "..level.." (rented), cost="..tostring(totalRentalCost))
+    else
+      totalRentalCost = 0
+      log("Rental cost: "..color.." "..level.." (bought) - no rent")
+    end
+  else
+    -- Fallback: scan physical estate cards (can desync if tags wrong)
+    local TAG_ESTATE_CARD = "WLB_ESTATE_CARD"
+    for _, o in ipairs(getAllObjects()) do
+      if o and o.tag == "Card" and o.hasTag and
+         o.hasTag(TAG_ESTATE_CARD) and o.hasTag(TAG_ESTATE_OWNED) and o.hasTag(colorTagStr) then
+        local cardName = getNameSafe(o)
+        if cardName then
+          local levelMatch = cardName:match("ESTATE_L([1-4])")
+          if levelMatch then
+            local level = "L" .. levelMatch
+            local cost = ESTATE_RENTAL_COST[level]
+            if cost then
+              local isBought = (o.hasTag(TAG_ESTATE_MODE_BUY) == true)
+              if isBought then
+                totalRentalCost = 0
+                rentLevel = level
+                log("Rental cost: "..color.." owns "..level.." (bought) - no rent [fallback]")
+              else
+                totalRentalCost = cost
+                rentLevel = level
+                log("Rental cost: "..color.." "..level.." rented, cost="..tostring(cost).." [fallback]")
+              end
+              break
+            end
           end
         end
       end
