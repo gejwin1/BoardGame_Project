@@ -1791,6 +1791,31 @@ local function rollRealDieAsync(cardObj, onDone)
   )
 end
 
+-- Callback function for die roll results from VocationsController
+function OnDieRollResult(params)
+  if not params or not params.result then return end
+  local requestId = params.requestId
+  local dieValue = params.result
+  
+  -- Find the pending callback for this requestId
+  if not _G.EVT_DieRollCallbacks then return end
+  local callbackInfo = _G.EVT_DieRollCallbacks[requestId]
+  if not callbackInfo then return end
+  
+  -- Validate die value
+  if type(dieValue) ~= "number" or dieValue < 1 or dieValue > 6 then
+    dieValue = math.random(1, 6)
+  end
+  
+  -- Call the original callback
+  if callbackInfo.onDone then
+    callbackInfo.onDone(dieValue, nil)
+  end
+  
+  -- Clean up
+  _G.EVT_DieRollCallbacks[requestId] = nil
+end
+
 -- Roll die: ONE physical roll, result used immediately. Exception: Entrepreneur L2 during their turn gets Reroll/Go on choice.
 local function rollDieForPlayer(color, requestPrefix, onDone)
   if not color then onDone(math.random(1,6), nil) return end
@@ -1810,21 +1835,47 @@ local function rollDieForPlayer(color, requestPrefix, onDone)
   if Time and Time.time then ts = (type(Time.time) == "function") and Time.time() or Time.time
   elseif os and os.time then ts = os.time() end
   local requestId = (requestPrefix or "evt") .. "_" .. tostring(color) .. "_" .. tostring(ts)
-  if not _G.VOC_DieRollResults then _G.VOC_DieRollResults = {} end
-  pcall(function() voc.call("VOC_RollDieForPlayer", { requestId = requestId, color = color }) end)
-  local deadline = ((os and os.time) and os.time() or 0) + 12
-  if not (Wait and Wait.condition) then onDone(math.random(1,6), nil); return end
-  Wait.condition(
-    function()
-      local v = _G.VOC_DieRollResults and _G.VOC_DieRollResults[requestId]
-      if _G.VOC_DieRollResults then _G.VOC_DieRollResults[requestId] = nil end
-      onDone((v and type(v)=="number" and v >= 1 and v <= 6) and v or math.random(1,6), nil)
-    end,
-    function()
-      if _G.VOC_DieRollResults and _G.VOC_DieRollResults[requestId] ~= nil then return true end
-      return (os.time and os.time()) >= deadline
+  
+  -- Get reference to this object (EventEngine) for callback
+  -- In TTS, scripts run on objects, so 'self' should be available
+  local eventEngineObject = self
+  if not eventEngineObject then
+    -- Fallback: try to find EventEngine object by GUID (from config)
+    eventEngineObject = getObjectFromGUID and getObjectFromGUID(EVENTS_CONTROLLER_GUID) or nil
+  end
+  
+  if not eventEngineObject then
+    -- If we can't find the object, fall back to direct roll
+    rollRealDieAsync(nil, function(v, err) onDone(v and v >= 1 and v <= 6 and v or math.random(1,6), err) end)
+    return
+  end
+  
+  -- Store callback info for OnDieRollResult
+  if not _G.EVT_DieRollCallbacks then _G.EVT_DieRollCallbacks = {} end
+  _G.EVT_DieRollCallbacks[requestId] = {
+    onDone = onDone,
+    color = color,
+    requestId = requestId
+  }
+  
+  -- Set up timeout fallback
+  Wait.time(function()
+    if _G.EVT_DieRollCallbacks and _G.EVT_DieRollCallbacks[requestId] then
+      -- Timeout: clean up and use fallback
+      _G.EVT_DieRollCallbacks[requestId] = nil
+      onDone(math.random(1,6), nil)
     end
-  )
+  end, 30)  -- 30 second timeout
+  
+  -- Call VocationsController with callback info
+  pcall(function() 
+    voc.call("VOC_RollDieForPlayer", { 
+      requestId = requestId, 
+      color = color,
+      callbackObject = eventEngineObject,
+      callbackFunction = "OnDieRollResult"
+    }) 
+  end)
 end
 -- CHUNK-SAFE: VECrimeTargetSelected is called via .call() and may run in different chunk
 _G.EVT_rollDieForPlayer = rollDieForPlayer

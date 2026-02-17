@@ -629,6 +629,25 @@ local function getVocationForColor(c)
   return nil
 end
 
+local function getVocationLevelForColor(c)
+  if not c or c == "" then return 0 end
+  local list = getObjectsWithTag("WLB_VOCATIONS_CTRL") or {}
+  local voc = list[1]
+  if not voc or not voc.call then return 0 end
+  local ok, level = pcall(function() return voc.call("VOC_GetLevel", { color = c }) end)
+  if ok and type(level) == "number" then return level end
+  return 0
+end
+
+-- Check if player is Entrepreneur Level 3 (for property discount)
+-- Returns true if Entrepreneur L3, false otherwise
+local function isEntrepreneurL3(color)
+  if not color or color == "" then return false end
+  local vocation = getVocationForColor(color)
+  local level = getVocationLevelForColor(color)
+  return (vocation == "ENTREPRENEUR" and level >= 3)
+end
+
 -- Update rental cost in cost calculator when estate changes
 -- IMPORTANT: TurnController adds rental costs every turn at turn start.
 -- This function adjusts costs immediately when estate level changes mid-turn.
@@ -1144,7 +1163,15 @@ function ME_estateFullPrice(deck, pc)
     return
   end
   local price = ESTATE_PRICE[p.level] or 0
-  doBuyExecute(p.level, p.acting, price, 0)
+  
+  -- Apply Entrepreneur L3 property discount (25%) if applicable (even when choosing full price)
+  local discountPercent = 0
+  if isEntrepreneurL3(p.acting) then
+    discountPercent = discountPercent + 0.25  -- Entrepreneur L3: 25%
+  end
+  local finalPrice = math.max(0, math.floor(price * (1 - discountPercent)))
+  
+  doBuyExecute(p.level, p.acting, finalPrice, 0)
   rebuildDeckUI(p.level)
 end
 
@@ -1158,7 +1185,16 @@ function ME_estateUseDiscount(deck, pc)
   if p.voucherCount == 1 then
     S.pendingEstateVoucher = nil
     local price = ESTATE_PRICE[p.level] or 0
-    local finalP = math.max(0, math.floor(price * 0.80))
+    
+    -- Calculate discount: Entrepreneur L3 (25%) + 1 voucher (20%) = 45% total (stacks additively)
+    local discountPercent = 0
+    if isEntrepreneurL3(p.acting) then
+      discountPercent = discountPercent + 0.25  -- Entrepreneur L3: 25%
+    end
+    discountPercent = discountPercent + 0.20  -- 1 voucher: 20%
+    
+    local finalP = math.max(0, math.floor(price * (1 - discountPercent)))
+    
     doBuyExecute(p.level, p.acting, finalP, 1)
     rebuildDeckUI(p.level)
     return
@@ -1176,7 +1212,16 @@ function ME_estateUseN(deck, pc, N)
     return
   end
   local price = ESTATE_PRICE[p.level] or 0
-  local finalP = math.max(0, math.floor(price * (1 - 0.20 * N)))
+  
+  -- Calculate discount: Entrepreneur L3 (25%) + N vouchers (20% each) = stacks additively
+  local discountPercent = 0
+  if isEntrepreneurL3(p.acting) then
+    discountPercent = discountPercent + 0.25  -- Entrepreneur L3: 25%
+  end
+  discountPercent = discountPercent + (0.20 * N)  -- N vouchers: 20% each
+  
+  local finalP = math.max(0, math.floor(price * (1 - discountPercent)))
+  
   doBuyExecute(p.level, p.acting, finalP, N)
   rebuildDeckUI(p.level)
 end
@@ -1201,15 +1246,24 @@ local function doBuy(level, clickedColor)
 
   local price = ESTATE_PRICE[level] or 0
   local voucherCount = pscGetStatusCount(acting, TAG_STATUS_VOUCH_P)
-
+  
+  -- Calculate discount: Entrepreneur L3 gets 25%, vouchers add 20% each (stacks additively)
+  local discountPercent = 0
+  if isEntrepreneurL3(acting) then
+    discountPercent = discountPercent + 0.25  -- Entrepreneur L3: 25%
+  end
+  -- Voucher discount will be applied later if vouchers are used
+  
   if voucherCount >= 1 then
     S.pendingEstateVoucher = { level = level, acting = acting, voucherCount = voucherCount, step = "ask_use" }
     showVoucherChoiceOnDeck(level)
     sayToColor(acting, "Use discount? You have "..tostring(voucherCount).." property voucher(s). Choose FULL PRICE or USE DISCOUNT.", {0.85,0.95,1})
     return
   end
-
-  doBuyExecute(level, acting, price, 0)
+  
+  -- Apply Entrepreneur discount if no vouchers
+  local finalPrice = math.max(0, math.floor(price * (1 - discountPercent)))
+  doBuyExecute(level, acting, finalPrice, 0)
 end
 
 function ME_prompt_L1(_, pc) doPrompt("L1") end
@@ -1521,6 +1575,87 @@ function ME_park()
       end)
     end)
   end)
+end
+
+-- =========================
+-- PUBLIC API: Update rental costs when vocation changes
+-- =========================
+-- Called when a player's vocation is set/changed to update rental costs immediately
+-- (e.g., when Social Worker gets 50% rent discount)
+function API_UpdateRentalCostsForVocationChange(params)
+  params = params or {}
+  local color = normalizeColor(params.color)
+  if not color or color == "" then return false end
+  
+  -- Get current estate level
+  local estateLevel = S.currentEstateLevel[color] or "L0"
+  if estateLevel ~= "L0" and estateLevel ~= "L1" and estateLevel ~= "L2" and estateLevel ~= "L3" and estateLevel ~= "L4" then
+    estateLevel = "L0"
+  end
+  
+  -- Check if player is renting (not bought)
+  local isRenting = false
+  local estateObj = findOwnedEstateOnBoard(color)
+  if estateObj then
+    local ok, hasRentTag = pcall(function() return estateObj.hasTag(TAG_ESTATE_MODE_RENT) end)
+    if ok and hasRentTag then
+      isRenting = true
+    end
+  end
+  
+  -- Only update if player is renting (not L0 and not bought)
+  if not isRenting or estateLevel == "L0" then
+    return false  -- No rental cost to update
+  end
+  
+  local costsCalc = findCostsCalculator()
+  if not costsCalc or not costsCalc.call then
+    return false
+  end
+  
+  -- Calculate what the rental cost should be
+  local fullRentalCost = ESTATE_RENTAL_COST[estateLevel] or 0
+  
+  -- Check if player is Social Worker (for 50% discount)
+  local vocation = getVocationForColor(color)
+  if vocation ~= "SOCIAL_WORKER" then
+    return false  -- Not Social Worker, no discount to apply
+  end
+  
+  -- Get current total cost to check if rental costs have been added
+  local currentTotalCost = 0
+  local okGet, currentCostResult = pcall(function()
+    return costsCalc.call("getCost", {color=color})
+  end)
+  if okGet and type(currentCostResult) == "number" then
+    currentTotalCost = currentCostResult
+  end
+  
+  -- Calculate discounted rental cost
+  local discountedRentalCost = math.floor(fullRentalCost * 0.5)
+  
+  -- Only adjust if rental costs have likely been added (current cost >= rental cost)
+  -- This prevents adding negative costs when rental hasn't been added yet
+  -- (TurnController will apply discount automatically at turn start if not added yet)
+  if currentTotalCost >= fullRentalCost then
+    -- Calculate the adjustment needed: reduce by 50% of the rental cost
+    local delta = discountedRentalCost - fullRentalCost  -- Negative value (reduction)
+    
+    -- Apply the adjustment to the cost calculator
+    local ok = pcall(function()
+      costsCalc.call("addCost", {color=color, amount=delta, label="Rent "..estateLevel.." (Social Worker 50% discount)"})
+    end)
+    
+    if ok then
+      log("Updated rental cost for "..color..": "..fullRentalCost.." → "..discountedRentalCost.." (Social Worker 50% discount applied)")
+      return true
+    end
+  else
+    -- Rental costs haven't been added yet - TurnController will apply discount at turn start
+    log("Rental costs not yet added for "..color.." - discount will be applied at turn start")
+  end
+  
+  return false
 end
 
 -- =========================

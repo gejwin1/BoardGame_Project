@@ -651,6 +651,9 @@ local function uiClearDescription(card)
   pcall(function() card.setDescription("") end)
 end
 
+-- Forward declaration - will be defined after DEF tables
+local calculateCardPriceForPlayer
+
 local function uiRememberHome(card)
   if not isCard(card) then return end
   local g = card.getGUID()
@@ -717,7 +720,31 @@ end
 
 local function uiAttachYesNo_MODAL(card)
   if not isCard(card) then return end
-  uiAttachQuestionLabel_MODAL(card)
+  
+  -- Get current player color for price calculation
+  local currentPlayer = nil
+  local ok, turnColor = pcall(function() return (Turns and Turns.turn_color) or nil end)
+  if ok and turnColor and turnColor ~= "" then
+    currentPlayer = normalizeColor(turnColor)
+  end
+  
+  -- Show only "Do you want to buy this card?" message (no price warning text)
+  local labelText = UI_TOOLTIP_TEXT
+  
+  -- Create custom label button (always white text)
+  card.createButton({
+    click_function = "ui_noop",
+    function_owner = self,
+    label          = labelText,
+    position       = {0, 0.95, 0},
+    rotation       = {0, 0, 0},
+    width          = 3000,
+    height         = 340,
+    font_size      = 160,
+    color          = {0, 0, 0, 0.70},
+    font_color     = {1, 1, 1, 1},  -- Always white
+    tooltip        = "",
+  })
 
   card.createButton({
     click_function = "shop_onYes",
@@ -868,9 +895,49 @@ local function uiEnsureIdle(card)
     return
   end
 
+  -- Show price indicator if double prices are active
+  local name = getNameSafe(card)
+  local row = classifyRowByName(card)
+  local showDoublePriceWarning = false
+  
+  if (row == "C" or row == "H") and S.doublePricesInitiator then
+    showDoublePriceWarning = true
+  end
+  
   uiClearButtons(card)
-  uiSetDescription(card)
+  uiSetDescription(card)  -- Clear description (no warning text)
+  
+  -- Attach click catcher first (lower layer)
   uiAttachClickCatcher_IDLE(card)
+  
+  -- Then add red warning indicator on top (created AFTER click catcher to stay visible)
+  if showDoublePriceWarning then
+    -- Get current player for price calculation
+    local currentPlayer = nil
+    local ok, turnColor = pcall(function() return (Turns and Turns.turn_color) or nil end)
+    if ok and turnColor and turnColor ~= "" then
+      currentPlayer = normalizeColor(turnColor)
+    end
+    
+    local basePrice, finalPrice, priceInfo = calculateCardPriceForPlayer(card, currentPlayer or "White")
+    if finalPrice ~= basePrice then
+      -- Add smaller red warning button overlay (created AFTER click catcher to stay on top)
+      -- Use higher Z position to ensure it stays visible above the click catcher and hovers above card
+      card.createButton({
+        click_function = "ui_noop",
+        function_owner = self,
+        label          = "Double prices!",
+        position       = {0, 0.25, 0.8},  -- Higher Y (0.25) and Z (0.8) to hover well above card and click catcher
+        rotation       = {0, 0, 0},
+        width          = 1200,   -- Wider to fit text
+        height         = 180,   -- Taller to fit text
+        font_size      = 90,    -- Smaller font to fit text
+        color          = {0.85, 0.15, 0.15, 0.95},  -- Red background (slightly more opaque)
+        font_color     = {1, 1, 1, 1},  -- White text
+        tooltip        = "Double Price Active: " .. tostring(basePrice) .. " → " .. tostring(finalPrice) .. " VIN",
+      })
+    end
+  end
 end
 
 local function uiOpenModal(card)
@@ -881,7 +948,8 @@ local function uiOpenModal(card)
   if UI.modalOpen[g] then return end
   UI.modalOpen[g] = true
 
-  uiSetDescription(card)
+  -- Show only "Do you want to buy this card?" message (no price warning text)
+  uiSetDescription(card, UI_TOOLTIP_TEXT)
   uiLift(card)
   uiClearButtons(card)
   uiAttachYesNo_MODAL(card)
@@ -1204,10 +1272,32 @@ end
 -- =========================
 -- Note: tryReadDieValue is defined earlier (near line 370) for use in UI functions
 local DICE_ROLL_TIMEOUT  = 6.0  -- seconds to wait for roll
-local DICE_STABLE_READS  = 4     -- number of consecutive stable reads needed
-local DICE_POLL          = 0.12  -- seconds between polls
+-- Callback function for die roll results from VocationsController
+function OnDieRollResult(params)
+  if not params or not params.result then return end
+  local requestId = params.requestId
+  local dieValue = params.result
+  
+  -- Find the pending callback for this requestId
+  if not _G.SHOP_DieRollCallbacks then return end
+  local callbackInfo = _G.SHOP_DieRollCallbacks[requestId]
+  if not callbackInfo then return end
+  
+  -- Validate die value
+  if type(dieValue) ~= "number" or dieValue < 1 or dieValue > 6 then
+    dieValue = math.random(1, 6)
+    safeBroadcastToColor("⚠️ Invalid die result, using fallback", callbackInfo.color, {1,0.7,0.3})
+  end
+  
+  -- Call the original callback
+  if callbackInfo.onDone then
+    callbackInfo.onDone(dieValue)
+  end
+  
+  -- Clean up
+  _G.SHOP_DieRollCallbacks[requestId] = nil
+end
 
--- Roll die: ONE physical roll, result used immediately. Exception: Entrepreneur L2 during their turn gets Reroll/Go on choice.
 local function rollDieForPlayer(color, requestPrefix, onDone)
   color = normalizeColor(color)
   if not color then onDone(math.random(1,6)) return end
@@ -1242,21 +1332,65 @@ local function rollDieForPlayer(color, requestPrefix, onDone)
   if Time and Time.time then ts = (type(Time.time) == "function") and Time.time() or Time.time
   elseif os and os.time then ts = os.time() end
   local requestId = (requestPrefix or "shop") .. "_" .. tostring(color) .. "_" .. tostring(ts)
-  if not _G.VOC_DieRollResults then _G.VOC_DieRollResults = {} end
-  pcall(function() voc.call("VOC_RollDieForPlayer", { requestId = requestId, color = color }) end)
-  local deadline = (os.time and os.time() or 0) + 12
-  Wait.condition(
-    function()
-      local v = _G.VOC_DieRollResults and _G.VOC_DieRollResults[requestId]
-      if _G.VOC_DieRollResults then _G.VOC_DieRollResults[requestId] = nil end
-      onDone((v and type(v)=="number" and v >= 1 and v <= 6) and v or math.random(1,6))
-    end,
-    function()
-      if _G.VOC_DieRollResults and _G.VOC_DieRollResults[requestId] ~= nil then return true end
-      if (os.time and os.time()) >= deadline then return true end
-      return false
+  
+  -- Get reference to this object (ShopEngine) for callback
+  local shopEngineObject = self
+  if not shopEngineObject then
+    -- Fallback: try to find ShopEngine object by tag
+    local shopObjs = getObjectsWithTag and getObjectsWithTag(TAG_SHOPS_BOARD) or {}
+    if shopObjs and #shopObjs > 0 then
+      shopEngineObject = shopObjs[1]
     end
-  )
+  end
+  
+  if not shopEngineObject then
+    -- If we can't find the object, fall back to direct roll
+    local die = getObjectFromGUID(DIE_GUID)
+    if not die then onDone(math.random(1,6)) return end
+    pcall(function() die.randomize() end)
+    pcall(function() die.roll() end)
+    local timeout = os.time() + 6
+    Wait.condition(
+      function()
+        local v = tryReadDieValue(die)
+        onDone(v and v >= 1 and v <= 6 and v or math.random(1,6))
+      end,
+      function()
+        local resting = false
+        pcall(function() resting = die.resting end)
+        return resting or (os.time() >= timeout)
+      end
+    )
+    return
+  end
+  
+  -- Store callback info for OnDieRollResult
+  if not _G.SHOP_DieRollCallbacks then _G.SHOP_DieRollCallbacks = {} end
+  _G.SHOP_DieRollCallbacks[requestId] = {
+    onDone = onDone,
+    color = color,
+    requestId = requestId
+  }
+  
+  -- Set up timeout fallback
+  Wait.time(function()
+    if _G.SHOP_DieRollCallbacks and _G.SHOP_DieRollCallbacks[requestId] then
+      -- Timeout: clean up and use fallback
+      _G.SHOP_DieRollCallbacks[requestId] = nil
+      safeBroadcastToColor("⚠️ Die result timeout, using fallback", color, {1,0.7,0.3})
+      onDone(math.random(1,6))
+    end
+  end, 30)  -- 30 second timeout
+  
+  -- Call VocationsController with callback info
+  pcall(function() 
+    voc.call("VOC_RollDieForPlayer", { 
+      requestId = requestId, 
+      color = color,
+      callbackObject = shopEngineObject,
+      callbackFunction = "OnDieRollResult"
+    }) 
+  end)
 end
 
 local function rollD6(cb)
@@ -2640,6 +2774,43 @@ local INVESTMENT_DEF = {
   ISHOP_13_STOCK = {cost=0, extraAP=0, kind="STOCK"}, -- cost determined interactively
   ISHOP_14_STOCK = {cost=0, extraAP=0, kind="STOCK"},
 }
+
+-- Calculate the price a player would pay for a card (including double prices, discounts, etc.)
+-- Returns: basePrice, finalPrice, priceInfo (string describing modifiers)
+calculateCardPriceForPlayer = function(card, playerColor)
+  if not isCard(card) then return 0, 0, "" end
+  
+  local name = getNameSafe(card)
+  local row = classifyRowByName(card)
+  if not row then return 0, 0, "" end
+  
+  local def = nil
+  if row == "C" then
+    def = CONSUMABLE_DEF[name]
+  elseif row == "H" then
+    def = HI_TECH_DEF[name]
+  elseif row == "I" then
+    def = INVESTMENT_DEF[name]
+  end
+  
+  if not def then return 0, 0, "" end
+  
+  local basePrice = def.cost or 0
+  local finalPrice = basePrice
+  local priceInfo = ""
+  
+  -- Check for double prices (Entrepreneur ability)
+  if (row == "C" or row == "H") and S.doublePricesInitiator then
+    local normalizedBuyer = normalizeColor(playerColor)
+    local normalizedInitiator = normalizeColor(S.doublePricesInitiator)
+    if normalizedBuyer and normalizedInitiator and normalizedBuyer ~= normalizedInitiator then
+      finalPrice = math.floor(finalPrice * 2)
+      priceInfo = priceInfo .. "⚠️ DOUBLE PRICE (Entrepreneur ability) - "
+    end
+  end
+  
+  return basePrice, finalPrice, priceInfo
+end
 
 -- =========================
 -- [S10] BUY FLOW (no destruct!)
@@ -5586,7 +5757,7 @@ function API_StartFlashSale(params)
     return false
   end
   S.flashSale = { active = true, initiatorColor = initiatorColor, turnOrder = turnOrder, currentIndex = 1 }
-  safeBroadcastAll("🛒 Flash Sale: "..tostring(initiatorColor).." started. Each player may buy one consumable at 30% off (in turn order) or resign.", {0.9,0.6,0.2})
+  safeBroadcastAll("🛒 Flash Sale: "..tostring(initiatorColor).." started. "..tostring(initiatorColor).." goes first, then others in turn order. Each player may buy one consumable at 30% off or resign.", {0.9,0.6,0.2})
   refreshShopOpenUI_later(0.15)
   return true
 end
@@ -5603,6 +5774,8 @@ function SetDoublePrices(params)
   if not initiatorColor or initiatorColor == "" then return false end
   S.doublePricesInitiator = initiatorColor
   drawUI()
+  refreshShopBoardDoublePricesUI()
+  refreshShopOpenUI_later(0.25)  -- Refresh card descriptions to show double price warnings
   safeBroadcastAll("🛒 "..tostring(initiatorColor).." talked to the shop owner: other players pay DOUBLE for consumables & hi-tech until "..tostring(initiatorColor).."'s next turn.", {0.9, 0.5, 0.2})
   return true
 end
@@ -5615,6 +5788,8 @@ function API_OnTurnChanged(params)
   if S.doublePricesInitiator and normalizeColor(S.doublePricesInitiator) == newColor then
     S.doublePricesInitiator = nil
     drawUI()
+    refreshShopBoardDoublePricesUI()
+    refreshShopOpenUI_later(0.25)  -- Refresh card descriptions to remove double price warnings
     safeBroadcastAll("🛒 Double prices ended (Entrepreneur's turn). Shop prices back to normal.", {0.7, 0.9, 0.7})
   end
 end
