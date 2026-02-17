@@ -409,7 +409,8 @@ end
 -- OWNED ESTATE DETECTOR
 -- =========================
 local function isCardInsideDeckOrContainer(card)
-  if not card or not card.getParent then return false end
+  if not card then return false end
+  -- getParent only exists on Cards; script objects (LuaGameObjectScript) throw when accessing it - wrap in pcall
   local ok, parent = pcall(function() return card.getParent() end)
   if not ok or not parent then return false end
   -- Card in deck/bag = not on board (prevents "already have apartment" when card was returned)
@@ -670,7 +671,7 @@ local function levelToNum(lvl)
 end
 
 -- Update rental cost in cost calculator when estate changes.
--- Uses replaceRentCost (single clean line, no delta stacking or false earnings).
+-- Uses replaceRentCost so one clean rent line is shown (no delta stacking, correct pay/receive).
 -- isRent: true when player just rented (apply Social Worker 50%); false when bought (no rent).
 local function updateRentalCostInCalculator(color, oldLevel, newLevel, isRent)
   color = normalizeColor(color)
@@ -689,34 +690,49 @@ local function updateRentalCostInCalculator(color, oldLevel, newLevel, isRent)
     return
   end
   
-  local costsCalc = findCostsCalculator()
-  if not costsCalc or not costsCalc.call then
-    warn("Costs Calculator not found for rental cost update")
-    return
-  end
-
-  local oldCost = ESTATE_RENTAL_COST[effectiveOldLevel] or 0
   local newCost = 0
+  local label = nil
 
   if newLevel == "L0" then
     newCost = ESTATE_RENTAL_COST.L0 or 50
+    label = "Level 0 rent: " .. tostring(newCost)
   elseif isRent == false then
     newCost = 0
+    -- label stays nil (no rent when bought)
   else
     newCost = ESTATE_RENTAL_COST[newLevel] or 0
     if newCost > 0 and getVocationForColor(color) == "SOCIAL_WORKER" then
       newCost = math.floor(newCost * 0.5)
     end
+    local levelNum = (newLevel == "L1" and 1) or (newLevel == "L2" and 2) or (newLevel == "L3" and 3) or (newLevel == "L4" and 4) or 0
+    label = "Level " .. tostring(levelNum) .. " rent: " .. tostring(newCost)
   end
 
-  local delta = newCost - oldCost
-  if delta ~= 0 then
-    local label = "Rent "..effectiveOldLevel.."→"..newLevel
-    safeCall(function()
-      costsCalc.call("addCost", { color = color, amount = delta, bucket = "costs", label = label })
-    end)
-    log("Estate rental: "..color.." adjusted by "..tostring(delta).." WIN (now "..tostring(newCost).." total)")
+  -- Call replaceRentCost on every object with WLB_COSTS_CALC so the one the player sees gets updated
+  local params = { color = color, amount = newCost, label = label, playerColor = color, pc = color }
+  local list = getObjectsWithTag(TAG_COSTS_CALC) or {}
+  local anyOk = false
+  for _, obj in ipairs(list) do
+    if obj and obj.call then
+      local ok, err = pcall(function()
+        obj.call("replaceRentCost", params)
+      end)
+      if ok then anyOk = true else warn("Estate rental: replaceRentCost failed on one object: "..tostring(err)) end
+    end
   end
+  if #list == 0 then
+    warn("Costs Calculator not found for rental cost update (tag: "..tostring(TAG_COSTS_CALC)..")")
+  elseif not anyOk then
+    warn("Estate rental: replaceRentCost did not succeed on any object")
+  else
+    -- Force UI refresh on all cost calculator objects
+    Wait.time(function()
+      for _, obj in ipairs(getObjectsWithTag(TAG_COSTS_CALC) or {}) do
+        if obj and obj.call then pcall(function() obj.call("rebuildUI") end) end
+      end
+    end, 0.15)
+  end
+  log("Estate rental: "..color.." rent set to "..tostring(newCost).." WIN ("..tostring(newLevel)..")")
 end
 
 -- =========================
@@ -964,14 +980,22 @@ local function doRent(level, clickedColor)
 
   -- Remove tokens to safe park before placing estate card
   removeTokensToSafePark(acting)
+
+  -- Update rental cost and estate state immediately so "Remaining costs" shows new rent (e.g. 200 for L1) before card placement
+  local oldLevel = S.currentEstateLevel[acting] or "L0"
+  S.currentEstateLevel[acting] = level
+  S.currentEstateIsRented[acting] = true
+  updateRentalCostInCalculator(acting, oldLevel, level, true)
   
-  -- Small delay to let tokens move
+  -- Small delay to let tokens move, then take and place card
   Wait.time(function()
     local card, err = takeTopRealCard(level)
     if not card then
       sayToColor(acting, "⛔ RENT: "..tostring(err), {1,0.6,0.2})
-      -- Return tokens if card taking failed
       returnTokensFromSafePark(acting)
+      S.currentEstateLevel[acting] = oldLevel
+      S.currentEstateIsRented[acting] = (oldLevel ~= "L0")
+      updateRentalCostInCalculator(acting, level, oldLevel, oldLevel ~= "L0")
       return
     end
 
@@ -980,21 +1004,16 @@ local function doRent(level, clickedColor)
       sayToColor(acting, "⛔ "..tostring(why), {1,0.4,0.4})
       local deck = S.decks[level]
       if isAlive(deck) and deck.putObject then safeCall(function() deck.putObject(card) end) end
-      -- Return tokens if placement failed
       returnTokensFromSafePark(acting)
+      S.currentEstateLevel[acting] = oldLevel
+      S.currentEstateIsRented[acting] = (oldLevel ~= "L0")
+      updateRentalCostInCalculator(acting, level, oldLevel, oldLevel ~= "L0")
       return
     end
 
     addTagSafe(card, TAG_ESTATE_MODE_RENT)
     removeTagSafe(card, TAG_ESTATE_MODE_BUY)
     attachReturnOrSellButton(card)
-
-    -- Update rental cost in cost calculator (remove old level, add new level)
-    -- Only adjust delta - TurnController handles base L0 costs per turn. Pass isRent=true for Social Worker 50% same-turn.
-    local oldLevel = S.currentEstateLevel[acting] or "L0"  -- Default to L0 if not set
-    S.currentEstateLevel[acting] = level
-    S.currentEstateIsRented[acting] = true  -- Rented = pay rent
-    updateRentalCostInCalculator(acting, oldLevel, level, true)
 
     -- Update TokenEngine housing level and reposition family tokens to the new apartment's slots (L1–L4)
     local tokenEngine = findTokenEngine()
@@ -1030,14 +1049,22 @@ local function doBuyExecute(level, acting, finalPrice, voucherTokensToRemove)
   end
 
   removeTokensToSafePark(acting)
+
+  -- Update rental cost and estate state immediately (bought = no rent) so "Remaining costs" updates before card placement
+  local oldLevel = S.currentEstateLevel[acting] or "L0"
+  S.currentEstateLevel[acting] = level
+  S.currentEstateIsRented[acting] = false
+  updateRentalCostInCalculator(acting, oldLevel, level, false)
   
-  -- Small delay to let tokens move
+  -- Small delay to let tokens move, then take and place card
   Wait.time(function()
     local card, err = takeTopRealCard(level)
     if not card then
       sayToColor(acting, "⛔ BUY: "..tostring(err), {1,0.6,0.2})
-      -- Return tokens if card taking failed
       returnTokensFromSafePark(acting)
+      S.currentEstateLevel[acting] = oldLevel
+      S.currentEstateIsRented[acting] = (oldLevel ~= "L0")
+      updateRentalCostInCalculator(acting, level, oldLevel, oldLevel ~= "L0")
       return
     end
 
@@ -1046,21 +1073,16 @@ local function doBuyExecute(level, acting, finalPrice, voucherTokensToRemove)
       sayToColor(acting, "⛔ "..tostring(why), {1,0.4,0.4})
       local deck = S.decks[level]
       if isAlive(deck) and deck.putObject then safeCall(function() deck.putObject(card) end) end
-      -- Return tokens if placement failed
       returnTokensFromSafePark(acting)
+      S.currentEstateLevel[acting] = oldLevel
+      S.currentEstateIsRented[acting] = (oldLevel ~= "L0")
+      updateRentalCostInCalculator(acting, level, oldLevel, oldLevel ~= "L0")
       return
     end
 
     addTagSafe(card, TAG_ESTATE_MODE_BUY)
     removeTagSafe(card, TAG_ESTATE_MODE_RENT)
     attachReturnOrSellButton(card)
-
-    -- Update rental cost in cost calculator (remove old level, add new level)
-    -- Note: Buying also requires rental cost payment per turn. Pass isRent=false (no Social Worker discount on buy).
-    local oldLevel = S.currentEstateLevel[acting] or "L0"  -- Default to L0 if not set
-    S.currentEstateLevel[acting] = level
-    S.currentEstateIsRented[acting] = false  -- Bought = no rent
-    updateRentalCostInCalculator(acting, oldLevel, level, false)
 
     -- Update TokenEngine housing level and reposition family tokens to the new apartment's slots (L1–L4)
     local tokenEngine = findTokenEngine()
@@ -1349,22 +1371,35 @@ function ME_returnOrSellEstate(card, pc)
   end
 
   local isBuy = (card.hasTag and card.hasTag(TAG_ESTATE_MODE_BUY)) or false
+  local refund = 0
   if isBuy then
     local price = ESTATE_PRICE[lvl] or 0
-    local refund = math.floor(price * SELL_REFUND_FACTOR + 0.0001)
-    sayToColor(acting, "💰 SELL: refund "..tostring(refund).." VIN (placeholder).", {0.7,1,0.7})
+    refund = math.floor(price * SELL_REFUND_FACTOR + 0.0001)
+    sayToColor(acting, "💰 SELL: refund "..tostring(refund).." WIN added to earnings.", {0.7,1,0.7})
   else
-    sayToColor(acting, "🏠 RETURN: aktualizacja czynszu (placeholder).", {0.7,0.9,1})
+    sayToColor(acting, "🏠 RETURN: aktualizacja czynszu.", {0.7,0.9,1})
   end
 
   clearCardButtons(card)
 
-  -- Update rental cost in cost calculator (revert to L0 default)
-  -- Only adjust delta - TurnController handles base L0 costs per turn
+  -- Update rental cost in cost calculator (revert to L0 default) – one clean line via replaceRentCost
   local oldLevel = S.currentEstateLevel[acting] or "L0"  -- Default to L0 if somehow not set
   S.currentEstateLevel[acting] = "L0"  -- Revert to grandma's house
   S.currentEstateIsRented[acting] = false  -- L0 = no rented apartment
   updateRentalCostInCalculator(acting, oldLevel, "L0", false)
+
+  -- Add sell refund to earnings so "EARNINGS TO COLLECT" and PAY flow are correct
+  if isBuy and refund > 0 then
+    local costsCalc = findCostsCalculator()
+    if costsCalc and costsCalc.call then
+      safeCall(function()
+        pcall(function()
+          costsCalc.call("addCost", { color = acting, amount = refund, bucket = "earnings", label = "Estate sell (50%)" })
+        end)
+      end)
+      log("Estate sell: "..acting.." earnings +"..tostring(refund).." WIN (refund)")
+    end
+  end
 
   -- Update TokenEngine housing level back to L0 and reposition family tokens to board (grandma's house)
   local tokenEngine = findTokenEngine()
@@ -1621,12 +1656,14 @@ function API_UpdateRentalCostsForVocationChange(params)
   end
 
   local fullRentalCost = ESTATE_RENTAL_COST[estateLevel] or 0
+  -- For L1–L4, only apply discount if apartment is rented (not bought). For L0, always use default board rent.
   if estateLevel ~= "L0" then
     local estateObj = findOwnedEstateOnBoard(color)
     if estateObj then
       local ok, hasRentTag = pcall(function() return estateObj.hasTag(TAG_ESTATE_MODE_RENT) end)
       if ok and not hasRentTag then
-        return false  -- Bought: no rent
+        -- Bought: no rent to discount
+        fullRentalCost = 0
       end
     else
       fullRentalCost = 0
@@ -1634,25 +1671,55 @@ function API_UpdateRentalCostsForVocationChange(params)
   end
 
   if fullRentalCost <= 0 then
+    -- Nothing to discount (no rent currently due)
     return false
   end
 
   local discountedRentalCost = math.floor(fullRentalCost * 0.5)
-  local costsCalc = findCostsCalculator()
-  if not costsCalc or not costsCalc.call then
+  local levelNum = (estateLevel == "L1" and 1) or (estateLevel == "L2" and 2) or (estateLevel == "L3" and 3) or (estateLevel == "L4" and 4) or 0
+  local label = "Level " .. tostring(levelNum) .. " rent: " .. tostring(discountedRentalCost)
+
+  -- Update all Costs Calculator objects so discount applies immediately on whichever tile the players use
+  local paramsCC = {
+    color = color,
+    playerColor = color,
+    pc = color,
+    amount = discountedRentalCost,
+    label = label,
+  }
+
+  local list = getObjectsWithTag(TAG_COSTS_CALC) or {}
+  if #list == 0 then
+    warn("API_UpdateRentalCostsForVocationChange: no Costs Calculator with tag "..tostring(TAG_COSTS_CALC))
     return false
   end
 
-  local delta = discountedRentalCost - fullRentalCost  -- Negative: reduce cost
-  local label = "Rent (Social Worker 50%)"
+  local anyOk = false
+  for _, obj in ipairs(list) do
+    if obj and obj.call then
+      local ok, err = pcall(function()
+        obj.call("replaceRentCost", paramsCC)
+      end)
+      if ok then
+        anyOk = true
+      else
+        warn("API_UpdateRentalCostsForVocationChange: replaceRentCost failed on one object: "..tostring(err))
+      end
+    end
+  end
 
-  local ok = pcall(function()
-    costsCalc.call("addCost", { color = color, amount = delta, bucket = "costs", label = label })
-  end)
-  if ok then
+  if anyOk then
+    -- Force UI refresh so "Remaining costs" reflects the discounted rent immediately
+    Wait.time(function()
+      for _, obj in ipairs(getObjectsWithTag(TAG_COSTS_CALC) or {}) do
+        if obj and obj.call then pcall(function() obj.call("rebuildUI") end) end
+      end
+    end, 0.15)
+
     log("Updated rental cost for "..color..": "..fullRentalCost.." → "..discountedRentalCost.." (Social Worker 50% discount)")
     return true
   end
+
   return false
 end
 

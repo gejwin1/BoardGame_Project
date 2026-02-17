@@ -443,10 +443,16 @@ end
 -- Use when estate level changes (rent, buy, return) to avoid delta stacking and false "earnings".
 -- amount: new rent total (0 = no rent). label: e.g. "Level 1 rent: 200" or nil if amount=0.
 function replaceRentCost(params)
-  local c = resolveColor(params, false)
+  if type(params) ~= "table" then params = {} end
+  -- Accept color from multiple keys (TTS .call() may pass tables with different key casing)
+  local c = params.color or params.playerColor or params.pc or params["color"] or params["playerColor"] or params["pc"]
+  if not isPlayableColor(c) then
+    c = getActiveColor()
+  end
   if not c then return 0 end
-  local amount = tonumber(params.amount)
+  local amount = tonumber(params.amount or params["amount"])
   local label = (type(params.label) == "string" and params.label ~= "") and params.label or nil
+  if type(params["label"]) == "string" and params["label"] ~= "" then label = params["label"] end
   if amount == nil then return getCosts(c) end
   amount = clampNonNeg(clampInt(amount))
 
@@ -475,6 +481,8 @@ function replaceRentCost(params)
   end
 
   updateLabelAndBg()
+  -- Log so chat confirms this object received the update (REMAINING COSTS should match)
+  log("CostsCalculator: rent "..tostring(c).." = "..tostring(amount).." WIN")
   return getCosts(c)
 end
 

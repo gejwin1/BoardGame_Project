@@ -3084,12 +3084,19 @@ function VOC_SetVocation(params)
   -- This ensures the discount applies from the round they get the vocation, not just next turn
   if vocation == VOC_SOCIAL_WORKER then
     Wait.time(function()
+      -- Estate/Market controller object uses tag WLB_MARKET_CTRL (EstateEngine script); try both for compatibility
       local estateList = VOC.getObjectsWithTagSafe("WLB_ESTATE_ENGINE") or {}
+      if #estateList == 0 then
+        estateList = VOC.getObjectsWithTagSafe("WLB_MARKET_CTRL") or {}
+      end
       local estate = estateList[1]
       if estate and estate.call then
-        pcall(function()
+        local ok = pcall(function()
           estate.call("API_UpdateRentalCostsForVocationChange", { color = color })
         end)
+        if not ok and VOC.warn then VOC.warn("API_UpdateRentalCostsForVocationChange failed for "..tostring(color)) end
+      else
+        if VOC.warn then VOC.warn("Estate/Market controller not found (WLB_ESTATE_ENGINE / WLB_MARKET_CTRL); Social Worker rent not updated") end
       end
     end, 0.5)  -- Small delay to ensure state is saved
   end

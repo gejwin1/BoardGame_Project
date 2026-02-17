@@ -36,17 +36,19 @@
 | Caller | Function | Status |
 |--------|----------|--------|
 | TurnController | replaceRentCost | Uses replaceRentCost – correct |
-| EstateEngine (rent/buy/return) | replaceRentCost | Uses replaceRentCost – correct |
-| EstateEngine API_UpdateRentalCostsForVocationChange | addCost (delta) | Uses addCost with delta – adds extra line; should use replaceRentCost |
-| ShopEngine EstateInvest | addCost (delta) | Uses addCost with delta – adds "Rent L0→L2" line; should use replaceRentCost |
+| EstateEngine (rent/buy/return) | replaceRentCost | Uses replaceRentCost in `updateRentalCostInCalculator` – correct |
+| EstateEngine API_UpdateRentalCostsForVocationChange | replaceRentCost | Uses replaceRentCost with discounted amount – correct |
+| EstateEngine ME_returnOrSellEstate (sell) | replaceRentCost + addCost(earnings) | Rent set to L0 via replaceRentCost; sell refund added to earnings – correct |
+| ShopEngine EstateInvest | replaceRentCost | Uses replaceRentCost – correct |
 | EventEngine (Baby) | addCost | Uses addCost – correct (not rent) |
 | EventEngine (Property Tax) | addCost | Uses addCost – correct (not rent) |
 | PlayerBoardController_Shared (salary) | addCost | Uses addCost (earnings) – correct |
 
-## 3. Inconsistencies (FIXED)
+## 3. Rent vs other costs
 
-1. **API_UpdateRentalCostsForVocationChange** – Now uses `replaceRentCost` with discounted amount and label like "Level 0 rent: 25".
-2. **ShopEngine EstateInvest** – Now uses `replaceRentCost` with final rent and label like "Level 2 rent: 350".
+- **Rent:** Use **replaceRentCost** whenever rent or estate level changes (rent, buy, return, sell, vocation discount, TurnController per-turn rent). One call replaces all rent lines with a single line, so "REMAINING COSTS" and pay values stay correct.
+- **Other costs (Baby, Loan, Property Tax, etc.):** Use **addCost** to add a line and adjust the total.
+- **Earnings (salary, estate sell refund):** Use **addCost** with `bucket = "earnings"` so "EARNINGS TO COLLECT" and receive flow are correct.
 
 ## 4. Robustness
 

@@ -590,17 +590,19 @@ local function onTurnStart_AddRentalCosts(color)
     return
   end
   
+  -- Use replaceRentCost so we set the turn's rent (one line). Avoids double rent when Social Worker
+  -- discount was already applied by API_UpdateRentalCostsForVocationChange before this turn started.
   local costsCalc = findOneByTags(TAG_COSTS_CALC)
   if costsCalc and costsCalc.call then
-    local rentLabel = (totalRentalCost > 0) and ("Level "..((rentLevel=="L0"and 0)or(rentLevel=="L1"and 1)or(rentLevel=="L2"and 2)or(rentLevel=="L3"and 3)or(rentLevel=="L4"and 4)or 0).." rent: "..tostring(totalRentalCost)) or ("Rent "..rentLevel)
+    local rentLabel = (totalRentalCost > 0) and ("Level "..((rentLevel=="L0"and 0)or(rentLevel=="L1"and 1)or(rentLevel=="L2"and 2)or(rentLevel=="L3"and 3)or(rentLevel=="L4"and 4)or 0).." rent: "..tostring(totalRentalCost)) or nil
     local ok = pcall(function()
-      costsCalc.call("addCost", {color=color, amount=totalRentalCost, label=rentLabel})
+      costsCalc.call("replaceRentCost", { color = color, amount = totalRentalCost, label = rentLabel, playerColor = color, pc = color })
     end)
     if ok then
       rentalCostAddedThisTurn[color] = true
-      log("Rental cost: "..color.." added "..tostring(totalRentalCost).." WIN")
+      log("Rental cost: "..color.." set "..tostring(totalRentalCost).." WIN (replaceRentCost)")
     else
-      warn("Failed to add rental cost for "..tostring(color))
+      warn("Failed to set rental cost for "..tostring(color))
     end
   end
 end
