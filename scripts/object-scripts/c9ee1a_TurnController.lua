@@ -1048,6 +1048,32 @@ end
 local function onTurnEnd_PayCosts(color)
   if not color then return end
   
+  -- Handle work earnings: remove any work earnings added during turn, then add correct amount at turn end
+  -- This ensures work earnings are only available at turn end, not during the turn
+  local workCount = apGetWorkCount(color)
+  if workCount > 0 then
+    local voc = findOneByTags(TAG_VOCATIONS_CTRL)
+    local salary = 0
+    if voc and voc.call then
+      local ok, sal = pcall(function() return voc.call("VOC_GetSalary", { color = color }) end)
+      if ok and type(sal) == "number" then salary = sal end
+    end
+    if salary > 0 then
+      local totalWorkEarnings = workCount * salary
+      local costsCalc = findOneByTags(TAG_COSTS_CALC)
+      if costsCalc and costsCalc.call then
+        -- Remove work earnings that were added during the turn (PlayerBoardController adds them immediately)
+        pcall(function()
+          costsCalc.call("addCost", { color = color, amount = -totalWorkEarnings, bucket = "earnings", label = "Work" })
+        end)
+        -- Add work earnings back (will be collected by CostsCalculator.onTurnEnd)
+        pcall(function()
+          costsCalc.call("addCost", { color = color, amount = totalWorkEarnings, bucket = "earnings", label = "Work" })
+        end)
+      end
+    end
+  end
+  
   local TAG_COSTS_CALC = "WLB_COSTS_CALC"
   local costsCalc = findOneByTags(TAG_COSTS_CALC)
   if not costsCalc or not costsCalc.call then
@@ -1204,6 +1230,10 @@ local function advanceTurn()
     if W.currentRound < MAX_ROUND then
       W.currentRound = W.currentRound + 1
       tokenYearSetRound(W.currentRound)
+      -- Celebrity hi-tech cashback: Pay refunds at start of new round
+      if voc and voc.call then
+        safeDirectCall(voc, "VOC_OnRoundStart", { round = W.currentRound })
+      end
       -- Youth → Adult: when reaching round 6, trigger vocation selection from setActiveByTurnIndex (same script context; Wait.time can run in Global and lose access to startVocationSelection)
       if W.startMode == "YOUTH" and W.currentRound == 6 then
         W.triggerVocationSelectionAtRound6 = true
@@ -2068,13 +2098,18 @@ function ui_confirmEndTurnYes()
   end
 
   endTurnProcessing(active)
+  
+  -- Get work count BEFORE finalizing AP (so it's still available)
+  local workCount = apGetWorkCount(active)
+  
   finalizeAPAfterTurn(active)
   onTurnEnd_ExpireOneTurnStatuses(active)
   
   -- VocationsController: Add experience tokens and check for promotion after turn ends
+  -- Pass workCount so VocationsController can track regular work AP
   local voc = findOneByTags(TAG_VOCATIONS_CTRL)
   if voc and voc.call then
-    pcall(function() voc.call("VOC_OnTurnEnd", { color = active }) end)
+    pcall(function() voc.call("VOC_OnTurnEnd", { color = active, workAPThisTurn = workCount }) end)
   end
 
   advanceTurn()
@@ -2117,13 +2152,18 @@ function ui_nextTurn()
   end
 
   endTurnProcessing(active)
+  
+  -- Get work count BEFORE finalizing AP (so it's still available)
+  local workCount = apGetWorkCount(active)
+  
   finalizeAPAfterTurn(active)
   onTurnEnd_ExpireOneTurnStatuses(active)
   
   -- VocationsController: Add experience tokens and check for promotion after turn ends
+  -- Pass workCount so VocationsController can track regular work AP
   local voc = findOneByTags(TAG_VOCATIONS_CTRL)
   if voc and voc.call then
-    pcall(function() voc.call("VOC_OnTurnEnd", { color = active }) end)
+    pcall(function() voc.call("VOC_OnTurnEnd", { color = active, workAPThisTurn = workCount }) end)
   end
 
   advanceTurn()

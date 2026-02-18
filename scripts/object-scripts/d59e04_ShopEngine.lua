@@ -3911,6 +3911,18 @@ local function attemptBuyCard(card, buyerColor, options)
     if not S.ownedHiTech[buyerColor] then S.ownedHiTech[buyerColor] = {} end
     table.insert(S.ownedHiTech[buyerColor], name)
     
+    -- Celebrity hi-tech cashback: Track purchase for refund next round
+    local voc = firstWithTag(TAG_VOCATIONS_CTRL)
+    if voc and voc.call then
+      pcall(function() 
+        voc.call("VOC_RecordCelebrityHiTechPurchase", { 
+          color = buyerColor, 
+          pricePaid = cost,
+          cardName = name
+        }) 
+      end)
+    end
+    
     -- Apply immediate effects (COFFEE, etc.)
     applyHiTechEffect(buyerColor, name, def)
     

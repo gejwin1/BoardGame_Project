@@ -665,6 +665,8 @@ local state = {
   taxWaiverUsedAtLevel = { Yellow=nil, Blue=nil, Red=nil, Green=nil },
   voluntaryWorkAP = { Yellow=0, Blue=0, Red=0, Green=0 },  -- NGO Worker: AP spent on voluntary work (for award path B)
   celebrityAwardReceived = { Yellow=false, Blue=false, Red=false, Green=false },  -- Celebrity L3: claimed "Get an award"
+  -- Celebrity hi-tech cashback: { color = { {amount, roundDue, levelAtPurchase, cardName}, ... } }
+  celebrityCashbackRefunds = {},
 }
 
 -- =========================================================
@@ -2721,6 +2723,7 @@ local function saveState()
     lockdownPending = state.lockdownPending or {},
     voluntaryWorkAP = state.voluntaryWorkAP or { Yellow=0, Blue=0, Red=0, Green=0 },
     celebrityAwardReceived = state.celebrityAwardReceived or { Yellow=false, Blue=false, Red=false, Green=false },
+    celebrityCashbackRefunds = state.celebrityCashbackRefunds or {},
   }
   self.script_state = JSON.encode(data)
 end
@@ -3222,6 +3225,7 @@ function VOC_AddWorkAP(params)
   state.workAP[color] = (state.workAP[color] or 0) + amount
   state.workAPThisLevel[color] = (state.workAPThisLevel[color] or 0) + amount
   state.workAPThisRound[color] = (state.workAPThisRound[color] or 0) + amount
+  
   saveState()
   if VOC.log then VOC.log("Work AP added: " .. color .. " +" .. amount .. " (total: " .. state.workAP[color] .. ", this level: " .. state.workAPThisLevel[color] .. ", this round: " .. (state.workAPThisRound[color] or 0) .. ")") end
   
@@ -3361,7 +3365,7 @@ function VOC_OnRoundEnd(params)
         end
       end
     elseif vocation == VOC_CELEBRITY then
-      -- Celebrity does not use experience tokens (work-based promotion only)
+      -- Celebrity does not use experience tokens (work-based promotion only, checked at turn end)
       giveExperience = false
     else
       -- Other vocations: tokens are now given at turn end (VOC_OnTurnEnd), not at round end
@@ -3388,6 +3392,46 @@ function VOC_OnRoundEnd(params)
   return true
 end
 
+-- Called by TurnController when a new round starts (after round increments)
+-- Pay out Celebrity hi-tech cashback refunds at the start of the round so players can use the money
+function VOC_OnRoundStart(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
+  params = params or {}
+  local currentRound = tonumber(params.round) or getCurrentRound() or 1
+  
+  -- Celebrity hi-tech cashback: Pay out pending refunds due this round
+  state.celebrityCashbackRefunds = state.celebrityCashbackRefunds or {}
+  for color, refunds in pairs(state.celebrityCashbackRefunds) do
+    if type(refunds) == "table" then
+      local totalRefund = 0
+      local refundCount = 0
+      local refundDetails = {}
+      for i = #refunds, 1, -1 do
+        local refund = refunds[i]
+        if refund and refund.roundDue and refund.roundDue <= currentRound then
+          totalRefund = totalRefund + (tonumber(refund.amount) or 0)
+          refundCount = refundCount + 1
+          table.insert(refundDetails, refund.cardName or "hi-tech item")
+          table.remove(refunds, i)
+        end
+      end
+      if totalRefund > 0 then
+        moneyAdd(color, totalRefund)
+        local detailMsg = refundCount == 1 and refundDetails[1] or (refundCount .. " items")
+        safeBroadcastToColor("💰 Celebrity cashback: Received " .. totalRefund .. " VIN refund from hi-tech purchase(s) (" .. detailMsg .. ")", color, {0.9,0.7,0.3})
+        broadcastToAll("💰 " .. color .. " (Celebrity) received " .. totalRefund .. " VIN cashback from hi-tech purchases.", {0.9,0.7,0.3})
+      end
+      -- Clean up empty refund arrays
+      if #refunds == 0 then
+        state.celebrityCashbackRefunds[color] = nil
+      end
+    end
+  end
+  
+  return true
+end
+
 -- Called by TurnController at end of each player's turn. Adds experience tokens and checks for promotion.
 -- Most vocations get 1 token per turn (if they have the vocation). Public Servant gets tokens at round end based on work obligation.
 function VOC_OnTurnEnd(params)
@@ -3402,6 +3446,43 @@ function VOC_OnTurnEnd(params)
   
   local level = state.levels[color] or 1
   local tokenEngine = findTokenEngine()
+  
+  -- Track regular work AP (AP moved to WORK area for salary)
+  -- This is separate from vocation-specific actions which call VOC_AddWorkAP directly
+  -- Get work count from params (passed by TurnController before AP is finalized)
+  local workCount = tonumber(params.workAPThisTurn) or 0
+  
+  if VOC.log then
+    VOC.log("VOC_OnTurnEnd: Checking work AP for " .. color .. " - workCount from params: " .. tostring(workCount))
+  end
+  
+  -- Only add work AP if player actually worked (workCount > 0)
+  -- Note: Vocation-specific actions already call VOC_AddWorkAP, so we're tracking regular work here
+  if workCount > 0 then
+    VOC_AddWorkAP({ color = color, amount = workCount })
+    if VOC.log then VOC.log("VOC_OnTurnEnd: Added " .. workCount .. " regular work AP for " .. color) end
+  end
+  
+  -- NGO Worker Crowdfunding enforcement: Check if player has unused crowdfund pool
+  -- If pool exists at turn end, they failed to buy hi-tech and lose the money
+  state.crowdfundPool = state.crowdfundPool or {}
+  state.crowdfundPoolTurnColor = state.crowdfundPoolTurnColor or {}
+  local currentTurn = (Turns and Turns.turn_color and Turns.turn_color ~= "") and normalizeColor(Turns.turn_color) or color
+  if state.crowdfundPool[color] and state.crowdfundPoolTurnColor[color] == currentTurn then
+    local lostPool = tonumber(state.crowdfundPool[color]) or 0
+    if lostPool > 0 then
+      -- Remove the money that was given to them (they didn't use it)
+      -- Use resolveMoney to get money controller, then spend
+      local moneyObj = resolveMoney(color)
+      if moneyObj and moneyObj.call then
+        pcall(function() moneyObj.call("API_spend", {amount = lostPool}) end)
+      end
+      safeBroadcastToColor("⚠️ Crowdfunding pool expired! You did not buy a High-Tech item this turn. Lost " .. lostPool .. " VIN from the crowdfunding pool.", color, {1,0.6,0.2})
+      broadcastToAll("💰 " .. color .. " lost " .. lostPool .. " VIN from unused crowdfunding pool.", {1,0.7,0.3})
+      state.crowdfundPool[color] = nil
+      state.crowdfundPoolTurnColor[color] = nil
+    end
+  end
   
   -- Entrepreneur: Richest player satisfaction (passive perk)
   -- If Entrepreneur has highest money at end of turn, gain satisfaction based on level
@@ -3438,8 +3519,27 @@ function VOC_OnTurnEnd(params)
     return false
   end
   
-  -- Celebrity: does not use experience tokens (work-based promotion only)
+  -- Celebrity: Check for automatic promotion when work AP quotas are met (work-based promotion)
   if vocation == VOC_CELEBRITY then
+    -- Check if Celebrity meets promotion requirements
+    local canPromote, reason = VOC_CanPromote({color=color})
+    if canPromote then
+      VOC.log("VOC_OnTurnEnd: Celebrity " .. color .. " meets promotion requirements, promoting automatically")
+      local promoteOk, promoteErr = VOC_Promote({color=color})
+      if promoteOk then
+        VOC.log("VOC_OnTurnEnd: Successfully promoted Celebrity " .. color)
+        safeBroadcastToColor("🎉 Celebrity promotion! You have been automatically promoted!", color, {0.3, 1, 0.3})
+      else
+        VOC.log("VOC_OnTurnEnd: Failed to promote Celebrity " .. color .. " - " .. tostring(promoteErr))
+        safeBroadcastToColor("⚠️ Celebrity promotion failed: " .. tostring(promoteErr), color, {1, 0.6, 0.2})
+      end
+    else
+      -- Surface why promotion did not happen so players see missing quotas (K/S/AP/money)
+      if reason and reason ~= "" then
+        VOC.log("VOC_OnTurnEnd: Celebrity " .. color .. " cannot promote: " .. tostring(reason))
+        safeBroadcastToColor("📋 Celebrity promotion requirements not met: " .. tostring(reason), color, {1, 0.85, 0.4})
+      end
+    end
     return false
   end
   
@@ -5428,10 +5528,18 @@ function VOC_StartNGOCrowdfunding(params)
           end
         end
       end
+      -- Store pool for this player; valid only this turn. When they buy a High-Tech item, pool is applied (excess lost; if cost > pool they pay difference).
+      state.crowdfundPool = state.crowdfundPool or {}
+      state.crowdfundPoolTurnColor = state.crowdfundPoolTurnColor or {}
+      local currentTurn = (Turns and Turns.turn_color and Turns.turn_color ~= "") and normalizeColor(Turns.turn_color) or actorColor
+      state.crowdfundPool[actorColor] = totalRaised
+      state.crowdfundPoolTurnColor[actorColor] = currentTurn
       if totalRaised > 0 then
         moneyAdd(actorColor, totalRaised)
+        broadcastToAll("💰 Crowdfunding: Money raised for " .. actorColor .. ": " .. totalRaised .. " VIN. Use it this turn on a High-Tech purchase (excess lost; if item costs more, you pay the difference).", {0.7,1,0.7})
+      else
+        safeBroadcastAll("Crowdfunding Campaign: Each player pays up to 250 VIN to "..actorColor.." (only if they have it). Total raised: 0 VIN.", {0.7,1,0.7})
       end
-      safeBroadcastAll("Crowdfunding Campaign: Each player pays up to 250 VIN to "..actorColor.." (only if they have it). Total raised: "..totalRaised.." VIN. No pool for Hi-Tech this turn.", {0.7,1,0.7})
     else
       addAwardToken(actorColor)
       local totalRaised = 0
@@ -5494,6 +5602,80 @@ function VOC_ApplyCrowdfundPoolForPurchase(params)
     broadcastToAll(msg, {0.7,1,0.7})
   end
   return { amountFromPool = amountFromPool, playerPays = playerPays }
+end
+
+-- Record Celebrity hi-tech purchase for cashback refund next round
+-- Params: { color = player color, pricePaid = actual price paid (after discounts), cardName = card name }
+function VOC_RecordCelebrityHiTechPurchase(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
+  params = params or {}
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color))
+  if not color then return false end
+  
+  local vocation = state.vocations[color]
+  if vocation ~= VOC_CELEBRITY then return false end
+  
+  local level = state.levels[color] or 1
+  local pricePaid = tonumber(params.pricePaid) or 0
+  if pricePaid <= 0 then return false end
+  
+  -- Calculate refund percentage based on level at purchase time
+  local refundPercent = 0
+  if level == 1 then
+    refundPercent = 0.30  -- 30%
+  elseif level == 2 then
+    refundPercent = 0.50  -- 50%
+  elseif level == 3 then
+    refundPercent = 0.70  -- 70%
+  else
+    return false  -- Invalid level
+  end
+  
+  local refundAmount = math.floor(pricePaid * refundPercent)
+  if refundAmount <= 0 then return false end
+  
+  -- Get current round and set refund for next round
+  local currentRound = getCurrentRound() or 1
+  local refundRound = currentRound + 1
+  
+  -- Store pending refund
+  state.celebrityCashbackRefunds = state.celebrityCashbackRefunds or {}
+  if not state.celebrityCashbackRefunds[color] then
+    state.celebrityCashbackRefunds[color] = {}
+  end
+  
+  table.insert(state.celebrityCashbackRefunds[color], {
+    amount = refundAmount,
+    roundDue = refundRound,
+    levelAtPurchase = level,
+    cardName = params.cardName or "hi-tech item"
+  })
+  
+  if VOC.log then
+    VOC.log("VOC_RecordCelebrityHiTechPurchase: " .. color .. " (L" .. level .. ") bought hi-tech for " .. pricePaid .. " VIN → " .. refundAmount .. " VIN refund due round " .. refundRound)
+  end
+  
+  return true
+end
+
+-- Check if player has an active crowdfund pool (must buy hi-tech before ending turn)
+function VOC_HasActiveCrowdfundPool(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then return false end
+  params = params or {}
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color))
+  if not color then return false end
+  
+  state.crowdfundPool = state.crowdfundPool or {}
+  state.crowdfundPoolTurnColor = state.crowdfundPoolTurnColor or {}
+  local currentTurn = (Turns and Turns.turn_color and Turns.turn_color ~= "") and normalizeColor(Turns.turn_color) or color
+  
+  local pool = tonumber(state.crowdfundPool[color]) or 0
+  local poolTurn = state.crowdfundPoolTurnColor[color]
+  
+  -- Pool is active if it exists, has value > 0, and is for current turn
+  return (pool > 0 and poolTurn == currentTurn)
 end
 
 function VOC_StartNGOVoluntaryWork(params)
