@@ -422,11 +422,15 @@ local function doWorkMove(amount)
     return
   end
 
-  -- Salary goes to CostsCalculator as earnings (shows in "Earnings to collect")
-  -- IMPORTANT: Undo should undo earnings (not create costs).
-  -- So we adjust the earnings bucket directly: +salary on add, -salary on undo.
+  -- Salary goes to CostsCalculator as PENDING work earnings (granted at turn end, not immediately available)
+  -- IMPORTANT: Undo should undo pending earnings (not create costs).
+  -- Work earnings are stored separately and only added to earnings bucket at turn end.
   local deltaE = (amount > 0) and (salary) or (-salary)
-  costsAdd(color, deltaE, "earnings", "Work")  -- "Work" merges when multiple AP (e.g. "Work: 300")
+  -- Use addPendingWorkEarnings instead of adding to earnings bucket directly
+  local cc = findCostsCalculator()
+  if cc and cc.call then
+    pcall(function() cc.call("addPendingWorkEarnings", { color = color, delta = deltaE }) end)
+  end
 
   local after = before + amount
   if after < 0 then after = 0 end

@@ -420,6 +420,21 @@ function resetNewGame()
   log("Costs Calculator: All costs reset for new game")
 end
 
+-- Add pending work earnings (will be granted at turn end, not immediately available)
+-- Supports negative deltas for undo (when player removes work AP)
+function addPendingWorkEarnings(params)
+  local c = resolveColor(params, true)
+  if not c then return false end
+  local delta = clampInt(params.delta or params.amount or 0)
+  if delta == 0 then return true end
+  
+  local current = pendingWorkEarnings[c] or 0
+  local newValue = current + delta
+  -- Allow negative values temporarily (for undo), but clamp to 0 when granting at turn end
+  pendingWorkEarnings[c] = newValue
+  return true
+end
+
 function addCost(params)
   -- Require explicit color so we never add cost to the wrong (e.g. active) player by mistake
   local c = resolveColor(params, false)
@@ -661,6 +676,15 @@ end
 function onTurnEnd(params)
   local c = resolveColor(params, false)
   if not c then return {ok=false, reason="no_color"} end
+
+  -- Grant pending work earnings at turn end (before paying costs)
+  -- Only grant if positive (negative values from undo are ignored)
+  local pendingWork = clampNonNeg(pendingWorkEarnings[c] or 0)
+  if pendingWork > 0 then
+    addCostsOrEarnings(c, pendingWork, "earnings", "Work")
+  end
+  -- Clear pending work earnings for this player (reset for next turn)
+  pendingWorkEarnings[c] = 0
 
   local dueCosts = getCosts(c)
   local dueEarnings = getEarnings(c)

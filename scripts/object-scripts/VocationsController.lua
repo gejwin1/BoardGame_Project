@@ -667,6 +667,8 @@ local state = {
   celebrityAwardReceived = { Yellow=false, Blue=false, Red=false, Green=false },  -- Celebrity L3: claimed "Get an award"
   -- Celebrity hi-tech cashback: { color = { {amount, roundDue, levelAtPurchase, cardName}, ... } }
   celebrityCashbackRefunds = {},
+  -- Celebrity event card obligation: count of "events" played this turn (level action = 1, event cards = 1 each)
+  celebrityEventsThisTurn = { Yellow=0, Blue=0, Red=0, Green=0 },
 }
 
 -- =========================================================
@@ -903,13 +905,11 @@ local function addWoundedStatus(color)
   
   -- White doesn't get status tokens
   if color == "White" then
-    VOC.log("addWoundedStatus: Skipping White (testing mode)")
     return true
   end
   
   local psc = findPlayerStatusController()
   if not psc or not psc.call then
-    VOC.warn("Player Status Controller not found when adding WOUNDED status")
     return false
   end
   
@@ -918,7 +918,22 @@ local function addWoundedStatus(color)
   end)
   
   if not ok then
-    VOC.warn("Failed to add WOUNDED status to "..tostring(color))
+    return false
+  end
+  
+  -- Gangster crime: Victim loses 3 Health when WOUNDED
+  -- Inline health reduction to avoid chunking issues (addHealth might be nil in this chunk)
+  -- Use VOC.findStatsCtrl directly (chunk-safe via _G.WLB.VOC)
+  if color ~= "White" then
+    local stats = (VOC and VOC.findStatsCtrl) and VOC.findStatsCtrl(color) or nil
+    if stats and stats.call then
+      local healthOk = pcall(function()
+        return stats.call("applyDelta", { h = -3 })
+      end)
+      if healthOk then
+        safeBroadcastAll("💔 " .. color .. " is WOUNDED and loses 3 Health.", {1,0.5,0.5})
+      end
+    end
   end
   
   return ok
@@ -2161,6 +2176,14 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
 
       safeBroadcastAll("Live Street Performance: "..initiator.." performed. Participants gained +2 Satisfaction. Celebrity gained +1 Skill, +150 VIN, +"..celebSat.." Satisfaction (die "..die..").", {0.7,1,0.7})
     end
+    -- Record Celebrity level action as 1 event (counts toward event obligation)
+    state.celebrityEventsThisTurn = state.celebrityEventsThisTurn or { Yellow=0, Blue=0, Red=0, Green=0 }
+    local oldCount = tonumber(state.celebrityEventsThisTurn[initiator]) or 0
+    state.celebrityEventsThisTurn[initiator] = oldCount + 1
+    local newCount = state.celebrityEventsThisTurn[initiator]
+    if VOC.log then
+      VOC.log("Celebrity level action: " .. initiator .. " used Live Street Performance, event count: " .. oldCount .. " → " .. newCount)
+    end
 
   -- Celebrity Level 2 – Meet & Greet
   elseif id == "CELEB_L2_MEET_GREET" then
@@ -2196,6 +2219,14 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
       satAdd(initiator, celebSat)
       
       safeBroadcastAll("Meet & Greet: "..initiator.." met fans. Participants gained +1 Knowledge & +1 Satisfaction.", {0.7,1,0.7})
+    end
+    -- Record Celebrity level action as 1 event (counts toward event obligation)
+    state.celebrityEventsThisTurn = state.celebrityEventsThisTurn or { Yellow=0, Blue=0, Red=0, Green=0 }
+    local oldCount = tonumber(state.celebrityEventsThisTurn[initiator]) or 0
+    state.celebrityEventsThisTurn[initiator] = oldCount + 1
+    local newCount = state.celebrityEventsThisTurn[initiator]
+    if VOC.log then
+      VOC.log("Celebrity level action: " .. initiator .. " used Meet & Greet, event count: " .. oldCount .. " → " .. newCount)
     end
 
   -- Celebrity Special – Fan Talent Collaboration
@@ -2240,6 +2271,14 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
       -- TODO: Track AP obligations
       safeBroadcastToColor("+1 AP obligation per donation (manual tracking needed)", initiator, {0.7,0.7,1})
       safeBroadcastAll("Charity Stream: "..initiator.." raised "..donations.." donation(s).", {0.7,1,0.7})
+    end
+    -- Record Celebrity level action as 1 event (counts toward event obligation)
+    state.celebrityEventsThisTurn = state.celebrityEventsThisTurn or { Yellow=0, Blue=0, Red=0, Green=0 }
+    local oldCount = tonumber(state.celebrityEventsThisTurn[initiator]) or 0
+    state.celebrityEventsThisTurn[initiator] = oldCount + 1
+    local newCount = state.celebrityEventsThisTurn[initiator]
+    if VOC.log then
+      VOC.log("Celebrity level action: " .. initiator .. " used Charity Stream, event count: " .. oldCount .. " → " .. newCount)
     end
 
   -- Public Servant Level 1 – Income Tax Campaign
@@ -2724,6 +2763,7 @@ local function saveState()
     voluntaryWorkAP = state.voluntaryWorkAP or { Yellow=0, Blue=0, Red=0, Green=0 },
     celebrityAwardReceived = state.celebrityAwardReceived or { Yellow=false, Blue=false, Red=false, Green=false },
     celebrityCashbackRefunds = state.celebrityCashbackRefunds or {},
+  celebrityEventsThisTurn = state.celebrityEventsThisTurn or { Yellow=0, Blue=0, Red=0, Green=0 },
   }
   self.script_state = JSON.encode(data)
 end
@@ -3002,6 +3042,7 @@ function VOC_ResetForNewGame(params)
   state.crowdfundPoolTurnColor = {}
   state.voluntaryWorkAP = { Yellow=0, Blue=0, Red=0, Green=0 }
   state.celebrityAwardReceived = { Yellow=false, Blue=false, Red=false, Green=false }
+  state.celebrityEventsThisTurn = { Yellow=0, Blue=0, Red=0, Green=0 }
   state.currentPickerColor = nil
   selectionState.activeColor = nil
   selectionState.shownSummary = nil
@@ -3520,23 +3561,42 @@ function VOC_OnTurnEnd(params)
   end
   
   -- Celebrity: Check for automatic promotion when work AP quotas are met (work-based promotion)
+  -- Also check event card obligations (L2: at least 1 event, L3: at least 2 events)
   if vocation == VOC_CELEBRITY then
+    -- Check event card obligation
+    state.celebrityEventsThisTurn = state.celebrityEventsThisTurn or { Yellow=0, Blue=0, Red=0, Green=0 }
+    local eventsPlayed = tonumber(state.celebrityEventsThisTurn[color]) or 0
+    
+    if level >= 2 then
+      local requiredEvents = (level >= 3) and 2 or 1
+      local missingEvents = math.max(0, requiredEvents - eventsPlayed)
+      
+      if missingEvents > 0 then
+        local satPenalty = missingEvents * 3  -- -3 SAT per missing event
+        if satAdd(color, -satPenalty) then
+          safeBroadcastToColor("⚠️ Celebrity obligation not met: Played " .. eventsPlayed .. " event(s) this turn, need " .. requiredEvents .. " → -" .. satPenalty .. " Satisfaction", color, {1, 0.6, 0.2})
+          broadcastToAll("⚠️ " .. color .. " (Celebrity L" .. level .. ") failed event obligation: -" .. satPenalty .. " Satisfaction", {1, 0.7, 0.3})
+        end
+      else
+        safeBroadcastToColor("✅ Celebrity obligation met: Played " .. eventsPlayed .. " event(s), need " .. requiredEvents, color, {0.7, 1, 0.7})
+      end
+    end
+    
+    -- Reset event counter for next turn
+    state.celebrityEventsThisTurn[color] = 0
+    
     -- Check if Celebrity meets promotion requirements
     local canPromote, reason = VOC_CanPromote({color=color})
     if canPromote then
-      VOC.log("VOC_OnTurnEnd: Celebrity " .. color .. " meets promotion requirements, promoting automatically")
       local promoteOk, promoteErr = VOC_Promote({color=color})
       if promoteOk then
-        VOC.log("VOC_OnTurnEnd: Successfully promoted Celebrity " .. color)
         safeBroadcastToColor("🎉 Celebrity promotion! You have been automatically promoted!", color, {0.3, 1, 0.3})
       else
-        VOC.log("VOC_OnTurnEnd: Failed to promote Celebrity " .. color .. " - " .. tostring(promoteErr))
         safeBroadcastToColor("⚠️ Celebrity promotion failed: " .. tostring(promoteErr), color, {1, 0.6, 0.2})
       end
     else
       -- Surface why promotion did not happen so players see missing quotas (K/S/AP/money)
       if reason and reason ~= "" then
-        VOC.log("VOC_OnTurnEnd: Celebrity " .. color .. " cannot promote: " .. tostring(reason))
         safeBroadcastToColor("📋 Celebrity promotion requirements not met: " .. tostring(reason), color, {1, 0.85, 0.4})
       end
     end
@@ -5604,6 +5664,30 @@ function VOC_ApplyCrowdfundPoolForPurchase(params)
   return { amountFromPool = amountFromPool, playerPays = playerPays }
 end
 
+-- Record Celebrity event card play (for event card obligation tracking)
+function VOC_RecordCelebrityEventCardPlay(params)
+  local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
+  if not VOC then
+    return false
+  end
+  params = params or {}
+  local color = (VOC.normalizeColor and VOC.normalizeColor(params.color)) or (_G.VOC_normalizeColor and _G.VOC_normalizeColor(params.color))
+  if not color or color == "White" then
+    return false
+  end
+  
+  local vocation = state.vocations[color]
+  if vocation ~= VOC_CELEBRITY then
+    return false
+  end
+  
+  state.celebrityEventsThisTurn = state.celebrityEventsThisTurn or { Yellow=0, Blue=0, Red=0, Green=0 }
+  local oldCount = tonumber(state.celebrityEventsThisTurn[color]) or 0
+  state.celebrityEventsThisTurn[color] = oldCount + 1
+  
+  return true
+end
+
 -- Record Celebrity hi-tech purchase for cashback refund next round
 -- Params: { color = player color, pricePaid = actual price paid (after discounts), cardName = card name }
 function VOC_RecordCelebrityHiTechPurchase(params)
@@ -6192,6 +6276,26 @@ local function AddGangsterSatFromCrimeDie(color, onDone)
   end)
 end
 
+-- Gangster: Victim sorrow roll (crime against player only). After successful crime (victim wounded or money stolen), victim rolls die: 1-3 → -3 SAT, 4-6 → -5 SAT.
+local function AddVictimSorrowRoll(targetColor, onDone)
+  targetColor = normalizeColor(targetColor)
+  if not targetColor or targetColor == "White" then
+    if onDone then onDone() end
+    return
+  end
+  onDone = onDone or function() end
+  rollPhysicalDieAndRead(function(die, err)
+    if err or not die then
+      die = math.random(1, 6)
+    end
+    die = math.max(1, math.min(6, tonumber(die) or 1))
+    local satLoss = (die <= 3) and 3 or 5
+    satAdd(targetColor, -satLoss)
+    safeBroadcastAll("💔 "..tostring(targetColor).." loses "..tostring(satLoss).." Satisfaction (victim sorrow: roll "..tostring(die)..").", {1,0.5,0.5})
+    onDone()
+  end)
+end
+
 -- Gangster L1: Steal hi-tech from shop. Cost 3 AP; choose one open H card (STEAL button); roll die: 1-2 fail, 3-4 success + investigation, 5-6 success + heat only.
 function VOC_StartGangsterStealHitech(params)
   local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
@@ -6598,14 +6702,24 @@ function VOC_StartGangsterCrime(params)
           end
         end
 
-        -- Gangster satisfaction die (extra roll, result = +SAT), then Heat & Investigation
+        -- Normalize die value to ensure it's a number
+        die = tonumber(die) or 1
+        die = math.max(1, math.min(6, die))
+        
+        -- Check if crime was successful (die >= 3 means victim wounded or money stolen)
+        -- If die <= 2, we already returned early above, so we only reach here if crime succeeded
+        -- Flow: (1) Gangster satisfaction die, (2) Victim sorrow roll, (3) Investigation
         AddGangsterSatFromCrimeDie(initiatorColor, function()
-          RunCrimeInvestigation({
-            initiatorColor = initiatorColor,
-            vocationLevel = level,
-            crimeGainsVIN = actualStolenAmount,
-            targetColor = targetColor,
-          })
+          -- Victim sorrow roll: victim was wounded (always true if we reach here) or money was stolen
+          AddVictimSorrowRoll(targetColor, function()
+            -- Then run investigation
+            RunCrimeInvestigation({
+              initiatorColor = initiatorColor,
+              vocationLevel = level,
+              crimeGainsVIN = actualStolenAmount,
+              targetColor = targetColor,
+            })
+          end)
         end)
 
         -- Note: High-Tech item selection needs manual player action in the current system

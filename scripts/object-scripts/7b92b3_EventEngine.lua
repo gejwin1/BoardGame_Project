@@ -342,6 +342,33 @@ local function getSalaryPerAP(color)
   return math.max(0, salary)
 end
 
+-- Celebrity event card obligation: Record event card play for Celebrity players
+-- Called once per card play, right after card validation (before any early returns)
+-- This ensures ALL event board cards are tracked, including vouchers, instant, choice, dice cards
+local function recordCelebrityEventCardPlay(color, cardId, typeKey)
+  if not color or color == "White" then
+    return
+  end
+  
+  local vocCtrl = findOneByTags({TAG_VOCATIONS_CTRL})
+  if not vocCtrl or not vocCtrl.call then
+    return
+  end
+  
+  local ok, err = pcall(function()
+    -- VOC_GetVocation returns the vocation directly, not (ok, vocation)
+    local vocation = vocCtrl.call("VOC_GetVocation", { color = color })
+    
+    if not vocation then
+      return
+    end
+    
+    if vocation == "CELEBRITY" then
+      vocCtrl.call("VOC_RecordCelebrityEventCardPlay", { color = color })
+    end
+  end)
+end
+
 -- =========================================================
 -- SECTION 2) MONEY / SAT / STATS / AP
 -- =========================================================
@@ -3038,11 +3065,15 @@ end
 -- =========================================================
 
 local function playCardById(cardId, cardObj, explicitSlotIdx)
+  log("EventEngine: playCardById called for cardId=" .. tostring(cardId))
+  
   local color = getPlayerColor()
   if not color then
     warn("No active player color.")
     return STATUS.ERROR
   end
+  
+  log("EventEngine: playCardById - color=" .. tostring(color))
 
   local typeKey = CARD_TYPE[cardId]
   if not typeKey then
@@ -3050,6 +3081,8 @@ local function playCardById(cardId, cardObj, explicitSlotIdx)
     safeBroadcastTo(color, "⚠️ Unknown card ID: "..tostring(cardId), {1,0.6,0.2})
     return STATUS.ERROR
   end
+  
+  log("EventEngine: playCardById - typeKey=" .. tostring(typeKey))
 
   local def = TYPES[typeKey]
   if not def then
@@ -3057,6 +3090,11 @@ local function playCardById(cardId, cardObj, explicitSlotIdx)
     safeBroadcastTo(color, "⚠️ No TYPES def for: "..tostring(typeKey), {1,0.6,0.2})
     return STATUS.ERROR
   end
+  
+  -- Celebrity event card obligation: Record event card play IMMEDIATELY after card validation
+  -- This ensures ALL event board cards are tracked, including vouchers (which return early)
+  -- Track before any early returns so we don't miss any cards
+  recordCelebrityEventCardPlay(color, cardId, typeKey)
 
   -- VOUCHER-ONLY: grant token(s), move card to USED deck (no AP, no money, no other effects)
   if def.voucher then
@@ -3198,7 +3236,7 @@ local function playCardById(cardId, cardObj, explicitSlotIdx)
     safeBroadcastTo(color, "ℹ️ "..tostring(cardId).." -> TODO (mechanika jeszcze nie wdrożona).", {0.7,0.9,1})
     log("TODO played: "..tostring(cardId).." type="..tostring(typeKey).." note="..tostring(def.note or ""))
   end
-
+  
   finalizeCard(cardObj, def.kind, color)
   return STATUS.DONE
 end
