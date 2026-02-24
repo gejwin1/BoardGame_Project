@@ -626,6 +626,8 @@ local function isEstateOwned(color)
   return false
 end
 
+-- Apply housing + family satisfaction (estate base, owned=2x, +2 SAT per child). Applied at end of player's turn.
+-- No satisfaction if family exceeds estate capacity (e.g. L0 has only 1 space).
 local function onTurnStart_ApplyHousingAndFamilySatisfaction(color)
   if not color or color == "" then return end
 
@@ -1125,6 +1127,9 @@ local function endTurnProcessing(color)
   -- Automatically pay costs at end of turn
   onTurnEnd_PayCosts(color)
 
+  -- Housing & family satisfaction at end of turn: estate base (L1=1, L2=2, L3=3, L4=5; owned=2x), +2 SAT per child. None if family exceeds capacity.
+  onTurnStart_ApplyHousingAndFamilySatisfaction(color)
+
   -- Overworking satisfaction loss: 0-2 AP work → 0 loss; 3-4 → -1 SAT; 5-6 → -2; 7-8 → -3; 9 → -4. NGO Worker exempt.
   local workCount = apGetWorkCount(color)
   local voc = findOneByTags(TAG_VOCATIONS_CTRL)
@@ -1212,7 +1217,7 @@ local function setActiveByTurnIndex()
   onTurnStart_ApplySmartwatch(c)
   onTurnStart_ProcessInvestments(c)
   onTurnStart_AddRentalCosts(c)
-  onTurnStart_ApplyHousingAndFamilySatisfaction(c)
+  -- Housing/family satisfaction is applied at end of that player's turn, not at turn start
 end
 
 local function advanceTurn()

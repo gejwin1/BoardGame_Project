@@ -665,6 +665,13 @@ local state = {
   taxWaiverUsedAtLevel = { Yellow=nil, Blue=nil, Red=nil, Green=nil },
   voluntaryWorkAP = { Yellow=0, Blue=0, Red=0, Green=0 },  -- NGO Worker: AP spent on voluntary work (for award path B)
   celebrityAwardReceived = { Yellow=false, Blue=false, Red=false, Green=false },  -- Celebrity L3: claimed "Get an award"
+  -- Level 3 special reward: track if +10 SAT award has already been granted per player
+  l3SpecialAwardGiven = { Yellow=false, Blue=false, Red=false, Green=false },
+  -- Award progress (tracked per vocation, not tokens): used for L3 promotion and +10 SAT reward. Persist from L1/L2.
+  publicServantTaxCollections = { Yellow=0, Blue=0, Red=0, Green=0 },
+  socialWorkerCommunityEvents = { Yellow=0, Blue=0, Red=0, Green=0 },
+  ngoSocialCampaigns = { Yellow=0, Blue=0, Red=0, Green=0 },
+  gangsterCrimesNotCaught = { Yellow=0, Blue=0, Red=0, Green=0 },
   -- Celebrity hi-tech cashback: { color = { {amount, roundDue, levelAtPurchase, cardName}, ... } }
   celebrityCashbackRefunds = {},
   -- Celebrity event card obligation: count of "events" played this turn (level action = 1, event cards = 1 each)
@@ -2088,7 +2095,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
     -- Initiator gains +1 SAT per participant
     satAdd(initiator, #participants)
     safeBroadcastAll("Practical workshop: "..initiator.." gains +"..#participants.." Satisfaction!", {1,1,0.6})
-    if #participants > 0 then safeAddAwardToken(initiator) end
+    if #participants > 0 then addAwardProgress(initiator, VOC_SOCIAL_WORKER) end
     -- If all other players joined: +1 additional SAT & +1 Skill
     if allJoined and #participants > 0 then
       satAdd(initiator, 1)
@@ -2121,7 +2128,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
 
       local msg = "Community wellbeing session: "..initiator.." ran the event. Participants: "..table.concat(participants, ", ")
       safeBroadcastAll(msg, {0.7,1,0.7})
-      safeAddAwardToken(initiator)
+      addAwardProgress(initiator, VOC_SOCIAL_WORKER)
     end
 
   -- Social Worker Level 3 – Expose social case
@@ -2140,7 +2147,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
     end
     -- Initiator: +3 Satisfaction
     satAdd(initiator, 3)
-    if joinCount > 0 then safeAddAwardToken(initiator) end
+    if joinCount > 0 then addAwardProgress(initiator, VOC_SOCIAL_WORKER) end
     safeBroadcastAll("Social case exposed: "..initiator.." gains +3 Satisfaction.", {0.7,1,0.7})
 
   -- Celebrity Level 1 – Live Street Performance
@@ -2304,7 +2311,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
           totalCollected = totalCollected + collectTaxWithWaiver(c, tax, beneficiary)
         end
       end
-      if totalCollected > 0 then safeAddAwardToken(beneficiary) end
+      if totalCollected > 0 then addAwardProgress(beneficiary, VOC_PUBLIC_SERVANT) end
       safeBroadcastAll("Income Tax Campaign: Each player pays 15% of cash. "..beneficiary.." gains +1 Satisfaction.", {0.7,1,0.7})
       satAdd(beneficiary, 1)
     else
@@ -2317,7 +2324,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
           totalCollected = totalCollected + collectTaxWithWaiver(c, tax, beneficiary)
         end
       end
-      if totalCollected > 0 then safeAddAwardToken(beneficiary) end
+      if totalCollected > 0 then addAwardProgress(beneficiary, VOC_PUBLIC_SERVANT) end
       safeBroadcastAll("Income Tax Campaign: Each player pays 30% of cash. "..beneficiary.." gains +3 Satisfaction.", {0.7,1,0.7})
       satAdd(beneficiary, 3)
     end
@@ -2337,7 +2344,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
           totalCollected = totalCollected + collectTaxWithWaiver(c, 200, initiator)
         end
       end
-      if totalCollected > 0 then safeAddAwardToken(initiator) end
+      if totalCollected > 0 then addAwardProgress(initiator, VOC_PUBLIC_SERVANT) end
       safeBroadcastAll("Hi-Tech Tax Campaign: Each player pays 200 VIN per High-Tech item. "..initiator.." gains +2 Satisfaction.", {0.7,1,0.7})
       satAdd(initiator, 2)
     else
@@ -2347,7 +2354,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
           totalCollected = totalCollected + collectTaxWithWaiver(c, 400, initiator)
         end
       end
-      if totalCollected > 0 then safeAddAwardToken(initiator) end
+      if totalCollected > 0 then addAwardProgress(initiator, VOC_PUBLIC_SERVANT) end
       safeBroadcastAll("Hi-Tech Tax Campaign: Each player pays 400 VIN per High-Tech item. "..initiator.." gains +4 Satisfaction.", {0.7,1,0.7})
       satAdd(initiator, 4)
     end
@@ -2367,7 +2374,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
           totalCollected = totalCollected + collectTaxWithWaiver(c, 200, initiator)
         end
       end
-      if totalCollected > 0 then safeAddAwardToken(initiator) end
+      if totalCollected > 0 then addAwardProgress(initiator, VOC_PUBLIC_SERVANT) end
       safeBroadcastAll("Property Tax Campaign: Each player pays 200 VIN per property level. "..initiator.." gains +3 Satisfaction.", {0.7,1,0.7})
       satAdd(initiator, 3)
     else
@@ -2377,7 +2384,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
           totalCollected = totalCollected + collectTaxWithWaiver(c, 400, initiator)
         end
       end
-      if totalCollected > 0 then safeAddAwardToken(initiator) end
+      if totalCollected > 0 then addAwardProgress(initiator, VOC_PUBLIC_SERVANT) end
       safeBroadcastAll("Property Tax Campaign: Each player pays 400 VIN per property level. "..initiator.." gains +6 Satisfaction.", {0.7,1,0.7})
       satAdd(initiator, 6)
     end
@@ -2391,7 +2398,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
     if die <= 2 then
       safeBroadcastAll("Start Charity: Nothing happens.", {0.9,0.9,0.9})
     else
-      safeAddAwardToken(initiator)
+      addAwardProgress(initiator, VOC_NGO_WORKER)
       if die <= 4 then
         for _, c in ipairs(COLORS) do
           if c ~= initiator and isPlayableColor(c) then moneySpend(c, 200) end
@@ -2415,7 +2422,7 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
     if die <= 2 then
       safeBroadcastAll("Crowdfunding Campaign: Nothing happens.", {0.9,0.9,0.9})
     else
-      safeAddAwardToken(initiator)
+      addAwardProgress(initiator, VOC_NGO_WORKER)
       if die <= 4 then
         for _, c in ipairs(COLORS) do
           if c ~= initiator and isPlayableColor(c) then moneySpend(c, 250) end
@@ -2458,8 +2465,8 @@ resolveInteractionEffectsWithDie = function(id, initiator, die)
 
     -- Initiator: +1 SAT per participant; +1 Skill only when everybody said No (if at least one said Yes, no skill)
     satAdd(initiator, #participants)
-    -- Award token only when campaign was successful: at least one other player said Yes (supported)
-    if #participants > 0 then safeAddAwardToken(initiator) end
+    -- Award progress when campaign was successful: at least one other player said Yes (supported)
+    if #participants > 0 then addAwardProgress(initiator, VOC_NGO_WORKER) end
     if #participants == 0 and ignoreCount > 0 then
       addSkills(initiator, 1)
       safeBroadcastAll("Advocacy Campaign: "..initiator.." ran the event. Everyone said No → +1 Skill.", {0.7,1,0.7})
@@ -2730,6 +2737,11 @@ local function loadState()
       state.lockdownPending = data.lockdownPending or {}
       state.voluntaryWorkAP = data.voluntaryWorkAP or state.voluntaryWorkAP or { Yellow=0, Blue=0, Red=0, Green=0 }
       state.celebrityAwardReceived = data.celebrityAwardReceived or state.celebrityAwardReceived or { Yellow=false, Blue=false, Red=false, Green=false }
+      state.l3SpecialAwardGiven = data.l3SpecialAwardGiven or state.l3SpecialAwardGiven or { Yellow=false, Blue=false, Red=false, Green=false }
+      state.publicServantTaxCollections = data.publicServantTaxCollections or state.publicServantTaxCollections or { Yellow=0, Blue=0, Red=0, Green=0 }
+      state.socialWorkerCommunityEvents = data.socialWorkerCommunityEvents or state.socialWorkerCommunityEvents or { Yellow=0, Blue=0, Red=0, Green=0 }
+      state.ngoSocialCampaigns = data.ngoSocialCampaigns or state.ngoSocialCampaigns or { Yellow=0, Blue=0, Red=0, Green=0 }
+      state.gangsterCrimesNotCaught = data.gangsterCrimesNotCaught or state.gangsterCrimesNotCaught or { Yellow=0, Blue=0, Red=0, Green=0 }
       -- Backfill: if a player has a vocation but no levelUpRound (old save), treat as round 1
       for _, c in ipairs(COLORS) do
         if state.vocations[c] and (state.levelUpRound[c] == nil or state.levelUpRound[c] == 0) then
@@ -2763,7 +2775,12 @@ local function saveState()
     voluntaryWorkAP = state.voluntaryWorkAP or { Yellow=0, Blue=0, Red=0, Green=0 },
     celebrityAwardReceived = state.celebrityAwardReceived or { Yellow=false, Blue=false, Red=false, Green=false },
     celebrityCashbackRefunds = state.celebrityCashbackRefunds or {},
-  celebrityEventsThisTurn = state.celebrityEventsThisTurn or { Yellow=0, Blue=0, Red=0, Green=0 },
+    celebrityEventsThisTurn = state.celebrityEventsThisTurn or { Yellow=0, Blue=0, Red=0, Green=0 },
+    l3SpecialAwardGiven = state.l3SpecialAwardGiven or { Yellow=false, Blue=false, Red=false, Green=false },
+    publicServantTaxCollections = state.publicServantTaxCollections or { Yellow=0, Blue=0, Red=0, Green=0 },
+    socialWorkerCommunityEvents = state.socialWorkerCommunityEvents or { Yellow=0, Blue=0, Red=0, Green=0 },
+    ngoSocialCampaigns = state.ngoSocialCampaigns or { Yellow=0, Blue=0, Red=0, Green=0 },
+    gangsterCrimesNotCaught = state.gangsterCrimesNotCaught or { Yellow=0, Blue=0, Red=0, Green=0 },
   }
   self.script_state = JSON.encode(data)
 end
@@ -3043,6 +3060,11 @@ function VOC_ResetForNewGame(params)
   state.voluntaryWorkAP = { Yellow=0, Blue=0, Red=0, Green=0 }
   state.celebrityAwardReceived = { Yellow=false, Blue=false, Red=false, Green=false }
   state.celebrityEventsThisTurn = { Yellow=0, Blue=0, Red=0, Green=0 }
+  state.l3SpecialAwardGiven = { Yellow=false, Blue=false, Red=false, Green=false }
+  state.publicServantTaxCollections = { Yellow=0, Blue=0, Red=0, Green=0 }
+  state.socialWorkerCommunityEvents = { Yellow=0, Blue=0, Red=0, Green=0 }
+  state.ngoSocialCampaigns = { Yellow=0, Blue=0, Red=0, Green=0 }
+  state.gangsterCrimesNotCaught = { Yellow=0, Blue=0, Red=0, Green=0 }
   state.currentPickerColor = nil
   selectionState.activeColor = nil
   selectionState.shownSummary = nil
@@ -3293,7 +3315,7 @@ end
 local TAG_STATUS_EXPERIENCE = "WLB_STATUS_EXPERIENCE"
 local TAG_STATUS_AWARD = "WLB_STATUS_AWARD"
 
--- Add one award token for a player (Public Servant, Social Worker, NGO, Gangster award progress)
+-- Add one award token for a player (legacy; award progress now tracked via state counters)
 local function addAwardToken(color)
   if not color or color == "White" then return false end
   local psc = findPlayerStatusController()
@@ -3303,6 +3325,23 @@ local function addAwardToken(color)
   end)
   if ok then safeBroadcastAll("🏆 Award token received: " .. color, {0.9,0.9,0.5}) end
   return ok
+end
+
+-- Increment vocation-specific award progress (replaces token-based tracking for L3 promotion and +10 SAT reward).
+-- Counters persist from L1/L2 and are never reset on promotion; when player reaches L3, quotas met earlier are remembered.
+local function addAwardProgress(color, vocationType)
+  if not color or color == "White" then return end
+  if state.vocations[color] ~= vocationType then return end
+  if vocationType == VOC_PUBLIC_SERVANT then
+    state.publicServantTaxCollections[color] = (state.publicServantTaxCollections[color] or 0) + 1
+  elseif vocationType == VOC_SOCIAL_WORKER then
+    state.socialWorkerCommunityEvents[color] = (state.socialWorkerCommunityEvents[color] or 0) + 1
+  elseif vocationType == VOC_NGO_WORKER then
+    state.ngoSocialCampaigns[color] = (state.ngoSocialCampaigns[color] or 0) + 1
+  elseif vocationType == VOC_GANGSTER then
+    state.gangsterCrimesNotCaught[color] = (state.gangsterCrimesNotCaught[color] or 0) + 1
+  end
+  saveState()
 end
 
 -- Callable: add award token (avoids "attempt to call nil" when resolveInteractionEffects runs in a different chunk)
@@ -3327,6 +3366,92 @@ local function getAwardTokenCount(color)
   return 0
 end
 
+-- Check whether a Level 3 vocation has met its special award quotas (Knowledge, Skills, and vocation-specific condition).
+-- Used to grant a one-time +10 Satisfaction reward at Level 3.
+-- Counters (e.g. ngoSocialCampaigns, socialWorkerCommunityEvents) persist from L1/L2; progress made before promotion is remembered.
+local function meetsLevel3AwardQuotas(color)
+  local vocation = state.vocations[color]
+  if not vocation then return false end
+  local level = state.levels[color] or 1
+  if level ~= 3 then return false end
+
+  local vocData = VOCATION_DATA[vocation]
+  if not vocData or not vocData.levels or not vocData.levels[3] then return false end
+  local promotion = vocData.levels[3].promotion
+  if not promotion then return false end
+
+  -- Check Knowledge/Skills thresholds
+  local statsCtrl = findStatsController(color)
+  if not statsCtrl then return false end
+  local knowledge, skills = 0, 0
+  local ok1, k1 = pcall(function() return statsCtrl.call("getKnowledge") end)
+  local ok2, s1 = pcall(function() return statsCtrl.call("getSkills") end)
+  if ok1 and (tonumber(k1) or k1) ~= nil then
+    knowledge = tonumber(k1) or 0
+  end
+  if ok2 and (tonumber(s1) or s1) ~= nil then
+    skills = tonumber(s1) or 0
+  end
+  if (not ok1 or not ok2) or (knowledge == 0 and skills == 0) then
+    local ok3, st = pcall(function() return statsCtrl.call("getState") end)
+    if ok3 and type(st) == "table" then
+      knowledge = tonumber(st.k) or knowledge
+      skills = tonumber(st.s) or skills
+    end
+  end
+  if knowledge < (promotion.knowledge or 0) then return false end
+  if skills < (promotion.skills or 0) then return false end
+
+  -- Vocation-specific Level 3 award conditions (use tracked counters, not tokens)
+  if vocation == VOC_PUBLIC_SERVANT then
+    -- No special award this year if work obligation failed; need 2 successful tax collections
+    if state.noSpecialAwardThisYear[color] then return false end
+    local n = state.publicServantTaxCollections[color] or 0
+    return n >= 2
+  elseif vocation == VOC_SOCIAL_WORKER then
+    local n = state.socialWorkerCommunityEvents[color] or 0
+    return n >= 2
+  elseif vocation == VOC_NGO_WORKER then
+    local campaigns = state.ngoSocialCampaigns[color] or 0
+    local volAP = state.voluntaryWorkAP[color] or 0
+    if campaigns >= 2 then
+      return true  -- Path A: 2 social campaigns
+    elseif campaigns >= 1 and volAP >= 10 then
+      return true  -- Path B: 1 campaign + 10 AP voluntary work
+    else
+      return false
+    end
+  elseif vocation == VOC_ENTREPRENEUR then
+    -- Need L3/L4 housing and 2 hi-tech items
+    local tokenEngine = findTokenEngine()
+    local housingLevel = "L0"
+    if tokenEngine and tokenEngine.call then
+      local ok, info = pcall(function() return tokenEngine.call("TE_GetFamilyInfo_ARGS", { color = color }) end)
+      if ok and info and info.housingLevel then housingLevel = info.housingLevel end
+    end
+    if housingLevel ~= "L3" and housingLevel ~= "L4" then return false end
+    local shopList = VOC.getObjectsWithTagSafe("WLB_SHOP_ENGINE") or {}
+    local hiTechCount = 0
+    for _, shop in ipairs(shopList) do
+      if shop and shop.call then
+        local ok, list = pcall(function() return shop.call("API_getOwnedHiTech", { color = color }) end)
+        if ok and type(list) == "table" then hiTechCount = #list; break end
+      end
+    end
+    return hiTechCount >= 2
+  elseif vocation == VOC_GANGSTER then
+    local n = state.gangsterCrimesNotCaught[color] or 0
+    return n >= 2
+  elseif vocation == VOC_CELEBRITY then
+    -- Celebrity award: 10 AP worked at L3 and 4000 VIN paid via CELEB_L3_GET_AWARD
+    -- We treat the "Get an award" action as the trigger; here we just require that it was taken.
+    return state.celebrityAwardReceived and state.celebrityAwardReceived[color] == true
+  end
+
+  return false
+end
+
+
 function VOC_GetVocationData(params)
   local VOC = _G.VOC or (_G.WLB and _G.WLB.VOC) or nil
   if not VOC then return nil end
@@ -3347,6 +3472,44 @@ local function getExperienceTokenCount(color)
   end)
   if ok and type(count) == "number" and count >= 0 then return count end
   return 0
+end
+
+-- Max experience tokens a player may have: only enough to level up to L3 (L1→L2 + L2→L3 for standard vocations).
+-- Returns 0 if already L3 or vocation does not use experience (e.g. Celebrity).
+local function getMaxExperienceToReachL3(color)
+  local vocation = state.vocations[color]
+  if not vocation then return 0 end
+  local level = state.levels[color] or 1
+  if level >= 3 then return 0 end
+  local vocData = VOCATION_DATA[vocation]
+  if not vocData or not vocData.levels then return 0 end
+  local p1 = vocData.levels[1] and vocData.levels[1].promotion
+  local p2 = vocData.levels[2] and vocData.levels[2].promotion
+  if level == 1 then
+    local e1 = (p1 and p1.type == "standard" and (p1.experience or 0)) or 0
+    local e2 = (p2 and p2.type == "standard" and (p2.experience or 0)) or 0
+    return e1 + e2
+  else
+    return (p2 and p2.type == "standard" and (p2.experience or 0)) or 0
+  end
+end
+
+-- Check and grant Level 3 special reward (+10 SAT) once per player, when all Level 3 quotas are met.
+-- This does NOT change level; it’s an extra reward for fully meeting Level 3 vocation conditions.
+local function checkAndGrantL3SpecialAward(color)
+  if not color or color == "White" then return end
+  if not state.l3SpecialAwardGiven or state.l3SpecialAwardGiven[color] then return end
+  local level = state.levels[color] or 1
+  if level < 3 then return end  -- Award only when at L3; quotas met at L2 are checked after promotion
+  if not meetsLevel3AwardQuotas(color) then return end
+
+  -- Conceptually: player “earns” a special experience token and immediately converts it into +10 SAT.
+  -- We don’t keep the token; we only apply the Satisfaction reward once.
+  if satAdd(color, 10) then
+    state.l3SpecialAwardGiven[color] = true
+    saveState()
+    safeBroadcastAll("🎁 " .. color .. " completed Level 3 vocation quotas → +10 Satisfaction!", {0.7,1,0.7})
+  end
 end
 
 -- Called by TurnController at end of each round (when turn wraps to next round). Work obligation + experience tokens.
@@ -3414,6 +3577,13 @@ function VOC_OnRoundEnd(params)
       giveExperience = false
     end
 
+    -- Cap: no experience tokens at L3 (unused); never grant more than needed to reach L3
+    if level >= 3 then
+      giveExperience = false
+    elseif giveExperience and getExperienceTokenCount(color) >= getMaxExperienceToReachL3(color) then
+      giveExperience = false
+    end
+
     if giveExperience and tokenEngine and tokenEngine.call then
       pcall(function()
         tokenEngine.call("TE_AddStatus_ARGS", { color = color, statusTag = TAG_STATUS_EXPERIENCE })
@@ -3424,6 +3594,9 @@ function VOC_OnRoundEnd(params)
         safeBroadcastToColor("📋 Experience token received (1 per year).", color, {0.5, 1, 0.6})
       end
     end
+
+    -- After round processing, check for Level 3 special reward (Public Servant and others).
+    checkAndGrantL3SpecialAward(color)
 
     state.workAPThisRound[color] = 0
     end -- vocation and not White
@@ -3605,9 +3778,16 @@ function VOC_OnTurnEnd(params)
   
   -- Other vocations: give 1 experience token per turn (just for having the vocation)
   -- This applies to: Social Worker, NGO Worker, Entrepreneur, Gangster
-  -- They get 1 token per turn regardless of whether they worked
+  -- Cap: no tokens at L3; never grant more than needed to reach L3
   local giveExperience = true
-  
+  if level >= 3 then
+    giveExperience = false
+  elseif getExperienceTokenCount(color) >= getMaxExperienceToReachL3(color) then
+    giveExperience = false
+  end
+
+  local didGiveToken = false
+
   if giveExperience and tokenEngine and tokenEngine.call then
     local addOk, addErr = pcall(function()
       return tokenEngine.call("TE_AddStatus_ARGS", { color = color, statusTag = TAG_STATUS_EXPERIENCE })
@@ -3616,30 +3796,30 @@ function VOC_OnTurnEnd(params)
       local newCount = getExperienceTokenCount(color)
       VOC.log("VOC_OnTurnEnd: Added experience token to " .. color .. " (new count: " .. tostring(newCount) .. ")")
       safeBroadcastToColor("📋 Experience token received (1 per turn).", color, {0.5, 1, 0.6})
-      
-      -- Check promotion eligibility AFTER turn ends with a delay
-      -- Wait 5 seconds after turn ends before checking for promotion
-      Wait.time(function()
-        local canPromote, reason = VOC_CanPromote({color=color})
-        if canPromote then
-          VOC.log("VOC_OnTurnEnd: " .. color .. " meets promotion requirements after turn ended, promoting now")
-          local promoteOk, promoteErr = VOC_Promote({color=color})
-          if promoteOk then
-            VOC.log("VOC_OnTurnEnd: Successfully promoted " .. color)
-          else
-            VOC.log("VOC_OnTurnEnd: Failed to promote " .. color .. " - " .. tostring(promoteErr))
-          end
-        end
-      end, 5.0)  -- Wait 5 seconds after turn ends before checking for promotion
-      
-      saveState()
-      return true
+      didGiveToken = true
     else
       VOC.log("VOC_OnTurnEnd: Failed to add experience token to " .. color .. " - " .. tostring(addErr))
     end
   end
+
+  -- Always check promotion eligibility AFTER turn ends, even if no new experience token was granted
+  Wait.time(function()
+    local canPromote, reason = VOC_CanPromote({color=color})
+    if canPromote then
+      VOC.log("VOC_OnTurnEnd: " .. color .. " meets promotion requirements after turn ended, promoting now")
+      local promoteOk, promoteErr = VOC_Promote({color=color})
+      if promoteOk then
+        VOC.log("VOC_OnTurnEnd: Successfully promoted " .. color)
+      else
+        VOC.log("VOC_OnTurnEnd: Failed to promote " .. color .. " - " .. tostring(promoteErr))
+      end
+    end
+  end, 5.0)
+
+  -- After turn-end processing, check for Level 3 special reward (Social Worker, NGO, Entrepreneur, Gangster, Celebrity).
+  checkAndGrantL3SpecialAward(color)
   
-  return false
+  return didGiveToken
 end
 
 -- =========================================================
@@ -5326,7 +5506,7 @@ function VOC_StartNGOCharity(params)
     if die <= 2 then
       safeBroadcastAll("Start Charity: Nothing happens.", {0.9,0.9,0.9})
     elseif die <= 4 then
-      addAwardToken(initiatorColor)
+      addAwardProgress(initiatorColor, VOC_NGO_WORKER)
       -- Each player pays 200 VIN
       for _, c in ipairs(COLORS) do
         if c ~= initiatorColor and isPlayableColor(c) then
@@ -5335,7 +5515,7 @@ function VOC_StartNGOCharity(params)
       end
       safeBroadcastAll("Start Charity: Each player pays 200 VIN.", {0.7,1,0.7})
     else
-      addAwardToken(initiatorColor)
+      addAwardProgress(initiatorColor, VOC_NGO_WORKER)
       -- Each player pays 400 VIN; initiator gains 400 VIN reward
       for _, c in ipairs(COLORS) do
         if c ~= initiatorColor and isPlayableColor(c) then
@@ -5577,7 +5757,7 @@ function VOC_StartNGOCrowdfunding(params)
     if die <= 2 then
       safeBroadcastAll("Crowdfunding Campaign: Nothing happens.", {0.9,0.9,0.9})
     elseif die <= 4 then
-      addAwardToken(actorColor)
+      addAwardProgress(actorColor, VOC_NGO_WORKER)
       local totalRaised = 0
       for _, c in ipairs(COLORS) do
         if c ~= actorColor and isPlayableColor(c) then
@@ -5601,7 +5781,7 @@ function VOC_StartNGOCrowdfunding(params)
         safeBroadcastAll("Crowdfunding Campaign: Each player pays up to 250 VIN to "..actorColor.." (only if they have it). Total raised: 0 VIN.", {0.7,1,0.7})
       end
     else
-      addAwardToken(actorColor)
+      addAwardProgress(actorColor, VOC_NGO_WORKER)
       local totalRaised = 0
       for _, c in ipairs(COLORS) do
         if c ~= actorColor and isPlayableColor(c) then
@@ -6519,7 +6699,7 @@ function VOC_GangsterStealHitechCardChosen(params)
       safeBroadcastAll("Steal hi-tech: Success (3-4). Investigation starts.", {0.7,1,0.7})
     else
       safeBroadcastAll("Steal hi-tech: Success (5-6). Heat +1.", {0.7,1,0.7})
-      addAwardToken(color)
+      addAwardProgress(color, VOC_GANGSTER)
       local pawn = findHeatPawn()
       if pawn and pawn.call then
         pcall(function() pawn.call("AddHeat", 1) end)
@@ -6775,7 +6955,7 @@ function RunCrimeInvestigation(params)
     -- Step 2: Apply outcome (punishment or dismiss)
     if result <= 2 then
       safeBroadcastAll("Investigation: No evidence found. Case dismissed.", {0.85, 0.85, 0.85})
-      addAwardToken(initiatorColor)
+      addAwardProgress(initiatorColor, VOC_GANGSTER)
       pcall(function() pawn.call("AddHeat", 1) end)
       safeBroadcastAll("Heat +1 (police more cautious).", {0.7, 0.8, 1})
       return
@@ -7068,24 +7248,24 @@ function VOC_CanPromote(params)
       if state.noSpecialAwardThisYear[color] then
         return false, "No special award this year (work obligation not met)"
       end
-      local awardTokens = getAwardTokenCount(color)
-      if awardTokens < 2 then
-        return false, "Need 2 award tokens from successful tax collections (have " .. tostring(awardTokens) .. ")"
+      local n = state.publicServantTaxCollections[color] or 0
+      if n < 2 then
+        return false, "Need 2 successful tax collections (have " .. tostring(n) .. ")"
       end
     elseif vocation == VOC_SOCIAL_WORKER then
-      local awardTokens = getAwardTokenCount(color)
-      if awardTokens < 2 then
-        return false, "Need 2 award tokens from community events with participants (have " .. tostring(awardTokens) .. ")"
+      local n = state.socialWorkerCommunityEvents[color] or 0
+      if n < 2 then
+        return false, "Need 2 community events with at least one participant each (have " .. tostring(n) .. ")"
       end
     elseif vocation == VOC_NGO_WORKER then
-      local awardTokens = getAwardTokenCount(color)
+      local campaigns = state.ngoSocialCampaigns[color] or 0
       local volAP = state.voluntaryWorkAP[color] or 0
-      if awardTokens >= 2 then
-        -- path A: 2 campaigns
-      elseif awardTokens >= 1 and volAP >= 10 then
+      if campaigns >= 2 then
+        -- path A: 2 social campaigns
+      elseif campaigns >= 1 and volAP >= 10 then
         -- path B: 1 campaign + 10 AP voluntary work
       else
-        return false, "Need 2 award tokens from social campaigns, or 1 token + 10 AP voluntary work (have " .. tostring(awardTokens) .. " tokens, " .. tostring(volAP) .. " AP voluntary)"
+        return false, "Need 2 social campaigns, or 1 campaign + 10 AP voluntary work (have " .. tostring(campaigns) .. " campaigns, " .. tostring(volAP) .. " AP voluntary)"
       end
     elseif vocation == VOC_ENTREPRENEUR then
       local tokenEngine = findTokenEngine()
@@ -7109,9 +7289,9 @@ function VOC_CanPromote(params)
         return false, "Need 2 High-Tech items (have " .. tostring(hiTechCount) .. ")"
       end
     elseif vocation == VOC_GANGSTER then
-      local awardTokens = getAwardTokenCount(color)
-      if awardTokens < 2 then
-        return false, "Need 2 award tokens from crimes not caught (have " .. tostring(awardTokens) .. ")"
+      local n = state.gangsterCrimesNotCaught[color] or 0
+      if n < 2 then
+        return false, "Need 2 crimes without getting caught (have " .. tostring(n) .. ")"
       end
     else
       return false, "Unknown award vocation"
@@ -7166,7 +7346,8 @@ function VOC_Promote(params)
   end
   
   -- Consume experience tokens if this was a standard promotion
-  -- Tokens are removed from player's board and returned to the pool
+  -- Tokens are removed from player's board and returned to the pool.
+  -- When promoting to L3, remove ALL experience tokens so player has 0 (they are unused at L3).
   local currentLevelData = vocationData.levels[oldLevel]
   if currentLevelData and currentLevelData.promotion and currentLevelData.promotion.type == "standard" then
     local needTokens = currentLevelData.promotion.experience or 0
@@ -7174,25 +7355,26 @@ function VOC_Promote(params)
       local tokenEngine = findTokenEngine()
       if tokenEngine and tokenEngine.call then
         local beforeCount = getExperienceTokenCount(color)
-        VOC.log("Promotion: Removing " .. tostring(needTokens) .. " experience tokens from " .. color .. " (current count: " .. tostring(beforeCount) .. ")")
+        local toRemove = (newLevel == 3) and beforeCount or math.min(needTokens, beforeCount)
+        VOC.log("Promotion: Removing " .. tostring(toRemove) .. " experience tokens from " .. color .. " (current count: " .. tostring(beforeCount) .. ", promoting to L" .. tostring(newLevel) .. ")")
         
         -- Remove tokens one at a time using sequential Wait.time callbacks (same pattern as AP refunds in EventEngine)
         -- This ensures each removal completes before the next one starts, preventing race conditions
         -- Each TE_RemoveStatus triggers TE_RefreshStatuses which uses async Wait.time operations
         -- Need longer delays to ensure each refresh fully completes before next removal
         local removedCount = 0
-        for i = 1, needTokens do
+        for i = 1, toRemove do
           Wait.time(function()
             local removeOk, removeErr = pcall(function()
               return tokenEngine.call("TE_RemoveStatus_ARGS", { color = color, statusTag = TAG_STATUS_EXPERIENCE })
             end)
             if removeOk then
               removedCount = removedCount + 1
-              VOC.log("Promotion: Removed token " .. i .. " of " .. needTokens .. " from " .. color)
+              VOC.log("Promotion: Removed token " .. i .. " of " .. toRemove .. " from " .. color)
               
               -- After each removal, wait and verify the token count before proceeding to next removal
               -- This ensures the refresh from this removal completes before starting the next
-              if i < needTokens then
+              if i < toRemove then
                 Wait.time(function()
                   local currentCount = getExperienceTokenCount(color)
                   local expectedCount = beforeCount - removedCount
@@ -7207,8 +7389,8 @@ function VOC_Promote(params)
             end
             
             -- After last removal, wait for tokens to settle and then verify
-            if i == needTokens then
-              VOC.log("Promotion: All " .. tostring(needTokens) .. " tokens removed, waiting for refreshes to complete")
+            if i == toRemove then
+              VOC.log("Promotion: All " .. tostring(toRemove) .. " tokens removed, waiting for refreshes to complete")
               -- Add longer delay to let tokens settle and ensure all async operations complete
               -- This prevents round-end refreshes from restoring tokens
               Wait.time(function()
@@ -7228,13 +7410,13 @@ function VOC_Promote(params)
                     saveState()  -- Save state after refresh to ensure consistency
                     
                     local afterCount = getExperienceTokenCount(color)
-                    VOC.log("Promotion: Token removal complete for " .. color .. " (removed: " .. tostring(removedCount) .. ", before: " .. tostring(beforeCount) .. ", after: " .. tostring(afterCount) .. ", expected: " .. tostring(beforeCount - needTokens) .. ")")
+                    VOC.log("Promotion: Token removal complete for " .. color .. " (removed: " .. tostring(removedCount) .. ", before: " .. tostring(beforeCount) .. ", after: " .. tostring(afterCount) .. ", expected: " .. tostring(beforeCount - toRemove) .. ")")
                     
                     -- If tokens are still there after forced refresh, they may have been restored by round-end processing
                     -- Remove them again using the same sequential pattern
-                    if afterCount ~= (beforeCount - needTokens) then
+                    if afterCount ~= (beforeCount - toRemove) then
                       VOC.warn("Promotion: Token count incorrect for " .. color .. " after refresh - tokens may have been restored, removing again")
-                      local remaining = afterCount - (beforeCount - needTokens)
+                      local remaining = afterCount - (beforeCount - toRemove)
                       if remaining > 0 then
                         VOC.log("Promotion: Removing " .. tostring(remaining) .. " restored tokens using sequential pattern")
                         for j = 1, remaining do
@@ -7253,8 +7435,8 @@ function VOC_Promote(params)
                                   Wait.time(function()
                                     saveState()
                                     local finalCount = getExperienceTokenCount(color)
-                                    VOC.log("Promotion: Final token count after additional removal: " .. tostring(finalCount) .. " (expected: " .. tostring(beforeCount - needTokens) .. ")")
-                                    if finalCount ~= (beforeCount - needTokens) then
+                                    VOC.log("Promotion: Final token count after additional removal: " .. tostring(finalCount) .. " (expected: " .. tostring(beforeCount - toRemove) .. ")")
+                                    if finalCount ~= (beforeCount - toRemove) then
                                       VOC.warn("CRITICAL: Tokens still not removed correctly for " .. color .. " after all attempts")
                                     end
                                   end, 3.0)  -- Increased delay for final verification
@@ -7289,6 +7471,12 @@ function VOC_Promote(params)
   
   VOC.log("Promoted: " .. color .. " " .. vocation .. " Level " .. oldLevel .. " → " .. newLevel)
   broadcastToAll(color .. " promoted to " .. vocationData.name .. " - " .. newLevelData.jobTitle, {0.3, 1, 0.3})
+  
+  -- When promoting to L3, immediately check if they already met L3 award quotas (e.g. campaigns/events done at L1 or L2).
+  -- Counters persist across levels; quotas met before promotion are remembered and rewarded here.
+  if newLevel == 3 then
+    checkAndGrantL3SpecialAward(color)
+  end
   
   return true
 end
